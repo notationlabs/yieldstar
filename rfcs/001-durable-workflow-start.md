@@ -82,11 +82,6 @@ interface StepRunner {
 }
 ```
 
-The start request will be identified by:
-
-- the caller's execution ID; and
-- the step key.
-
 Parameters will accept:
 
 - `null`;
@@ -111,13 +106,7 @@ Parameters will reject:
 - symbols;
 - reference cycles.
 
-Arrays will contain exactly one own data property for every index from zero to `length - 1`, plus the built-in non-enumerable `length` property. Other string or symbol properties and accessors will be invalid.
-
 `@yieldstar/core` will export the `durableValueCodec` value. Its `encode` operation will validate recursively and return either an error message or one canonical JSON string. It will sort object keys and encode `-0` as `0`.
-
-Runtime clients will be the only validation boundary. If parameters are present, `WorkflowStartClient` will call `durableValueCodec.encode` before reading or writing start state. It will return `INVALID_START_PARAMETERS` when encoding fails.
-
-The start-request record will store whether parameters were omitted and will store the canonical string when they are present. Missing parameters and an empty object will not match.
 
 ## Runtime API
 
@@ -136,6 +125,7 @@ interface ExecutionClient {
       }
   >
 }
+
 interface WorkflowStartClient {
   start(request: {
     requestId: {
@@ -168,66 +158,24 @@ declare class WorkflowStartError extends Error {
     message: string
   )
 }
-
-declare class StepStart extends StepResponse {
-  readonly type = "step-start"
-  constructor(
-    readonly workflowId: string,
-    readonly params?: DurableObject
-  )
-}
-
-declare class WorkflowFailed extends StepResponse {
-  readonly type = "workflow-failed"
-  constructor(readonly error: Error)
-}
 ```
 
-These types will be exported from `@yieldstar/core`. `WorkflowRunner` will receive a `WorkflowStartClient` and pass it to the workflow driver through `WorkflowGeneratorParams`.
+## Required Semantics
 
-`step.start` will first yield the existing step key and recorded-result check. When no result exists, it will yield `StepStart`.
-
-The workflow driver will then:
-
-1. call `WorkflowStartClient.start`;
-2. use the current execution ID and step key as the start-request ID;
-3. convert `accepted` to `StepResult`;
-4. construct a `WorkflowStartError` and convert it to `StepError` when the client returns `rejected`;
-5. record that response; and
-6. resume the paused `step.start` generator.
-
-`step.start` will return the `{ executionId }` object from `StepResult`. It will throw the error from `StepError`.
-
-`WorkflowStartError` will be the only runtime value for a rejected start. The workflow driver will be its only construction site. Step-error serialization will restore the class and its code on replay.
-
-The runtime will keep three records with separate purposes:
-
-1. An execution-admission record, keyed by execution ID, will reserve that ID across the runtime.
-2. A start-request record, keyed by the caller's execution ID and step key, will own the target execution ID, workflow ID, parameter-presence flag, and canonical parameters.
-3. A queued target will refer to the start-request record and contain only delivery state.
-
-Execution-admission and start-request records will remain after a queued target is acknowledged. Execution IDs will never be reused.
-
-A successful new start will make one atomic change that:
-
-1. reserves a fresh execution ID;
-2. creates the start-request record; and
-3. adds one queued target.
-
-`WorkflowStartClient` and `ExecutionClient` will use the same execution-admission table. `WorkflowStartClient` will reserve an ID inside its start transaction. Two start requests will therefore never receive the same execution ID.
-
-Direct `trigger` will call `ExecutionClient.admit` before launching a worker:
-
-- If no execution ID was supplied, `ExecutionClient` will generate IDs until it reserves a new one.
-- If the caller supplied an unused ID, `ExecutionClient` will reserve and return it unchanged.
-- If the caller supplied an existing ID, `ExecutionClient` will return `EXECUTION_ID_CONFLICT`. The SDK will throw `ExecutionAdmissionError`, and the HTTP trigger route will return `409 Conflict`.
+- A start request will be identified by the caller's execution ID and the step key.
+- A repeated request with the same workflow ID and parameters will return the first target execution ID without starting another workflow.
+- A repeated request with a different workflow ID or parameters will return `START_REQUEST_MISMATCH`, also after the target has been delivered and acknowledged.
+- Parameter values will match when their canonical encodings match. Missing parameters and an empty object will not match.
+- `WorkflowStartClient` will validate parameters with `durableValueCodec` and will return `INVALID_START_PARAMETERS` when encoding fails, without admitting an execution or queuing a target.
+- A successful new start will be all-or-nothing: either the target execution exists and is queued for delivery, or no trace of the request is observable.
+- Execution IDs will be unique across the runtime and will never be reused. Two start requests will never receive the same execution ID, and a started execution will never collide with a directly triggered one.
+- An accepted start will be recorded as a durable step. Replay will return the recorded `{ executionId }` without another client call.
+- A rejected start will be recorded and thrown to workflow code as `WorkflowStartError`. Replay will restore the same class and code without another client call.
+- If `WorkflowStartClient` throws, no step will be recorded and workflow code will not be able to catch the error. The next execution attempt will call the client again with the same request ID.
+- Direct `trigger` will admit its execution ID through `ExecutionClient` before launching a worker. An unused caller-supplied ID will be reserved and returned unchanged; an ID already in use will return `EXECUTION_ID_CONFLICT`, the SDK will throw `ExecutionAdmissionError`, and the HTTP trigger route will return `409 Conflict`.
 - If worker launch fails after admission, the execution ID will remain reserved. Execution IDs will not be recycled according to launch outcome.
-
-Direct-trigger parameters will remain governed by the existing `TriggerEvent` contract. They will not be stored or encoded by execution admission.
-
-`createLocalSdk` and the HTTP trigger handler will receive an `ExecutionClient`. They will pass the caller's optional execution ID to `admit`, launch only an accepted event, and return the execution ID selected by the client. The HTTP SDK will use the server's accepted ID instead of generating one in the client.
-
-When a start-request record already exists, `WorkflowStartClient` will compare the requested workflow ID, parameter-presence flag, and canonical parameters with that record. Matching requests will return its execution ID. Different requests will return `START_REQUEST_MISMATCH`.
+- Direct-trigger parameters will remain governed by the existing `TriggerEvent` contract. They will not be encoded or stored by execution admission.
+- `createLocalSdk` and the HTTP trigger handler will return the execution ID accepted by `ExecutionClient` instead of generating one in the client.
 
 ## Delivery acknowledgement
 
@@ -246,63 +194,41 @@ interface WorkflowInvoker {
 }
 ```
 
-`workflowEndEmitter` will remain the completion-observation contract used by `triggerAndWait` and the HTTP events route. It will emit a result for `completed` and an error for `failed`. It will not emit for `suspended`.
-
-An operational error from a directly launched invocation will continue to emit an error so an existing completion waiter does not hang. A rejected queued delivery will not emit a completion error because that execution remains eligible for another delivery.
-
-`launch` and `deliver` will acknowledge invocation; neither will become a second completion-observation channel. Each `WorkflowRunOutcome` will mean that the runner has finished the matching durable work:
+Each `WorkflowRunOutcome` will mean that the matching durable work is finished:
 
 - `completed` will mean that the workflow result is recorded;
 - `suspended` will mean that the unfinished step and every wake needed to resume it are recorded; and
 - `failed` will mean that an uncaught workflow error is recorded as the terminal workflow result.
 
-The heap record at the reserved `$$workflow-result$$` step key will own the terminal outcome. It will contain `WorkflowResult` for completion or `WorkflowFailed` for an uncaught workflow error.
+After a terminal outcome is recorded, a later delivery will return the same outcome without executing workflow code again.
 
-Before creating or advancing the user workflow iterator, the workflow driver will read this record. A recorded result will return `completed`; a recorded failure will return `failed`. Workflow code will not run again.
+An error thrown by infrastructure – rather than by workflow code – will not be recorded as a workflow failure. The run will reject, the worker will reply `retry`, and the same execution will be delivered again. A child error or exit before a durable outcome will have the same meaning.
 
-The workflow driver will catch errors only around calls that advance the user workflow iterator. If one of those calls rejects, the driver will serialize the error into `WorkflowFailed`, write it to `$$workflow-result$$`, await that write, and return `failed`.
+`workflowEndEmitter` will remain the completion-observation contract used by `triggerAndWait` and the HTTP events route. It will emit a result for `completed` and an error for `failed`. It will not emit for `suspended`. An operational error from a directly launched invocation will continue to emit an error so an existing completion waiter does not hang. A rejected queued delivery will not emit a completion error because that execution remains eligible for another delivery.
 
-Heap operations, runtime-client calls, wake scheduling, response deserialization, and invariant checks will run outside that catch. An error from any of them will reject `WorkflowRunner.run`.
+`WorkflowInvoker.deliver` will resolve without a value after a durable outcome and will reject after `retry`, a child error, or an early exit. The event loop will remove a queued target only when `deliver` resolves; if it rejects, the target will stay in the queue and will become available again when its visibility timeout expires.
 
-Before returning `suspended`, the runner will await the unfinished-step write and every required waiter or scheduler write. In particular, it will await `SchedulerClient.requestWakeUp`.
-
-If `WorkflowStartClient` throws, the driver will record no step and will let the error leave the workflow driver. It will not throw the error into workflow code, so workflow code cannot catch an uncertain runtime failure.
-
-The worker will send a durable outcome only when `WorkflowRunner.run` returns one. If the runner rejects, the worker will reply `retry`. A child error or exit before a durable outcome will have the same meaning.
-
-`WorkflowInvoker.deliver` will resolve without a value after receiving a durable outcome. It will reject after `retry`, a child error, or an early exit. `WorkflowInvoker.launch` will preserve the existing direct-trigger contract by resolving when the child process starts, without waiting for its workflow outcome.
-
-The event loop will remove a queued target only when `WorkflowInvoker.deliver` resolves. If it rejects, the event loop will:
-
-1. catch the error;
-2. leave the target in the queue under its current visibility timeout; and
-3. continue polling.
-
-The target will become available again when that timeout expires.
-
-Direct `trigger` will not use the event-loop queue. It will call `WorkflowInvoker.launch`, so this RFC will not make it wait for workflow completion or suspension.
+`WorkflowInvoker.launch` will preserve the existing direct-trigger contract by resolving when the child process starts, without waiting for its workflow outcome. Direct `trigger` will not use the event-loop queue.
 
 `@yieldstar/worker-invoker` and `@yieldstar/test-invoker` will implement the same `launch` and `deliver` contract.
 
 ## Conformance tests
 
-Runtime-adapter tests will inspect execution-admission records, start-request records, and queued targets:
+Runtime-adapter tests will exercise `WorkflowStartClient`, `ExecutionClient`, and the delivery queue:
 
 | Case | Observable outcome |
 | --- | --- |
-| Failure after preparing any new start record but before commit | No execution-admission record, start-request record, or queued target is visible. |
-| Start commit followed by a lost response | A repeated call returns the committed execution ID; one execution-admission record, one start-request record, and one queued target are visible. |
-| Two concurrent calls with one start-request ID | Both return the same execution ID and create only one of each record. |
-| Two different start-request IDs | Each receives a different execution ID and execution-admission record. |
-| A generated execution ID already exists | The client allocates another ID; the existing admission record is unchanged. |
+| Failure before a new start commits | No queued target becomes observable; a repeated call succeeds as a first call. |
+| Start commit followed by a lost response | A repeated call returns the committed execution ID; exactly one target is queued. |
+| Two concurrent calls with one start-request ID | Both return the same execution ID; exactly one target is queued. |
+| Two different start-request IDs | Each receives a different execution ID. |
 | Direct admission receives an unused caller-supplied ID | It reserves and returns that exact ID. |
-| Direct admission receives an existing caller-supplied ID | It returns `EXECUTION_ID_CONFLICT`; no worker is launched and no existing record changes. |
-| Worker launch fails after direct admission | The admitted execution ID remains reserved. |
-| Invalid start parameters | `WorkflowStartClient` returns `INVALID_START_PARAMETERS`; no admission, start-request, or queue record is created. |
-| Parameter objects have different key order | `durableValueCodec` returns the same canonical string. |
-| A repeated request changes the workflow ID or parameters | The client returns `START_REQUEST_MISMATCH`; its admission and start-request records are unchanged. |
-| A repeated request changes the descriptor after target acknowledgement | The client returns `START_REQUEST_MISMATCH`; the absence of a queued target does not change the comparison. |
-| The target is acknowledged before the caller records its step | The admission and start-request records remain; retrying returns their execution ID without adding another queued target. |
+| Direct admission receives an ID in use | It returns `EXECUTION_ID_CONFLICT`; no worker is launched. |
+| Worker launch fails after direct admission | Repeating the admission with that ID returns `EXECUTION_ID_CONFLICT`. |
+| Invalid start parameters | The client returns `INVALID_START_PARAMETERS`; no execution is admitted and no target is queued. |
+| Parameter objects have different key order | `durableValueCodec` returns the same canonical string and the requests match. |
+| A repeated request changes the workflow ID or parameters | The client returns `START_REQUEST_MISMATCH`; the original start is unchanged. |
+| A matching request repeats after target acknowledgement | It returns the original execution ID without queuing another target. |
 
 Workflow-driver tests will inspect recorded steps and calls to a fake `WorkflowStartClient`:
 
@@ -314,15 +240,14 @@ Workflow-driver tests will inspect recorded steps and calls to a fake `WorkflowS
 | Throws | No step is recorded, workflow code cannot catch the error, and the next execution attempt calls the client again. |
 | Caller stops after `accepted` but before recording the step | The next attempt calls the client with the same start-request ID and records its first execution ID. |
 
-Runner and serialization tests will cover terminal outcomes:
+Runner tests will cover terminal outcomes:
 
 | Case | Observable outcome |
 | --- | --- |
-| Workflow returns | `WorkflowResult` is stored at `$$workflow-result$$`; replay returns `completed` without executing workflow code. |
-| Workflow throws outside a step | `WorkflowFailed` is stored before `failed` is returned; replay returns the same error without executing workflow code. |
-| Writing `WorkflowFailed` throws | The runner rejects and no `failed` outcome is returned. |
-| Heap, runtime-client, deserialization, invariant, or scheduler operation throws | The runner rejects without storing `WorkflowFailed`. |
-| A delay suspends the workflow | The unfinished step and scheduler wake are awaited before `suspended` is returned. |
+| Workflow returns | Replay returns `completed` with the same result without executing workflow code. |
+| Workflow throws outside a step | Replay returns `failed` with the same error without executing workflow code. |
+| An infrastructure operation fails during a run | The run rejects, no terminal outcome is recorded, and the worker replies `retry`. |
+| A delay suspends the workflow | The unfinished step and scheduler wake are recorded before `suspended` is returned. |
 
 Delivery tests will cover both invokers, the event loop, direct trigger, and completion observers:
 
@@ -338,3 +263,12 @@ Delivery tests will cover both invokers, the event loop, direct trigger, and com
 | Direct `trigger` starts a child whose workflow remains running | `launch` resolves after the child starts without waiting for a workflow outcome. |
 | Local or HTTP trigger omits an execution ID | The SDK returns the ID accepted by `ExecutionClient`. |
 | Worker and test invokers receive the same event and runner behavior | Their `launch`, `deliver`, and completion-observation behavior match. |
+
+## Not Specified
+
+This RFC will not choose:
+
+- how admission, start-request, or queue state is stored, or which records a runtime adapter keeps;
+- transaction boundaries inside a runtime adapter, beyond the all-or-nothing guarantee for a new start;
+- the driver-internal step responses that carry a start request or a terminal outcome; or
+- where the terminal workflow outcome is stored.

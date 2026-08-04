@@ -34,15 +34,14 @@ If the cloud service creates the resource but the response is lost, retrying thi
 ```ts
 const resource = yield* step.effect(`provision:${accountId}`, {
   // This ID belongs to the external operation, not this workflow execution.
-  effectId: `account:${accountId}`,
-  operation: "cloud.provision.v1",
+  id: `account:${accountId}`,
   input: configuration,
-  retryIn: 60_000,
   lookup: id => cloud.lookup(id),
 
   // Yieldstar will call perform again only after lookup proves that no
   // earlier call exists or can still finish.
-  perform: id => cloud.provision(id, configuration),
+  perform: (id, configuration) => cloud.provision(id, configuration),
+  retryIn: 60_000,
 })
 ```
 
@@ -50,15 +49,9 @@ const resource = yield* step.effect(`provision:${accountId}`, {
 
 `step.effect` will separate the workflow step from the external operation. The step key will identify where the call occurs in one workflow execution; the effect ID will identify the operation in the external service.
 
-```ts
-type DurableValue =
-  | null
-  | boolean
-  | number
-  | string
-  | DurableValue[]
-  | { [key: string]: DurableValue }
+`input`, lookup results, and performed results will be `DurableValue` data. [RFC 001](./001-durable-workflow-start.md#proposed-api) defines `DurableValue`, its validation rules, and its canonical encoding. `durableValueCodec` will be the only validator and canonical encoder for these values.
 
+```ts
 type EffectLookup<T extends DurableValue> =
   | { status: "settled"; result: T }
   | { status: "not-found" }
@@ -87,6 +80,8 @@ Every caller of one external operation must use the same `effectId`. No caller m
 
 `operation` will name the version of the behavior defined by `input`, `lookup`, and `perform`. It will not change after the effect record is created.
 
+`retryIn` must be finite and non-negative. It will set how long the step waits before it looks up an uncertain outcome again.
+
 `step.effect` will not add authorization to an effect result. A workflow that submits the same `effectId`, `operation`, and `input` will receive the stored result.
 
 An application should build `effectId` from every part needed to identify one external operation. Depending on the application, those parts may include:
@@ -95,31 +90,6 @@ An application should build `effectId` from every part needed to identify one ex
 - the tenant;
 - the kind of operation; and
 - the business identity.
-
-`input`, lookup results, and performed results will accept:
-
-- `null`;
-- booleans;
-- finite numbers;
-- strings;
-- arrays with no missing items; and
-- plain objects with string keys whose values follow these same rules.
-
-A plain object will:
-
-- have the default or `null` prototype; and
-- contain only its own enumerable data properties.
-
-Values will reject:
-
-- accessors;
-- class instances;
-- symbol or non-enumerable properties;
-- missing array items;
-- `undefined`; and
-- reference cycles.
-
-The canonical encoding will sort object keys and encode `-0` as `0`.
 
 ## External system contract
 
@@ -132,19 +102,11 @@ Every runtime that calls the external system will need to use the same `effectId
 
 A rejected `lookup` or `perform` call will also be an unknown outcome. If the external system cannot provide these guarantees, `step.effect` will not make the operation safe.
 
-## Runtime protocol
+## Runtime API
 
-`step.effect` will require the delivery acknowledgement from RFC 001.
+`step.effect` will require the delivery acknowledgement from [RFC 001](./001-durable-workflow-start.md#delivery-acknowledgement).
 
-This RFC will add an `EffectClient` to `@yieldstar/core`. `WorkflowRunner` will pass it to the workflow driver through `WorkflowGeneratorParams`.
-
-`EffectClient` will own effect records. Each record will:
-
-- be identified by `effectId`;
-- store the immutable `operation` and `input`;
-- have a state of `pending` or `settled`;
-- store a result when settled; and
-- never be deleted or reused.
+This RFC will add an `EffectClient` to `@yieldstar/core`:
 
 ```ts
 interface EffectClient {
@@ -191,85 +153,21 @@ interface WorkflowEffectError extends Error {
 }
 ```
 
-`begin` will create a `pending` record before returning `new`. If the record already exists:
+## Required Semantics
 
-- a different `operation` or `input` will return `EFFECT_REQUEST_MISMATCH`; or
-- matching values will return the record's state and remove any waiter left after a wake delivered the same execution and step.
+- Each effect will be identified by `effectId`. Its `operation` and `input` will be immutable, and a settled result will never change or be deleted.
+- `begin` will create a pending effect before returning `new`. If the effect already exists, a different `operation` or `input` will return `EFFECT_REQUEST_MISMATCH`; matching values will return the effect's current state. Values will match when their canonical encodings match.
+- `settle` will settle a pending effect only once. Concurrent calls with the same encoded result will return that result. A call with a different result will keep the first result, return `conflict` with both values, and preserve a permanent conflict report that runtime operators can inspect.
+- `wait` will register the calling execution to be woken and will schedule a wake at `wakeAt`. Registration and scheduling will be all-or-nothing.
+- Repeating `wait` for the same effect, execution, and step will return the first `wakeAt` without adding another registration. A repeat that carries a different workflow event will throw `EFFECT_WAITER_MISMATCH` and will preserve the first registration.
+- When `settle` succeeds, every waiting execution will be woken. No execution will remain registered without a pending or delivered wake.
+- Scheduled wakes will survive a runtime restart and will be delivered by the runtime process, not by a child worker.
+- A lost scheduler response may create a duplicate wake. This will be safe because both deliveries will read the same effect and step records.
+- Error revival will apply only to `StepError`. A plain object that resembles an error will remain a plain object after serialization.
 
-Values will match when their canonical encodings match.
+## Driver behavior
 
-`settle` will change a `pending` record to `settled` only once.
-
-Concurrent calls with the same encoded result will return that result. If a call supplies a different result, `settle` will:
-
-1. keep the first result;
-2. store a permanent conflict report containing both values; and
-3. return `conflict`.
-
-Runtime operators will be able to inspect these reports.
-
-`wait` will make one atomic change that:
-
-1. stores the current workflow event in a waiter; and
-2. creates a scheduled wake request.
-
-The waiter will be identified by the effect ID, `event.executionId`, and step key. Repeating `wait` will return the first `wakeAt` without adding another waiter or wake request.
-
-If the workflow ID, parameters, or context differ from the stored event, `wait` will throw `EFFECT_WAITER_MISMATCH`. `retryIn` must be finite and non-negative. The driver will calculate `wakeAt` before calling `wait`.
-
-When `settle` succeeds, it will make one atomic change that:
-
-1. creates immediate wake requests for all waiters; and
-2. removes those waiters.
-
-`EffectWakeDispatcher` will be a long-lived service in the runtime process, not in a child worker. It will own `SchedulerClient`, start with the runtime, and resume draining stored wake requests after every restart.
-
-For a scheduled wake, the dispatcher will pass `max(0, wakeAt - Date.now())` to `SchedulerClient.requestWakeUp`. A wake will count as accepted only after the scheduler has durably stored the event and resolved its promise. Only then will the dispatcher remove the request.
-
-A lost scheduler response may create a duplicate wake. This will be safe because both deliveries will read the same effect and step records.
-
-`DurableValueCodec` will be the only validator and canonical encoder for `DurableValue`:
-
-- the driver will use it before `begin` and `settle`;
-- `EffectClient` will use it whenever it reads or writes a value; and
-- `StepResult` will use it for its result.
-
-Error revival will apply only to `StepError`. A plain object that resembles an error will therefore remain a plain object after serialization.
-
-## Driver protocol
-
-This RFC will add two responses:
-
-```ts
-class StepEffect<T extends DurableValue> extends StepResponse {
-  readonly type = "step-effect"
-  constructor(readonly effect: EffectDescriptor<T>) {
-    super()
-  }
-}
-
-class StepEffectWait extends StepResponse {
-  readonly type = "effect-wait"
-  constructor() {
-    super()
-  }
-}
-```
-
-`step.effect` will yield its step key and ask whether a result is already recorded. If no result exists, it will yield `StepEffect`. This response will carry the descriptor and callbacks from the public API.
-
-The driver will handle `StepEffect` before writing a step record. For a result or final error, the driver will:
-
-1. write `StepResult` or `StepError`; and
-2. resume the paused generator with that response.
-
-`step.effect` will return the result or throw the error. `StepEffect` will never be serialized.
-
-Step-response deserialization will gain an `effect-wait` case for `StepEffectWait`. The workflow driver will treat this response as unfinished, like `StepStoreWait`. `WorkflowRunner` will add it to its return union and switch, then return without taking another action.
-
-The generator will remain paused. A later delivery will ignore the unfinished record and start the effect step again. The worker will acknowledge suspension only after both `wait` and the unfinished record succeed.
-
-The driver behavior is:
+`step.effect` will first ask whether a step result is already recorded. When one exists, it will return or throw that result without calling the client or a callback. Otherwise:
 
 | Outcome | Behavior |
 | --- | --- |
@@ -280,11 +178,13 @@ The driver behavior is:
 | `begin` returns `EFFECT_REQUEST_MISMATCH` | The driver will record and throw that code without calling a callback. |
 | `perform` returns or `lookup` returns `settled` | The driver will validate the result, call `settle`, then record and return its result. |
 | `lookup` returns `not-found` | The driver will call `perform`. |
-| A callback rejects or `lookup` returns `unknown` | The driver will call `wait` and return `StepEffectWait`. |
+| A callback rejects or `lookup` returns `unknown` | The driver will call `wait`, then suspend the step. |
 | `settle` reports a conflict | The driver will report it and record the first result. |
 | `begin`, `settle`, or `wait` throws an ordinary error | The driver will record no step and request another delivery with `EFFECT_CLIENT_UNAVAILABLE`. |
-| A callback returns a malformed response or invalid value | The driver will record no step, retain `pending`, and request another delivery with `EFFECT_HANDLER_INVALID`. |
+| A callback returns a malformed response or invalid value | The driver will record no step, retain the pending effect, and request another delivery with `EFFECT_HANDLER_INVALID`. |
 | `EffectClient` throws `EffectClientInvariantError` | The driver will record no step and request another delivery with its code. |
+
+A suspended effect step will remain unfinished. A later delivery will start the effect step again from `begin`. The worker will acknowledge suspension only after both `wait` and the unfinished step record succeed.
 
 `INVALID_EFFECT_REQUEST` and `EFFECT_REQUEST_MISMATCH` will be recorded as `WorkflowEffectError` values. Workflow code may catch them, and their `code` will survive serialization.
 
@@ -301,22 +201,20 @@ If workflow code changes while an effect is pending, the new code must still cal
 
 ## Conformance tests
 
-Runtime-adapter tests will inspect only effect records, waiters, and wake requests:
+Runtime-adapter tests will exercise `EffectClient` and wake delivery:
 
 | Operation or race | Observable outcome |
 | --- | --- |
-| `begin` creates or reads a record | One record exists for the effect ID and contains immutable operation and input. |
-| `begin` receives changed operation or input | It rejects without changing the record. |
+| `begin` creates or reads an effect | One effect exists for the ID; repeated matching calls return its current state. |
+| `begin` receives changed operation or input | It rejects without changing the effect. |
 | `settle` receives equal results concurrently | One settled result exists. |
 | `settle` receives different results | The first result remains settled and one conflict report contains both values. |
-| Failure after preparing the waiter but before commit | No waiter or wake request is visible. |
-| Failure after preparing the wake request but before commit | No waiter or wake request is visible. |
+| Failure before `wait` commits | No wake is scheduled; a repeated call succeeds as a first call. |
 | `wait` commits and its response is lost | Repeating it returns the first wake time and adds nothing. |
-| Repeated `wait` carries a different event | It throws `EFFECT_WAITER_MISMATCH` and preserves the first waiter and wake request. |
-| Settlement races with `wait` | No waiter exists without an immediate or scheduled wake request. |
-| Dispatcher restarts | It resumes draining stored wake requests. |
-| Scheduler accepts a wake but its response is lost | The request remains; resubmission may add one harmless duplicate. |
-| Scheduler confirms a wake | The dispatcher removes its request. |
+| Repeated `wait` carries a different event | It throws `EFFECT_WAITER_MISMATCH` and preserves the first registration. |
+| Settlement races with `wait` | The waiting execution is woken; no registration is left without a wake. |
+| The runtime restarts with stored wakes | Delivery of those wakes resumes. |
+| The scheduler accepts a wake but its response is lost | Resubmission may add one harmless duplicate wake. |
 
 Workflow-driver tests will use a fake client and callbacks:
 
@@ -330,28 +228,31 @@ Workflow-driver tests will use a fake client and callbacks:
 | After `lookup` returns `settled` but before `settle` | `lookup` runs again and the same result is stored. |
 | After `settle` but before the step result | The effect record supplies the result without an external call. |
 | After the step result but before workflow continuation | The recorded step supplies the result. |
-| `lookup` returns `unknown` or a callback rejects | `wait` completes before the driver returns `StepEffectWait`. |
+| `lookup` returns `unknown` or a callback rejects | `wait` completes before the step suspends. |
 | Invalid request | `INVALID_EFFECT_REQUEST` is recorded and reaches workflow code without calling the client. |
 | Changed operation or input | `EFFECT_REQUEST_MISMATCH` is recorded and reaches workflow code without a callback. |
 | Client availability failure | No step is recorded and delivery retry carries `EFFECT_CLIENT_UNAVAILABLE`. |
-| Malformed lookup or invalid callback result | No step is recorded, `pending` remains, and delivery retry carries `EFFECT_HANDLER_INVALID`. |
+| Malformed lookup or invalid callback result | No step is recorded, the effect stays pending, and delivery retry carries `EFFECT_HANDLER_INVALID`. |
 | Client invariant or waiter mismatch | No step is recorded and delivery retry preserves its operator-repair code. |
 | Conflicting settlement | The conflict is reported and the first result is recorded and returned. |
 
-Serialization tests will round-trip every valid durable value, including an error-shaped object, without changing its type or value. They will reject every invalid value.
-
-The tests will also prove that:
-
-- `StepEffect` is never stored;
-- `StepEffectWait` deserializes as that class; and
-- its step record remains unfinished.
+Serialization tests will round-trip every valid durable value, including an error-shaped object, without changing its type or value. They will reject every invalid value. A suspended effect step will remain unfinished after serialization and deserialization.
 
 Integration tests will cover `EffectClient` through queue acknowledgement:
 
 | Interruption | Observable outcome |
 | --- | --- |
-| `wait` commits, then the worker fails before the unfinished step record | The queue retains the delivery; replay reuses one waiter and wake request. |
+| `wait` commits, then the worker fails before the unfinished step record | The queue retains the delivery; replay reuses the first registration and wake. |
 | The unfinished step record commits, then the worker fails before replying | The queue retains the delivery; replay remains safe. |
-| A scheduled wake request commits | The dispatcher delivers it, removes it after scheduler acceptance, and the execution runs again. |
-| `settle` commits with waiters | Immediate wake requests are delivered and removed; each execution reads the settled result. |
+| A scheduled wake commits | The execution runs again after delivery, and the wake is not delivered a second time after confirmation. |
+| `settle` commits with waiting executions | Each is woken and reads the settled result. |
 | `EffectClient` fails inside the worker | The worker replies `retry`, the invoker rejects, the queue retains the delivery, and no step result exists. |
+
+## Not Specified
+
+This RFC will not choose:
+
+- how effect records, waiter registrations, or wake requests are stored;
+- how the runtime process schedules and drains wakes;
+- the driver-internal step responses that carry an effect request or a suspension; or
+- when waiter cleanup runs inside settlement.
