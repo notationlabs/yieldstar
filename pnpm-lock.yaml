@@ -48,7 +48,7 @@ importers:
     dependencies:
       '@notation/docs':
         specifier: git+ssh://git@github.com/djgrant/docs.git#main&path:/packages/docs
-        version: git+ssh://git@github.com/djgrant/docs.git#3704f5f478034423c219361e6662669326d288dd&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)
+        version: git+ssh://git@github.com/djgrant/docs.git#d42a8a8a06c9f020f3496c0f2a4a16e12070146a&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)
       '@tanstack/react-router':
         specifier: 1.170.44
         version: 1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -984,8 +984,8 @@ packages:
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
 
-  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#3704f5f478034423c219361e6662669326d288dd&path:/packages/docs':
-    resolution: {commit: 3704f5f478034423c219361e6662669326d288dd, path: /packages/docs, repo: git@github.com:djgrant/docs.git, type: git}
+  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#d42a8a8a06c9f020f3496c0f2a4a16e12070146a&path:/packages/docs':
+    resolution: {commit: d42a8a8a06c9f020f3496c0f2a4a16e12070146a, path: /packages/docs, repo: git@github.com:djgrant/docs.git, type: git}
     version: 0.1.0
     hasBin: true
     peerDependencies:
@@ -4939,7 +4939,7 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
 
-  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#3704f5f478034423c219361e6662669326d288dd&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)':
+  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#d42a8a8a06c9f020f3496c0f2a4a16e12070146a&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)':
     dependencies:
       '@cloudflare/vite-plugin': 1.64.0(@types/node@22.18.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(wrangler@4.151.0(@types/node@22.18.0))
       '@comark/react': 0.7.0(react@19.3.1)(shiki@4.5.0)
@@ -7579,7 +7579,7 @@ snapshots:
 
   tsx@4.23.1:
     dependencies:
-      esbuild: 0.28.1
+      esbuild: 0.28.2
     optionalDependencies:
       fsevents: 2.3.3
     optional: true
