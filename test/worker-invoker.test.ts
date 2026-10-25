@@ -33,7 +33,12 @@ const executeAndWait = async ({
   });
   const result = once(invoker.workflowEndEmitter, executionId);
 
-  await invoker.execute({ workflowId: "workflow", executionId, context });
+  await invoker.execute({
+    workflowId: "workflow",
+    executionId,
+    params: undefined,
+    context,
+  });
 
   return result;
 };
@@ -59,6 +64,7 @@ test("rejects when the worker process cannot spawn", { timeout: 2_000 }, async (
     invoker.execute({
       workflowId: "workflow",
       executionId: "worker-spawn-error",
+      params: undefined,
       context: new Map(),
     })
   ).rejects.toMatchObject({ code: "ENOENT" });
@@ -81,6 +87,7 @@ test(
     await invoker.execute({
       workflowId: "workflow",
       executionId,
+      params: undefined,
       context: new Map(),
     });
 

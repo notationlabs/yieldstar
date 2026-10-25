@@ -6,7 +6,7 @@ import { createSdk } from "./sdk";
 
 // todo – use sqlite runtime
 test("triggering a workflow", async () => {
-  const mockWorkflowGenerator = vi.fn<WorkflowFn<any, any>>(async function* (
+  const mockWorkflowGenerator = vi.fn<WorkflowFn<any, any, any>>(async function* (
     step
   ) {
     return yield* step.run(() => 1);

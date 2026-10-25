@@ -3,7 +3,7 @@ import type { WorkflowFn } from "yieldstar";
 import { workflow } from "yieldstar";
 
 type CustomWorkflowFn<Params, Result> = (
-  step: Parameters<WorkflowFn<Params, Result>>[0],
+  step: Parameters<WorkflowFn<any, Result, any>>[0],
   waitForState: (s: string) => AsyncGenerator
 ) => AsyncGenerator<any, Result>;
 

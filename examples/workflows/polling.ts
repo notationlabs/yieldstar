@@ -10,6 +10,6 @@ export const pollingWorkflow = workflow(async function* (step, event, logger) {
   });
 
   yield* step.run(() => {
-    logger.info("Poll finished. Final result:", num);
+    logger.info({ num }, "Poll finished");
   });
 });

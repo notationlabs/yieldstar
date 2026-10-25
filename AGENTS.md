@@ -26,7 +26,7 @@ Run `pnpm install` in the repo root. This installs all workspace dependencies us
 
 ## Type checking
 
-To type check all monorepo packages, run `pok dts` (equivalent to `pnpm exec tsc -b`), which also generates type declarations. Always use the workspace TypeScript via `pnpm exec tsc` rather than a global `tsc`.
+To type check all monorepo packages (plus `test/` and `examples/`, which are checked with `noEmit`), run `pok dts` (equivalent to `pnpm exec tsc -b`), which also generates type declarations. Always use the workspace TypeScript via `pnpm exec tsc` rather than a global `tsc`.
 
 ## Building the packages
 

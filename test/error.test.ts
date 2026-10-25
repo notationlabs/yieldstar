@@ -35,5 +35,5 @@ test.skip("errors should be thrown by trigger", async () => {
     throw new Error("Step error");
   });
   const sdk = createSdk({ workflow });
-  expect(() => sdk({ workflowId: "workflow" })).toThrow();
+  expect(() => sdk.trigger({ workflowId: "workflow" })).toThrow();
 });

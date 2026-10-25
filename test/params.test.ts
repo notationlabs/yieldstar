@@ -8,7 +8,7 @@ test("passing params to a workflow", async () => {
   const testParams = { foo: "bar", count: 42 };
   let capturedParams: any;
 
-  const mockWorkflowGenerator = vi.fn<WorkflowFn<any, any>>(async function* (
+  const mockWorkflowGenerator = vi.fn<WorkflowFn<any, any, any>>(async function* (
     step,
     event
   ) {
@@ -34,7 +34,7 @@ test("passing params to a workflow", async () => {
 test("params are optional", async () => {
   let capturedParams: any;
 
-  const mockWorkflowGenerator = vi.fn<WorkflowFn<any, any>>(async function* (
+  const mockWorkflowGenerator = vi.fn<WorkflowFn<any, any, any>>(async function* (
     step,
     event
   ) {

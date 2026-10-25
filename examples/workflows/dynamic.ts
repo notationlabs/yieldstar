@@ -1,3 +1,4 @@
+import type { EventContext } from "@yieldstar/core";
 import { workflow } from "yieldstar";
 
 const workflowPlan = [
@@ -7,7 +8,7 @@ const workflowPlan = [
   { type: "fail" },
 ] as const;
 
-export const dynamicWorkflow = workflow<{ msg: string }, void>(async function* (
+export const dynamicWorkflow = workflow<{ msg: string }, void, EventContext>(async function* (
   step,
   event,
   logger

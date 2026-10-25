@@ -1,3 +1,4 @@
+import type { EventContext } from "@yieldstar/core";
 import { workflow } from "yieldstar";
 import { createTestSdkFactory } from "@yieldstar/test-utils";
 import pino from "pino";
@@ -5,10 +6,10 @@ import pino from "pino";
 const logger = pino({ level: "info" });
 
 type Params = {
-  userId: string;
-  name: string;
-  role: string;
-  action: string;
+  userId?: string;
+  name?: string;
+  role?: string;
+  action?: string;
 };
 
 type Result = {
@@ -16,7 +17,7 @@ type Result = {
   message: string;
 };
 
-const userWorkflow = workflow<Params, Result>(async function* (
+const userWorkflow = workflow<Params, Result, EventContext>(async function* (
   step,
   event,
   logger

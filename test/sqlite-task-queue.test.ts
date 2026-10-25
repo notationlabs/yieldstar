@@ -18,7 +18,12 @@ test("a claimed task becomes visible again after the visibility window", async (
   const db = createSqliteDb({ path: ":memory:", wal: false });
   const taskQueue = new SqliteTaskQueue(db);
 
-  taskQueue.add({ workflowId: "workflow-1", executionId: "execution-1" });
+  taskQueue.add({
+    workflowId: "workflow-1",
+    executionId: "execution-1",
+    params: undefined,
+    context: new Map(),
+  });
 
   const claimed = taskQueue.process();
   expect(claimed?.event.workflowId).toBe("workflow-1");

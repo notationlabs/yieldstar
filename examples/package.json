@@ -10,6 +10,7 @@
   "dependencies": {
     "@yieldstar/http-server": "workspace:*",
     "@yieldstar/sqlite-runtime": "workspace:*",
+    "@yieldstar/test-utils": "workspace:*",
     "@yieldstar/worker-invoker": "workspace:*",
     "@yieldstar/core": "workspace:*",
     "pino": "^9.9.0",
@@ -17,6 +18,7 @@
     "yieldstar": "workspace:*"
   },
   "devDependencies": {
+    "@types/bun": "^1.2.21",
     "@types/node": "^22.18.0",
     "pino-pretty": "^11.3.0"
   }
