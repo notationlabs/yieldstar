@@ -51,7 +51,7 @@ pnpm install
 Generate and check types across the workspace:
 
 ```
-bun dts
+pok dts
 ```
 
 ### Build All Packages
@@ -62,7 +62,7 @@ Compile the packages and emit declarations via project references:
 pok build
 ```
 
-This runs each package’s `build` script (`bun build`) and then `tsc -b`.
+This runs each package’s `build` script (`bun build`) and then `pnpm exec tsc -b`.
 
 ### Run Tests
 
