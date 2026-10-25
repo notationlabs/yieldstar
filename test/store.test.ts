@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import type { StandardSchemaV1 } from "yieldstar";
 import { testSchema } from "@yieldstar/test-utils";
 import { createSdk } from "./sdk";
@@ -21,6 +21,47 @@ const ConversationStore = defineStore(
   "conversation",
   testSchema<ConversationState>()
 );
+
+const REPLAY_DELAY_MS = 10;
+
+/**
+ * Runs an execution across a `step.delay` replay boundary deterministically.
+ *
+ * A delay only suspends the workflow if it hasn't already elapsed when the
+ * workflow checks it, which a tiny real-time delay can't guarantee. So Date is
+ * frozen (an hour in the past) until the execution has cached its delay step
+ * and suspended; `beforeReplay` then runs while the execution is parked (with a
+ * frozen clock the wake-up task stays invisible to the memory task queue), and
+ * finally the real clock is restored, so the delay has definitely elapsed when
+ * the wake-up replays the workflow.
+ */
+async function acrossReplayBoundary<T>(params: {
+  sdk: ReturnType<typeof createSdk>;
+  executionId: string;
+  delayKey: string;
+  start: () => Promise<T>;
+  beforeReplay?: () => Promise<unknown>;
+}): Promise<T> {
+  const { sdk, executionId, delayKey } = params;
+  vi.useFakeTimers({ toFake: ["Date"], now: Date.now() - 3_600_000 });
+  let resultPromise: Promise<T>;
+  try {
+    resultPromise = params.start();
+    // Surface failures without waiting for the boundary
+    resultPromise.catch(() => {});
+    await vi.waitFor(
+      () => {
+        const key = sdk.heapClient.getKey({ executionId, stepKey: delayKey });
+        if (!sdk.heapClient.cache[key]) throw new Error("not suspended yet");
+      },
+      { timeout: 2_000, interval: 1 }
+    );
+    await params.beforeReplay?.();
+  } finally {
+    vi.useRealTimers();
+  }
+  return resultPromise;
+}
 
 test("workflow stores can be created, read, and updated", async () => {
   const testWorkflow = workflow(async function* (step) {
@@ -68,7 +109,9 @@ test("workflow stores can be created, read, and updated", async () => {
 });
 
 test("workflow store updates are idempotent across replay", async () => {
+  let runs = 0;
   const testWorkflow = workflow(async function* (step) {
+    runs++;
     const store = yield* step.store(ConversationStore, {
       id: "replay",
       initial: { messages: [], status: "idle" },
@@ -82,15 +125,22 @@ test("workflow store updates are idempotent across replay", async () => {
       });
     });
 
-    yield* step.delay("replay-boundary", 1);
+    yield* step.delay("replay-boundary", REPLAY_DELAY_MS);
 
     const snapshot = yield* store.get("after-replay");
     return snapshot.state.messages;
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
-  const result = await sdk.triggerAndWait({ workflowId: "workflow" });
+  const executionId = "idempotent-replay";
+  const result = await acrossReplayBoundary({
+    sdk,
+    executionId,
+    delayKey: "replay-boundary",
+    start: () => sdk.triggerAndWait({ workflowId: "workflow", executionId }),
+  });
 
+  expect(runs).toBe(2);
   expect(result).toEqual([
     { id: "msg-1", content: "hello", processed: false },
   ]);
@@ -198,7 +248,9 @@ test("execution-local default store id is unique per execution", async () => {
 
 test("durable get and select replay stability", async () => {
   let selectCallCount = 0;
+  let runs = 0;
   const testWorkflow = workflow(async function* (step) {
+    runs++;
     const store = yield* step.store(ConversationStore, {
       id: "replay-stability",
       initial: { messages: [], status: "idle" },
@@ -210,21 +262,26 @@ test("durable get and select replay stability", async () => {
       return s.status;
     });
 
-    yield* step.delay("suspend", 1);
+    yield* step.delay("suspend", REPLAY_DELAY_MS);
 
     return { valGet, valSelect };
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
-  const resultPromise = sdk.triggerAndWait({ workflowId: "workflow" });
-
-  await sleep(5);
-  await sdk.store(ConversationStore, "replay-stability").update((draft) => {
-    draft.status = "working";
+  const executionId = "replay-stability";
+  const res = await acrossReplayBoundary({
+    sdk,
+    executionId,
+    delayKey: "suspend",
+    start: () => sdk.triggerAndWait({ workflowId: "workflow", executionId }),
+    // Change the store while the execution is suspended, before it replays
+    beforeReplay: () =>
+      sdk.store(ConversationStore, "replay-stability").update((draft) => {
+        draft.status = "working";
+      }),
   });
 
-  const res = await resultPromise;
-
+  expect(runs).toBe(2);
   expect(res.valGet.state.status).toBe("idle");
   expect(res.valSelect).toBe("idle");
   expect(selectCallCount).toBe(1);
@@ -536,7 +593,10 @@ test("take replay idempotency", async () => {
   let selectorCalls = 0;
   let claimCalls = 0;
 
+  let runs = 0;
+
   const testWorkflow = workflow(async function* (step, event) {
+    runs++;
     const store = yield* step.store(ConversationStore, {
       id: "take-replay",
       initial: {
@@ -557,16 +617,21 @@ test("take replay idempotency", async () => {
       }
     );
 
-    yield* step.delay("replay-boundary", 1);
+    yield* step.delay("replay-boundary", REPLAY_DELAY_MS);
 
     return taken;
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
-  const result = await sdk.triggerAndWait({
-    workflowId: "workflow",
+  const result = await acrossReplayBoundary({
+    sdk,
     executionId: "taker-1",
+    delayKey: "replay-boundary",
+    start: () =>
+      sdk.triggerAndWait({ workflowId: "workflow", executionId: "taker-1" }),
   });
+
+  expect(runs).toBe(2);
 
   expect(result).toEqual({
     id: "msg-1",
