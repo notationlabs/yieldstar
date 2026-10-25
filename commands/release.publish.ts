@@ -7,7 +7,7 @@ export const command = defineCommand({
   run: async (r) => {
     await r.exec("pnpm i");
     await r.exec("bun --filter '*' build");
-    await r.exec("tsc -b");
+    await r.exec("pnpm exec tsc -b");
     await r.exec("bin/release.sh");
   },
 });
