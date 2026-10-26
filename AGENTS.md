@@ -77,13 +77,8 @@ The monorepo contains these packages:
 
 ## Release process
 
-Releases are handled by `bin/release.sh` which:
-- Determines version from git describe
-- Publishes scoped packages under `@yieldstar/*` scope
-- Publishes the main `yieldstar` package unscoped
-- Handles npm account switching between `yieldstar` and `notation` users
+Releases use the pok-plugins `release()` flow (see `pok.config.ts`), which versions every manifest in lockstep and publishes the `@yieldstar/*` packages and the unscoped `yieldstar` package together.
 
-Use these commands for releases:
-- `pok version` - Bump version with alpha pre-release
-- `pok release publish` - Install deps, rebuild, then execute the release script
-- `pok release dry-run` - Package every publish target without contacting npm
+- `pok version` - Bump, commit, tag and push (`pok version prerelease` cuts an alpha)
+- `pok publish --dry-run` - Install, build and pack every publish target without contacting npm
+- `pok publish` - Install, build, then publish (prereleases go to their identifier's dist-tag)

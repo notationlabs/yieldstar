@@ -105,13 +105,13 @@ Examples are in `examples/`.
 
 ### Releases
 
-Releases are handled by `bin/release.sh`.
+Releases use the pok-plugins `release()` flow configured in `pok.config.ts`.
 
-- Bump version (pre): `pok version`
-- Package and inspect every publish target without contacting npm: `pok release dry-run`
-- Release: `pok release publish` (installs and rebuilds first)
+- Bump, commit, tag and push: `pok version` (`pok version prerelease` for an alpha)
+- Package and inspect every publish target without contacting npm: `pok publish --dry-run`
+- Release: `pok publish` (installs and rebuilds first)
 
-The script publishes scoped packages under `@yieldstar/*` and the main `yieldstar` package unscoped.
+Every manifest is versioned in lockstep; `@yieldstar/*` and the unscoped `yieldstar` package publish together.
 
 ### Internal Packages
 
