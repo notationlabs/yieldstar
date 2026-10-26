@@ -14,6 +14,9 @@ allowBuilds:
   # Matching by repo URL rather than resolved commit needs pnpm 11.11+.
   "@notation/docs@git+ssh://git@github.com/djgrant/docs.git": true
 
+minimumReleaseAgeExclude:
+  - '@pokit/*'
+
 overrides:
   shell-quote@<1.8.4: "^1.8.4"
   tmp@<0.2.6: "^0.2.6"
