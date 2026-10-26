@@ -19,10 +19,8 @@
     "inquirer": "^9.3.7",
     "pok-plugins": "github:djgrant/pok-plugins",
     "pokit": "^0.3.2",
+    "typescript": "^5.9.2",
     "vitest": "^3.2.4"
-  },
-  "peerDependencies": {
-    "typescript": "^5.9.2"
   },
   "packageManager": "pnpm@11.17.0"
 }

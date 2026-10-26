@@ -4,7 +4,7 @@ export const command = defineCommand({
   label: "Watch packages, declarations and tests",
   run: async (r) => {
     await r.exec(
-      "concurrently -r \"bun --filter '*' build --watch\" \"pnpm exec tsc -b --watch\" \"vitest\"",
+      "pnpm exec concurrently -r \"bun --filter '*' --parallel build --watch\" \"pnpm exec tsc -b --watch\" \"pnpm exec vitest\"",
     );
   },
 });

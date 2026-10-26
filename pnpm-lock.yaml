@@ -11,10 +11,6 @@ overrides:
 importers:
 
   .:
-    dependencies:
-      typescript:
-        specifier: ^5.9.2
-        version: 5.9.2
     devDependencies:
       '@pokit/core':
         specifier: ^0.6.0
@@ -40,6 +36,9 @@ importers:
       pokit:
         specifier: ^0.3.2
         version: 0.3.2
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.2
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@22.18.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@10.2.2)(tsx@4.23.1)(yaml@2.9.0)
