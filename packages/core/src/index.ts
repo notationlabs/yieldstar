@@ -11,23 +11,39 @@ export type {
   ExecutionClient,
   ExecutionLease,
   ExecutionOutcome,
+  ExecutionParent,
   ExecutionRecord,
   ExecutionReleaseResult,
   ExecutionRenewResult,
+  ExecutionStartRequest,
+  ExecutionStartResult,
   ExecutionStatus,
   ExecutionWakeResult,
   LeaseLost,
   WorkflowRunOutcome,
+  WorkflowStartErrorCode,
 } from "./base/execution";
 export {
   ExecutionAdmissionError,
   InfrastructureError,
   LeaseLostError,
   StepConflictError,
+  WorkflowStartError,
   isLeaseLost,
   isTerminalExecutionStatus,
 } from "./base/execution";
-export type { ExecutionState } from "./lib/execution-state";
+export type {
+  DurableObject,
+  DurableValue,
+  DurableValueCodec,
+  DurableValueEncoding,
+} from "./base/durable-value";
+export { durableValueCodec } from "./base/durable-value";
+export type {
+  ExecutionState,
+  PreparedExecutionStart,
+  StartRequestState,
+} from "./lib/execution-state";
 export {
   DEFAULT_LEASE_DURATION,
   REDELIVERY_DELAY_BASE,
@@ -36,6 +52,7 @@ export {
   acknowledgeExecution,
   claimExecution,
   createExecutionState,
+  createStartedExecution,
   decodeExecutionEvent,
   decodeExecutionOutcome,
   encodeExecutionEvent,
@@ -45,8 +62,10 @@ export {
   executionStatusAt,
   isExecutionClaimable,
   isLeaseCurrent,
+  matchStartRequest,
   nextClaimAt,
   prepareExecutionAdmission,
+  prepareExecutionStart,
   redeliveryDelay,
   releaseExecutionLease,
   renewExecutionLease,

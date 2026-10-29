@@ -2,12 +2,15 @@ import {
   acknowledgeExecution,
   claimExecution,
   createExecutionState,
+  createStartedExecution,
   executionIdConflict,
   executionNotFound,
   isExecutionClaimable,
   isLeaseCurrent,
+  matchStartRequest,
   nextClaimAt,
   prepareExecutionAdmission,
+  prepareExecutionStart,
   releaseExecutionLease,
   renewExecutionLease,
   requestExecutionWake,
@@ -18,10 +21,13 @@ import {
   type ExecutionClient,
   type ExecutionLease,
   type ExecutionRecord,
+  type ExecutionStartRequest,
+  type ExecutionStartResult,
   type ExecutionReleaseResult,
   type ExecutionRenewResult,
   type ExecutionState,
   type ExecutionWakeResult,
+  type StartRequestState,
   type WorkflowRunOutcome,
 } from "@yieldstar/core";
 
@@ -32,6 +38,8 @@ import {
  */
 export class MemoryExecutionClient implements ExecutionClient {
   private executions = new Map<string, ExecutionState>();
+  /** Keyed by startRequestKey. */
+  private startRequests = new Map<string, StartRequestState>();
   private clock: () => number;
 
   constructor(options?: { clock?: () => number }) {
@@ -63,6 +71,30 @@ export class MemoryExecutionClient implements ExecutionClient {
       })
     );
     return { status: "accepted", executionId: prepared.executionId };
+  }
+
+  async start(request: ExecutionStartRequest): Promise<ExecutionStartResult> {
+    const prepared = prepareExecutionStart(request);
+    if (!prepared.ok) return prepared.result;
+    const { start } = prepared;
+    const key = startRequestKey(start.callerExecutionId, start.stepKey);
+
+    const recorded = this.startRequests.get(key);
+    if (recorded) return matchStartRequest(recorded, start);
+
+    const caller = this.executions.get(start.callerExecutionId);
+    if (!caller) {
+      throw new Error(
+        `Cannot start a workflow from execution "${start.callerExecutionId}": it does not exist`
+      );
+    }
+    let created = createStartedExecution({ start, caller, now: this.clock() });
+    while (this.executions.has(created.target.executionId)) {
+      created = createStartedExecution({ start, caller, now: this.clock() });
+    }
+    this.executions.set(created.target.executionId, created.target);
+    this.startRequests.set(key, created.startRequest);
+    return { status: "accepted", executionId: created.target.executionId };
   }
 
   async get(executionId: string): Promise<ExecutionRecord | undefined> {
@@ -169,4 +201,8 @@ export class MemoryExecutionClient implements ExecutionClient {
     this.executions.set(state.executionId, next);
     return result;
   }
+}
+
+function startRequestKey(callerExecutionId: string, stepKey: string) {
+  return JSON.stringify([callerExecutionId, stepKey]);
 }

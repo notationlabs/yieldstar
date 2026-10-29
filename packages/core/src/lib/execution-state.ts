@@ -3,14 +3,18 @@ import type {
   ExecutionAcknowledgeResult,
   ExecutionLease,
   ExecutionOutcome,
+  ExecutionParent,
   ExecutionRecord,
   ExecutionReleaseResult,
   ExecutionRenewResult,
+  ExecutionStartRequest,
+  ExecutionStartResult,
   ExecutionStatus,
   LeaseLost,
   WorkflowRunOutcome,
 } from "../base/execution";
 import { isTerminalExecutionStatus } from "../base/execution";
+import { durableValueCodec, isPlainObject } from "../base/durable-value";
 import { ReadOnlyMap } from "../utils/map";
 
 /**
@@ -61,6 +65,8 @@ export type ExecutionState = {
    * measured from `leaseExpiresAt` instead.
    */
   redeliverAt: number | null;
+  /** Set at admission by `start`, and never changed. */
+  parent: ExecutionParent | null;
 };
 
 export const DEFAULT_LEASE_DURATION = 30_000;
@@ -183,6 +189,7 @@ export function createExecutionState(params: {
   workflowId: string;
   encoded: { params: string; context: string };
   now: number;
+  parent?: ExecutionParent;
 }): ExecutionState {
   return {
     executionId: params.executionId,
@@ -199,6 +206,7 @@ export function createExecutionState(params: {
     leaseExpiresAt: null,
     unacknowledgedDeliveryCount: 0,
     redeliverAt: null,
+    parent: params.parent ?? null,
   };
 }
 
@@ -243,6 +251,7 @@ export function toExecutionRecord(
     admittedAt: state.admittedAt,
     updatedAt: state.updatedAt,
     unacknowledgedDeliveryCount: unacknowledgedDeliveryCountAt(state, now),
+    ...(state.parent !== null ? { parent: { ...state.parent } } : {}),
   };
 }
 
@@ -532,5 +541,132 @@ export function executionNotFound(executionId: string) {
     status: "rejected" as const,
     code: "EXECUTION_NOT_FOUND" as const,
     message: `Execution "${executionId}" does not exist`,
+  };
+}
+
+/**
+ * A recorded start request, keyed by `callerExecutionId` and `stepKey`.
+ * `executionId` is the target it admitted. Adapters keep it until the caller
+ * is pruned, including after the target is terminal.
+ */
+export type StartRequestState = {
+  callerExecutionId: string;
+  stepKey: string;
+  workflowId: string;
+  /** The canonical params, or null when the request had none. */
+  params: string | null;
+  executionId: string;
+};
+
+export type PreparedExecutionStart = {
+  callerExecutionId: string;
+  stepKey: string;
+  workflowId: string;
+  params: string | null;
+};
+
+/**
+ * Validates a start request and encodes its params canonically. Adapters call
+ * this before touching storage and return the rejection as is.
+ */
+export function prepareExecutionStart(
+  request: ExecutionStartRequest
+):
+  | { ok: true; start: PreparedExecutionStart }
+  | {
+      ok: false;
+      result: Extract<ExecutionStartResult, { status: "rejected" }>;
+    } {
+  const invalid = (message: string) => ({
+    ok: false as const,
+    result: {
+      status: "rejected" as const,
+      code: "INVALID_START_PARAMETERS" as const,
+      message,
+    },
+  });
+  if (typeof request.workflowId !== "string" || request.workflowId === "") {
+    return invalid("workflowId must be a non-empty string");
+  }
+  let params: string | null = null;
+  if (request.params !== undefined) {
+    if (!isPlainObject(request.params)) {
+      return invalid("params must be a plain object");
+    }
+    const encoding = durableValueCodec.encode(request.params);
+    if (encoding.status === "invalid") {
+      return invalid(`params: ${encoding.message}`);
+    }
+    params = encoding.canonical;
+  }
+  return {
+    ok: true,
+    start: {
+      callerExecutionId: request.requestId.executionId,
+      stepKey: request.requestId.stepKey,
+      workflowId: request.workflowId,
+      params,
+    },
+  };
+}
+
+/**
+ * Answers a repeated start request from its record: the first target's ID when
+ * the workflow ID and canonical params match, and `START_REQUEST_MISMATCH`
+ * otherwise. The target's status does not matter.
+ */
+export function matchStartRequest(
+  recorded: StartRequestState,
+  start: PreparedExecutionStart
+): ExecutionStartResult {
+  if (
+    recorded.workflowId === start.workflowId &&
+    recorded.params === start.params
+  ) {
+    return { status: "accepted", executionId: recorded.executionId };
+  }
+  return {
+    status: "rejected",
+    code: "START_REQUEST_MISMATCH",
+    message: `Step "${start.stepKey}" of execution "${start.callerExecutionId}" already started workflow "${recorded.workflowId}" with different parameters or workflow ID`,
+  };
+}
+
+/**
+ * Builds a new start's target state and start-request record. The target
+ * inherits the caller's encoded context and links to the caller as its parent.
+ * Adapters insert both in one atomic write, after finding no recorded request
+ * for the same ID. `executionId` defaults to a random UUID; if it is already in
+ * use, adapters must not reuse it.
+ */
+export function createStartedExecution(params: {
+  start: PreparedExecutionStart;
+  caller: ExecutionState;
+  now: number;
+  executionId?: string;
+}): { target: ExecutionState; startRequest: StartRequestState } {
+  const { start, caller, now } = params;
+  const executionId = params.executionId ?? crypto.randomUUID();
+  const target = createExecutionState({
+    executionId,
+    workflowId: start.workflowId,
+    // The canonical encoding is JSON, so it fits encodeExecutionEvent's
+    // `{ value }` envelope verbatim.
+    encoded: {
+      params: start.params === null ? "{}" : `{"value":${start.params}}`,
+      context: caller.context,
+    },
+    now,
+    parent: { executionId: start.callerExecutionId, stepKey: start.stepKey },
+  });
+  return {
+    target,
+    startRequest: {
+      callerExecutionId: start.callerExecutionId,
+      stepKey: start.stepKey,
+      workflowId: start.workflowId,
+      params: start.params,
+      executionId,
+    },
   };
 }

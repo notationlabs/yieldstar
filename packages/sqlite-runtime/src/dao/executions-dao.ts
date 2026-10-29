@@ -18,6 +18,8 @@ class ExecutionRow {
   unacknowledged_delivery_count!: number;
   redeliver_at!: number | null;
   next_claim_at!: number | null;
+  parent_execution_id!: string | null;
+  parent_step_key!: string | null;
 }
 
 class ExecutionIdRow {
@@ -54,7 +56,9 @@ export class ExecutionsDao {
         lease_expires_at INTEGER,
         unacknowledged_delivery_count INTEGER NOT NULL DEFAULT 0,
         redeliver_at INTEGER,
-        next_claim_at INTEGER
+        next_claim_at INTEGER,
+        parent_execution_id TEXT,
+        parent_step_key TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_executions_next_claim_at
       ON executions(next_claim_at) WHERE next_claim_at IS NOT NULL;
@@ -94,19 +98,24 @@ export class ExecutionsDao {
            execution_id, workflow_id, params, context, status, outcome,
            admitted_at, updated_at, due_at, claimed_due_at, lease_token,
            lease_expires_at, unacknowledged_delivery_count, redeliver_at,
-           next_claim_at
+           next_claim_at, parent_execution_id, parent_step_key
          ) VALUES (
            $executionId, $workflowId, $params, $context, $status, $outcome,
            $admittedAt, $updatedAt, $dueAt, $claimedDueAt, $leaseToken,
            $leaseExpiresAt, $unacknowledgedDeliveryCount, $redeliverAt,
-           $nextClaimAt
+           $nextClaimAt, $parentExecutionId, $parentStepKey
          )
          ON CONFLICT(execution_id) DO NOTHING`
       )
-      .run(toBindings(state));
+      .run({
+        ...toBindings(state),
+        $parentExecutionId: state.parent?.executionId ?? null,
+        $parentStepKey: state.parent?.stepKey ?? null,
+      });
     return Number(result.changes) === 1;
   }
 
+  /** Leaves the parent link as inserted: it is immutable. */
   updateState(state: ExecutionState) {
     this.db
       .query(
@@ -147,6 +156,10 @@ function toState(row: ExecutionRow): ExecutionState {
     leaseExpiresAt: toNumberOrNull(row.lease_expires_at),
     unacknowledgedDeliveryCount: Number(row.unacknowledged_delivery_count),
     redeliverAt: toNumberOrNull(row.redeliver_at),
+    parent:
+      row.parent_execution_id !== null && row.parent_step_key !== null
+        ? { executionId: row.parent_execution_id, stepKey: row.parent_step_key }
+        : null,
   };
 }
 

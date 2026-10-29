@@ -5,6 +5,7 @@ import {
   StepResponse,
   StepStoreWait,
   WorkflowResult,
+  WorkflowStartError,
 } from "@yieldstar/core";
 import { isErrorLike, serializeError, deserializeError } from "serialize-error";
 
@@ -22,7 +23,7 @@ export function serializeStepResponse(data: StepResponse): string {
 export function deserializeStepResponse(jsonString: string): StepResponse {
   const reviveErrors = (key: string, value: any) => {
     if (isErrorLike(value)) {
-      return deserializeError(value);
+      return reviveError(value);
     }
     return value;
   };
@@ -44,4 +45,22 @@ export function deserializeStepResponse(jsonString: string): StepResponse {
     default:
       throw new Error("Unknown step result type: " + stepResponse.type);
   }
+}
+
+/**
+ * serialize-error only restores built-in error classes. Errors that workflow
+ * code may match by class are restored here, so a replayed step throws the
+ * same class it threw first.
+ */
+function reviveError(value: any): Error {
+  if (
+    value.name === "WorkflowStartError" &&
+    (value.code === "INVALID_START_PARAMETERS" ||
+      value.code === "START_REQUEST_MISMATCH")
+  ) {
+    const err = new WorkflowStartError(value.code, value.message);
+    if (typeof value.stack === "string") err.stack = value.stack;
+    return err;
+  }
+  return deserializeError(value);
 }

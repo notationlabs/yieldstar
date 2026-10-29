@@ -44,7 +44,7 @@ The runtime exposes three clients that share the database:
 
 | Client               | Class                   | Tables                                   |
 | -------------------- | ----------------------- | ---------------------------------------- |
-| `runtime.executions` | `SqliteExecutionClient` | `executions`                             |
+| `runtime.executions` | `SqliteExecutionClient` | `executions`, `start_requests`           |
 | `runtime.heap`       | `SqliteHeapClient`      | `step_responses`                         |
 | `runtime.stores`     | `SqliteStoreClient`     | `stores`, `store_waiters`, `store_applied_steps` |
 
@@ -53,6 +53,7 @@ Keeping them in one database lets every guarantee that spans clients hold in a s
 - A store commit and the wakes for the waiters it satisfies commit together.
 - The heap write that records a step's result deletes that step's waiters.
 - Admission inserts the record already due, so the record and its first wake commit together.
+- A new `start` inserts the target, already due and with its parent link, and the start request in one transaction. The request is looked up in the same transaction, so concurrent starts with one request ID admit one target.
 
 Every write runs as one synchronous `IMMEDIATE` transaction. Separate processes that open the same file, such as the app and its worker subprocesses, therefore serialize on SQLite's lock and see the same execution records.
 

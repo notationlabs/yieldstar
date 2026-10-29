@@ -13,11 +13,20 @@ bun add yieldstar
 ```ts
 import { workflow, createWorkflow } from "yieldstar";
 import { createWorkflowRouter } from "yieldstar";
-import { RetryableError, ExecutionAdmissionError } from "yieldstar";
+import { RetryableError, ExecutionAdmissionError, WorkflowStartError } from "yieldstar";
 import { defineStore } from "yieldstar";
 import { createLocalSdk } from "yieldstar";
 import { createHttpSdkFactory } from "yieldstar";
-import type { WorkflowFn, WorkflowStore, ExecutionRecord, ExecutionStatus } from "yieldstar";
+import type {
+  WorkflowFn,
+  WorkflowStore,
+  ExecutionRecord,
+  ExecutionStatus,
+  ExecutionParent,
+  DurableObject,
+  DurableValue,
+  WorkflowStartErrorCode,
+} from "yieldstar";
 ```
 
 ## `workflow(fn)` / `createWorkflow(fn)`
@@ -65,6 +74,10 @@ throw new RetryableError(message, { maxAttempts, retryInterval });
 
 Thrown by both SDKs' `trigger` when admission is rejected. `err.code` is `"EXECUTION_ID_CONFLICT"` (the `executionId` is already in use) or `"INVALID_EXECUTION_EVENT"` (the event cannot round-trip through JSON).
 
+## `WorkflowStartError`
+
+Thrown to workflow code by `step.start` when the runtime rejects the start. `err.code` is `"INVALID_START_PARAMETERS"` (`params` are not plain data, or `workflowId` is empty) or `"START_REQUEST_MISMATCH"` (the step already started a different workflow or different `params`). See [`step.start`](../manual/steps.md#stepstart).
+
 ## `createLocalSdk<Router>(runtime, { invoker?, pollInterval? })`
 
 Creates a local SDK client that admits executions into `runtime`. See [Local SDK](../manual/sdk-local.md).
@@ -96,6 +109,10 @@ yield * step.poll(opts, predicate);
 yield * step.poll("key", opts, predicate);
 
 yield * step.store(definition, { id, initial });
+
+yield * step.start("key", { workflowId, params });
 ```
 
 `step.store` returns a `WorkflowStore` handle with `get`, `select`, `update`, `when`, and `take` – see [Durable Stores](../manual/stores.md) and [Waiting on State](../manual/store-waiting.md).
+
+`step.start` starts another workflow as its own execution, once per step key, and returns `{ executionId }` – see [Steps](../manual/steps.md#stepstart).

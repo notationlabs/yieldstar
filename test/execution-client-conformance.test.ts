@@ -10,6 +10,18 @@ const { createSqliteDb } = isBun
   ? await import("@yieldstar/sqlite-runtime/bun")
   : await import("@yieldstar/sqlite-runtime/node");
 
+type SqliteDb = ReturnType<typeof createSqliteDb>;
+
+// The trigger aborts the start-request insert, after the target's insert in the
+// same transaction, so the case checks that the target rolls back with it.
+function failStartCommits(db: SqliteDb) {
+  db.run(`
+    CREATE TEMP TRIGGER fail_start_commit BEFORE INSERT ON start_requests
+    BEGIN SELECT RAISE(ABORT, 'injected start failure'); END
+  `);
+  return () => db.run("DROP TRIGGER temp.fail_start_commit");
+}
+
 registerExecutionClientConformance({
   name: "memory",
   create(options) {
@@ -29,6 +41,7 @@ registerExecutionClientConformance({
       restart() {
         return new SqliteRuntime(db, options);
       },
+      failStartCommits: () => failStartCommits(db),
       dispose() {
         db.close();
       },
@@ -52,6 +65,7 @@ registerExecutionClientConformance({
       runtime: new SqliteRuntime(dbs[0], options),
       createPeer: open,
       restart: open,
+      failStartCommits: () => failStartCommits(dbs[0]),
       dispose() {
         for (const db of dbs) db.close();
         rmSync(dir, { recursive: true, force: true });

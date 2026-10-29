@@ -3,8 +3,14 @@ import {
   StepResponse,
   StoreNotFoundError,
   StoreValidationError,
+  type ExecutionClient,
   type StoreClient,
 } from "@yieldstar/core";
+
+export type RuntimeClients = {
+  stores: StoreClient;
+  executions: ExecutionClient;
+};
 
 export type RuntimeCallResult<T> =
   | { ok: true; value: T }
@@ -20,9 +26,9 @@ export type RuntimeCallResult<T> =
 export class StepRuntimeCall<T = unknown> extends StepResponse {
   static type = "runtime-call";
   readonly type = "runtime-call";
-  readonly call: (clients: { stores: StoreClient }) => Promise<T>;
+  readonly call: (clients: RuntimeClients) => Promise<T>;
 
-  constructor(call: (clients: { stores: StoreClient }) => Promise<T>) {
+  constructor(call: (clients: RuntimeClients) => Promise<T>) {
     super();
     this.call = call;
   }
@@ -58,11 +64,12 @@ export function workflowCallback<A extends unknown[], R>(
 
 export async function executeRuntimeCall<T>(
   request: StepRuntimeCall<T>,
-  clients: { stores: StoreClient }
+  clients: RuntimeClients
 ): Promise<RuntimeCallResult<T>> {
   try {
     return { ok: true, value: await request.call(clients) };
   } catch (err) {
+    if (InfrastructureError.is(err)) throw err;
     if (err instanceof StepCallbackError) return { ok: false, error: err.cause };
     if (isWorkflowFacingError(err)) return { ok: false, error: err };
     throw new InfrastructureError(err);

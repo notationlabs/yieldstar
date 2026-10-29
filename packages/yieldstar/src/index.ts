@@ -2,7 +2,7 @@ export { createLocalSdk } from "./exports/sdk-local";
 export { createHttpSdkFactory } from "./exports/sdk-http";
 export { createWorkflowRouter } from "./exports/router";
 export { RetryableError } from "./exports/errors";
-export { ExecutionAdmissionError } from "@yieldstar/core";
+export { ExecutionAdmissionError, WorkflowStartError } from "@yieldstar/core";
 export { createWorkflow, workflow } from "./exports/workflow";
 export type { WorkflowFn } from "./exports/workflow";
 export { defineStore } from "./internal/step-runner";
@@ -26,4 +26,8 @@ export type {
   ExecutionOutcome,
   ExecutionRecord,
   ExecutionStatus,
+  ExecutionParent,
+  DurableObject,
+  DurableValue,
+  WorkflowStartErrorCode,
 } from "@yieldstar/core";

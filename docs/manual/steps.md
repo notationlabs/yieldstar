@@ -57,6 +57,28 @@ yield *
 
 If the predicate returns `false` on every attempt, the step throws after `maxAttempts`. If the predicate throws a non-retryable error, execution stops immediately.
 
+## `step.start`
+
+`step.start` starts another workflow as its own execution and returns `{ executionId }`. It takes a step key and the target workflow:
+
+```ts
+const target = yield* step.start("ship", {
+  workflowId: "ship-order",
+  params: { orderId: event.params.orderId },
+});
+```
+
+The start is identified by the calling execution's ID and the step key. If a delivery stops after the target is started but before the step is recorded, the next delivery sends the same request and receives the same target, so the workflow is never started twice. The target's execution record links back to the caller and its step as `parent`, and inherits the caller's `context`.
+
+`params` must be plain data: `null`, booleans, finite numbers, strings, and arrays and plain objects built from them. Keys may be in any order.
+
+A rejected start throws a `WorkflowStartError`, which workflow code can catch. Its `code` is:
+
+- `INVALID_START_PARAMETERS` when `params` are not plain data or `workflowId` is empty; or
+- `START_REQUEST_MISMATCH` when the step was already started with a different `workflowId` or `params`, for example after a deploy changed the step.
+
+The rejection is recorded, so replay throws the same error. If the runtime fails while starting the target, the error is an infrastructure error: it does not reach workflow code, and the next delivery tries the same start again.
+
 ## Cache keys
 
 Yieldstar derives a cache key for each step automatically from the call site. This works for straight-line workflows, but breaks inside loops because every iteration shares the same call site and collides.
@@ -77,6 +99,8 @@ yield * step.delay("key", ms);
 yield * step.poll("key", opts, predicate);
 ```
 
+`step.start` always takes a key, because the key identifies the start request as well as the cached step. Keep it stable across deploys: a different key starts a different target.
+
 If two steps in the same execution resolve to the same cache key, the runtime throws: `"Each step in a loop must have a unique cache key."`
 
 ## Errors
@@ -87,7 +111,8 @@ Errors fall into two groups, and only the first reaches workflow code.
 | ----------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | Errors thrown by your step functions                                         | The heap or store database throws                              |
 | Errors thrown by your store updaters, selectors, claims and initial states    | A worker crashes or exits before reporting an outcome          |
-| `StoreValidationError` (a state failed its schema), `StoreNotFoundError`      |                                                                |
+| `StoreValidationError` (a state failed its schema), `StoreNotFoundError`      | The execution client throws during `step.start`                |
+| `WorkflowStartError` (`step.start` was rejected)                              |                                                                |
 
 Steps do not call runtime clients themselves. A store step yields a request, and the driver makes the call outside workflow code, then resumes the step with the result. If the call fails with an infrastructure error, the driver does not resume the step, so a `try/catch` around it never runs:
 
