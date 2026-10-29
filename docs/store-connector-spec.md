@@ -173,7 +173,7 @@ A rejected public promise does not prove that no commit occurred. Exactly-once r
 
 Validation failures, a throwing `initial`, and asynchronous updater or claim callbacks MUST leave state, receipts, and wakes unchanged, and create no store.
 
-Schema failures MUST surface as `StoreValidationError` (`validateStoreState` throws it for connectors that use it), or as errors with that `name`. Workflow code can catch it. Operations create missing stores, so no store client throws `StoreNotFoundError`; the class stays registered so recorded failures still decode. Every other error a store client throws is treated as an infrastructure error: the delivery ends without an outcome, its lease is released unacknowledged, and the runtime delivers it again after the redelivery delay.
+Schema failures MUST surface as `StoreValidationError` (`validateStoreState` throws it for connectors that use it), or as errors with that `name`. Workflow code can catch it. Every other error a store client throws is treated as an infrastructure error: the delivery ends without an outcome, its lease is released unacknowledged, and the runtime delivers it again after the redelivery delay.
 
 ## Running the suite
 

@@ -155,7 +155,6 @@ export type {
 export {
   StoreClient,
   CasStoreClient,
-  StoreNotFoundError,
   StoreValidationError,
   assertSynchronousClaim,
   assertSynchronousUpdater,

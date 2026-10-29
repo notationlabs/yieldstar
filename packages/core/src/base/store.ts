@@ -158,19 +158,7 @@ export class StoreValidationError extends Error {
   }
 }
 
-/**
- * The addressed store did not exist. Operations now create missing stores, so
- * nothing throws it; it stays registered so recorded failures still decode.
- */
-export class StoreNotFoundError extends Error {
-  constructor(storeName: string, storeId: string) {
-    super(`Store "${storeName}:${storeId}" does not exist`);
-    this.name = "StoreNotFoundError";
-  }
-}
-
 registerErrorClass("StoreValidationError", StoreValidationError);
-registerErrorClass("StoreNotFoundError", StoreNotFoundError);
 
 /**
  * A schema whose output, the store state, is a durable value. The state is

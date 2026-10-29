@@ -3,7 +3,6 @@ import type { Logger } from "pino";
 import {
   ExecutionDispatcher,
   ReadOnlyMap,
-  StoreNotFoundError,
   StoreValidationError,
   WorkflowRunner,
 } from "@yieldstar/core";
@@ -515,7 +514,6 @@ describe("step errors", () => {
     ["WorkflowStartError", () => new WorkflowStartError("START_REQUEST_MISMATCH", "m"), WorkflowStartError],
     ["WorkflowValueError", () => new WorkflowValueError("INVALID_STEP_VALUE", "k", "m"), WorkflowValueError],
     ["StoreValidationError", () => new StoreValidationError("m"), StoreValidationError],
-    ["StoreNotFoundError", () => new StoreNotFoundError("s", "id"), StoreNotFoundError],
   ] as const)("%s is rethrown with its class", async (_name, make, errorClass) => {
     const { first, replay } = await acrossReplay((step) =>
       step.run("value", async () => {
