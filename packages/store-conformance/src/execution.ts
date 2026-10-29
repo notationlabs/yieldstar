@@ -914,6 +914,647 @@ export function registerExecutionClientConformance({
       });
     });
 
+    describe("leases", () => {
+      it("grants exactly one lease when two clients claim one due execution concurrently", async ({
+        runtime,
+        harness,
+      }) => {
+        await admit(runtime, "contended");
+        const peer = (await harness.createPeer?.()) ?? runtime;
+        const claims = await Promise.all([claim(runtime), claim(peer), claim(runtime)]);
+        const leases = claims.flat();
+        expect(leases.map((lease) => lease.executionId)).toEqual(["contended"]);
+      });
+
+      it("never grants a second live lease to concurrent claimers of many executions", async ({
+        runtime,
+        harness,
+      }) => {
+        const ids = Array.from({ length: 20 }, (_, i) => `many-${String(i).padStart(2, "0")}`);
+        for (const id of ids) await admit(runtime, id);
+        const peer = (await harness.createPeer?.()) ?? runtime;
+        const claims = await Promise.all(
+          Array.from({ length: 6 }, (_, i) => claim(i % 2 ? peer : runtime, 4))
+        );
+        const claimed = claims.flat().map((lease) => lease.executionId).sort();
+        expect(new Set(claimed).size).toBe(claimed.length);
+        expect(claimed).toEqual(ids);
+      });
+
+      it("returns at most `limit` leases, earliest due first", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        for (const id of ["late", "early", "middle"]) await admitSuspended(runtime, id);
+        await runtime.executions.requestWake({ executionId: "late", wakeAt: clock.now + 30 });
+        await runtime.executions.requestWake({ executionId: "early", wakeAt: clock.now + 10 });
+        await runtime.executions.requestWake({ executionId: "middle", wakeAt: clock.now + 20 });
+        advance(30);
+        expect(await claim(runtime, 0)).toEqual([]);
+        expect((await claim(runtime, 2)).map((lease) => lease.executionId)).toEqual([
+          "early",
+          "middle",
+        ]);
+        expect((await claim(runtime, 2)).map((lease) => lease.executionId)).toEqual(["late"]);
+      });
+
+      it("marks a claimed execution running", async ({ runtime }) => {
+        await admit(runtime, "running");
+        expect(await runtime.executions.get("running")).toMatchObject({ status: "admitted" });
+        await claimOne(runtime, "running");
+        expect(await runtime.executions.get("running")).toMatchObject({
+          status: "running",
+          unacknowledgedDeliveries: 0,
+        });
+      });
+
+      it("makes an execution claimable with a higher token once its lease expires", async ({
+        runtime,
+        advance,
+      }) => {
+        await admit(runtime, "expires");
+        const first = await claimOne(runtime, "expires");
+        advance(LEASE - 1);
+        expect(await claim(runtime)).toEqual([]);
+        expect(await runtime.executions.get("expires")).toMatchObject({ status: "running" });
+        advance(REDELIVER_AFTER - LEASE + 1);
+        const second = await claimOne(runtime, "expires");
+        expect(second.token).toBeGreaterThan(first.token);
+        // A worker that exits without replying leaves its lease to expire;
+        // the execution is delivered again, and the expiry counts.
+        expect(await runtime.executions.get("expires")).toMatchObject({
+          status: "running",
+          unacknowledgedDeliveries: 1,
+        });
+      });
+
+      it("returns an expired lease's execution to admitted before any acknowledgement", async ({
+        runtime,
+        advance,
+      }) => {
+        await admit(runtime, "never-acked");
+        await claimOne(runtime, "never-acked");
+        advance(LEASE);
+        expect(await runtime.executions.get("never-acked")).toMatchObject({
+          status: "admitted",
+          unacknowledgedDeliveries: 1,
+        });
+      });
+
+      it("returns an expired lease's execution to suspended after an earlier suspended delivery", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admitSuspended(runtime, "was-suspended");
+        await runtime.executions.requestWake({ executionId: "was-suspended", wakeAt: clock.now });
+        await claimOne(runtime, "was-suspended");
+        advance(LEASE);
+        expect(await runtime.executions.get("was-suspended")).toMatchObject({
+          status: "suspended",
+          unacknowledgedDeliveries: 1,
+        });
+      });
+
+      it("keeps a renewed lease past its original expiry with one claim", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admit(runtime, "long");
+        let lease = await claimOne(runtime, "long");
+        for (let i = 0; i < 5; i++) {
+          advance(LEASE - 1);
+          const renewed = await runtime.executions.renew({ lease, duration: LEASE });
+          expect(renewed).toEqual({
+            status: "renewed",
+            lease: { executionId: "long", token: lease.token, expiresAt: clock.now + LEASE },
+          });
+          if (renewed.status !== "renewed") throw new Error("renewal lost");
+          lease = renewed.lease;
+          expect(await claim(runtime)).toEqual([]);
+          expect(await runtime.executions.get("long")).toMatchObject({ status: "running" });
+        }
+        // Five lease periods later, the original claim still acknowledges.
+        expect(
+          await runtime.executions.acknowledge({
+            lease,
+            outcome: { status: "completed", result: "done" },
+          })
+        ).toEqual({ status: "completed", result: "done" });
+        expect(await runtime.executions.get("long")).toMatchObject({
+          status: "completed",
+          unacknowledgedDeliveries: 0,
+        });
+      });
+
+      it("returns lost when renewing with a stale token", async ({ runtime, advance }) => {
+        await admit(runtime, "stale-renew");
+        const stale = await claimOne(runtime, "stale-renew");
+        advance(REDELIVER_AFTER);
+        const current = await claimOne(runtime, "stale-renew");
+        expect(await runtime.executions.renew({ lease: stale, duration: LEASE })).toEqual({
+          status: "lost",
+        });
+        // The stale renewal did not extend the current lease.
+        advance(LEASE);
+        expect(await runtime.executions.get("stale-renew")).toMatchObject({
+          status: "admitted",
+        });
+        expect(await runtime.executions.renew({ lease: current, duration: LEASE })).toMatchObject({
+          status: "renewed",
+        });
+      });
+
+      it("keeps an expired lease current until another claim issues a higher token", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admit(runtime, "expired-unclaimed");
+        const lease = await claimOne(runtime, "expired-unclaimed");
+        advance(REDELIVER_AFTER * 3);
+        expect(
+          await runtime.heap.writeStep({
+            lease,
+            stepKey: "step",
+            stepAttempt: 0,
+            done: true,
+            stepResponseJson: JSON.stringify({ value: 1 }),
+          })
+        ).toEqual({ stepResponseJson: JSON.stringify({ value: 1 }), meta: { attempt: 0, done: true } });
+        const renewed = await runtime.executions.renew({ lease, duration: LEASE });
+        expect(renewed).toEqual({
+          status: "renewed",
+          lease: { ...lease, expiresAt: clock.now + LEASE },
+        });
+        expect(await runtime.executions.get("expired-unclaimed")).toMatchObject({
+          status: "running",
+          unacknowledgedDeliveries: 0,
+        });
+        expect(await claim(runtime)).toEqual([]);
+        expect(
+          await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } })
+        ).toEqual({ status: "suspended" });
+      });
+
+      it("makes a released execution claimable after the redelivery delay with a higher token", async ({
+        runtime,
+        advance,
+      }) => {
+        await admitSuspended(runtime, "released");
+        const before = await runtime.executions.get("released");
+        await runtime.executions.requestWake({ executionId: "released", wakeAt: START });
+        const first = await claimOne(runtime, "released");
+        expect(await runtime.executions.release({ lease: first })).toEqual({
+          status: "released",
+        });
+        // Releasing acknowledges nothing: the status and outcome are unchanged.
+        const released = await runtime.executions.get("released");
+        expect(released).toMatchObject({ status: "suspended", unacknowledgedDeliveries: 1 });
+        expect(released!.outcome).toBeUndefined();
+        expect(released!.updatedAt).toBe(before!.updatedAt);
+        // The released lease is no longer current.
+        expect(await runtime.executions.release({ lease: first })).toEqual({ status: "lost" });
+        expect(await runtime.executions.renew({ lease: first, duration: LEASE })).toEqual({
+          status: "lost",
+        });
+        expect(
+          await runtime.executions.acknowledge({ lease: first, outcome: { status: "suspended" } })
+        ).toEqual({ status: "lost" });
+
+        advance(redeliveryDelay(1) - 1);
+        expect(await claim(runtime)).toEqual([]);
+        advance(1);
+        const second = await claimOne(runtime, "released");
+        expect(second.token).toBeGreaterThan(first.token);
+      });
+
+      it("ends the lease on a suspended acknowledgement and makes the execution due at a wake requested during it", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admit(runtime, "woken-during");
+        const lease = await claimOne(runtime, "woken-during");
+        await runtime.executions.requestWake({ executionId: "woken-during", wakeAt: clock.now + 50 });
+        await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
+        expect(await runtime.executions.get("woken-during")).toMatchObject({
+          status: "suspended",
+        });
+        expect(await runtime.executions.renew({ lease, duration: LEASE })).toEqual({
+          status: "lost",
+        });
+        advance(49);
+        expect(await claim(runtime)).toEqual([]);
+        advance(1);
+        const next = await claimOne(runtime, "woken-during");
+        expect(next.token).toBeGreaterThan(lease.token);
+      });
+
+      it("ends the lease on a suspended acknowledgement and makes the execution due at wakeAt", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admit(runtime, "wake-at");
+        const lease = await claimOne(runtime, "wake-at");
+        await runtime.executions.acknowledge({
+          lease,
+          outcome: { status: "suspended", wakeAt: clock.now + 70 },
+        });
+        expect(await runtime.executions.renew({ lease, duration: LEASE })).toEqual({
+          status: "lost",
+        });
+        advance(69);
+        expect(await claim(runtime)).toEqual([]);
+        advance(1);
+        await claimOne(runtime, "wake-at");
+      });
+
+      it("ends the lease on a suspended acknowledgement and leaves the execution not due without a wake", async ({
+        runtime,
+        advance,
+      }) => {
+        await admit(runtime, "not-due");
+        const lease = await claimOne(runtime, "not-due");
+        await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
+        expect(await runtime.executions.release({ lease })).toEqual({ status: "lost" });
+        advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
+        expect(await runtime.executions.get("not-due")).toMatchObject({
+          status: "suspended",
+          unacknowledgedDeliveries: 0,
+        });
+      });
+
+      it("returns lost for a lease on an unknown execution", async ({ runtime }) => {
+        const ghost: ExecutionLease = { executionId: "ghost", token: 1, expiresAt: START + LEASE };
+        expect(await runtime.executions.renew({ lease: ghost, duration: LEASE })).toEqual({
+          status: "lost",
+        });
+        expect(await runtime.executions.release({ lease: ghost })).toEqual({ status: "lost" });
+        expect(
+          await runtime.executions.acknowledge({ lease: ghost, outcome: { status: "suspended" } })
+        ).toEqual({ status: "lost" });
+        expect(
+          await runtime.heap.writeStep({
+            lease: ghost,
+            stepKey: "step",
+            stepAttempt: 0,
+            done: true,
+            stepResponseJson: "{}",
+          })
+        ).toEqual({ status: "lost" });
+        expect(await runtime.executions.get("ghost")).toBeUndefined();
+      });
+
+      itAfterRestart("keeps leases and tokens across a restart", async ({
+        runtime,
+        advance,
+        restart,
+      }) => {
+        await admit(runtime, "held");
+        const held = await claimOne(runtime, "held");
+        const restarted = await restart();
+        expect(await restarted.executions.get("held")).toMatchObject({ status: "running" });
+        expect(await claim(restarted)).toEqual([]);
+        expect(await restarted.executions.renew({ lease: held, duration: LEASE })).toMatchObject({
+          status: "renewed",
+        });
+        advance(REDELIVER_AFTER);
+        const next = await claimOne(restarted, "held");
+        expect(next.token).toBeGreaterThan(held.token);
+        expect(await restarted.executions.release({ lease: held })).toEqual({ status: "lost" });
+      });
+    });
+
+    describe("redelivery delay", () => {
+      it("delays each redelivery after a release by a non-zero delay no shorter than the last", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admit(runtime, "retrying");
+        let lease = await claimOne(runtime, "retrying");
+        let previousDelay = 0;
+        for (let attempt = 1; attempt <= 6; attempt++) {
+          await runtime.executions.release({ lease });
+          expect(await runtime.executions.get("retrying")).toMatchObject({
+            unacknowledgedDeliveries: attempt,
+          });
+          // Find when the execution becomes claimable again.
+          const releasedAt = clock.now;
+          let next: ExecutionLease[];
+          while ((next = await claim(runtime)).length === 0) {
+            advance(100);
+            if (clock.now - releasedAt > 60 * 60_000) throw new Error("never redelivered");
+          }
+          const delay = clock.now - releasedAt;
+          expect(delay).toBeGreaterThan(0);
+          expect(delay).toBeGreaterThanOrEqual(previousDelay);
+          previousDelay = delay;
+          lease = next[0];
+        }
+      });
+
+      it("counts both a release and a later expiry", async ({ runtime, advance }) => {
+        await admit(runtime, "both");
+        const released = await claimOne(runtime, "both");
+        await runtime.executions.release({ lease: released });
+        advance(redeliveryDelay(1));
+        await claimOne(runtime, "both");
+        advance(LEASE);
+        expect(await runtime.executions.get("both")).toMatchObject({
+          unacknowledgedDeliveries: 2,
+        });
+        // The expired lease's redelivery waits the second delay after expiry.
+        advance(redeliveryDelay(2) - 1);
+        expect(await claim(runtime)).toEqual([]);
+        advance(1);
+        await claimOne(runtime, "both");
+        expect(await runtime.executions.get("both")).toMatchObject({
+          unacknowledgedDeliveries: 2,
+        });
+      });
+
+      it("resets the count on acknowledgement, so the next wake is not delayed", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admit(runtime, "recovers");
+        for (let i = 1; i <= 3; i++) {
+          const lease = await claimOne(runtime, "recovers");
+          await runtime.executions.release({ lease });
+          advance(redeliveryDelay(i));
+        }
+        expect(await runtime.executions.get("recovers")).toMatchObject({
+          unacknowledgedDeliveries: 3,
+        });
+        const lease = await claimOne(runtime, "recovers");
+        await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
+        expect(await runtime.executions.get("recovers")).toMatchObject({
+          status: "suspended",
+          unacknowledgedDeliveries: 0,
+        });
+        await runtime.executions.requestWake({ executionId: "recovers", wakeAt: clock.now });
+        await claimOne(runtime, "recovers");
+      });
+
+      it("holds wakes requested during the delay until it passes", async ({
+        runtime,
+        clock,
+        advance,
+      }) => {
+        await admit(runtime, "held-back");
+        const lease = await claimOne(runtime, "held-back");
+        await runtime.executions.release({ lease });
+        await runtime.executions.requestWake({ executionId: "held-back", wakeAt: clock.now });
+        expect(await claim(runtime)).toEqual([]);
+        advance(redeliveryDelay(1));
+        await claimOne(runtime, "held-back");
+      });
+    });
+
+    describe("fencing", () => {
+      /** Claims, lets the lease expire, and claims again: returns both leases. */
+      async function reclaim(
+        ctx: { runtime: Runtime; advance(ms: number): void },
+        executionId: string
+      ) {
+        const stale = await claimOne(ctx.runtime, executionId);
+        ctx.advance(REDELIVER_AFTER);
+        const current = await claimOne(ctx.runtime, executionId);
+        expect(current.token).toBeGreaterThan(stale.token);
+        return { stale, current };
+      }
+
+      function write(
+        runtime: Runtime,
+        lease: ExecutionLease,
+        stepKey: string,
+        value: unknown,
+        options: { attempt?: number; done?: boolean } = {}
+      ) {
+        return runtime.heap.writeStep({
+          lease,
+          stepKey,
+          stepAttempt: options.attempt ?? 0,
+          done: options.done ?? true,
+          stepResponseJson: JSON.stringify(value),
+        });
+      }
+
+      it("rejects a stale holder's heap write after a reclaim and keeps the current records", async (ctx) => {
+        const { runtime } = ctx;
+        await admit(runtime, "stale-write");
+        const { stale, current } = await reclaim(ctx, "stale-write");
+        expect(await write(runtime, current, "charge", "current")).toMatchObject({
+          stepResponseJson: JSON.stringify("current"),
+        });
+        expect(await write(runtime, stale, "charge", "stale")).toEqual({ status: "lost" });
+        expect(await write(runtime, stale, "charge", "stale", { attempt: 1 })).toEqual({
+          status: "lost",
+        });
+        expect(await write(runtime, stale, "other", "stale")).toEqual({ status: "lost" });
+        expect(await runtime.heap.readStep({ executionId: "stale-write", stepKey: "charge" })).toEqual({
+          stepResponseJson: JSON.stringify("current"),
+          meta: { attempt: 0, done: true },
+        });
+        expect(
+          await runtime.heap.readStep({ executionId: "stale-write", stepKey: "other" })
+        ).toBeNull();
+      });
+
+      it("rejects a stale holder's acknowledgement after a reclaim and leaves the record unchanged", async (ctx) => {
+        const { runtime } = ctx;
+        await admitSuspended(runtime, "stale-ack");
+        await runtime.executions.requestWake({ executionId: "stale-ack", wakeAt: ctx.clock.now });
+        const { stale, current } = await reclaim(ctx, "stale-ack");
+        const before = await runtime.executions.get("stale-ack");
+        for (const outcome of [
+          { status: "completed", result: "stale" },
+          { status: "failed", error: new Error("stale") },
+          { status: "suspended", wakeAt: ctx.clock.now },
+        ] as const) {
+          expect(await runtime.executions.acknowledge({ lease: stale, outcome })).toEqual({
+            status: "lost",
+          });
+        }
+        expect(await runtime.executions.get("stale-ack")).toEqual(before);
+        expect(before).toMatchObject({ status: "running" });
+        // The current holder's lease is intact.
+        expect(
+          await runtime.executions.acknowledge({
+            lease: current,
+            outcome: { status: "completed", result: "current" },
+          })
+        ).toEqual({ status: "completed", result: "current" });
+      });
+
+      it("rejects every fenced write from a holder that pauses past expiry after another claims", async (ctx) => {
+        const { runtime } = ctx;
+        await admit(runtime, "paused");
+        const paused = await claimOne(runtime, "paused");
+        expect(await write(runtime, paused, "before-pause", 1)).toMatchObject({
+          meta: { attempt: 0, done: true },
+        });
+        ctx.advance(REDELIVER_AFTER);
+        const peer = (await ctx.harness.createPeer?.()) ?? runtime;
+        const current = await claimOne(peer, "paused");
+        // The first holder resumes, unaware that time has passed.
+        expect(await write(runtime, paused, "after-pause", 2)).toEqual({ status: "lost" });
+        expect(await runtime.executions.renew({ lease: paused, duration: LEASE })).toEqual({
+          status: "lost",
+        });
+        expect(await runtime.executions.release({ lease: paused })).toEqual({ status: "lost" });
+        expect(
+          await runtime.executions.acknowledge({
+            lease: paused,
+            outcome: { status: "completed", result: "paused" },
+          })
+        ).toEqual({ status: "lost" });
+        // None of it disturbed the current holder.
+        expect(await write(peer, current, "after-pause", 3)).toMatchObject({
+          stepResponseJson: "3",
+        });
+        expect(await peer.executions.get("paused")).toMatchObject({ status: "running" });
+      });
+
+      it("accepts the current holder's rewrite of an existing step record without changing it", async ({
+        runtime,
+      }) => {
+        await admit(runtime, "rewrite");
+        const lease = await claimOne(runtime, "rewrite");
+        const first = await write(runtime, lease, "charge", { receipt: "r-1" });
+        const again = await write(runtime, lease, "charge", { receipt: "r-1" });
+        expect(again).toEqual(first);
+        expect(await runtime.heap.readStep({ executionId: "rewrite", stepKey: "charge" })).toEqual(
+          first
+        );
+      });
+
+      it("keeps an existing step record when the current holder writes a different value, and returns the recorded one", async ({
+        runtime,
+      }) => {
+        await admit(runtime, "conflict");
+        const lease = await claimOne(runtime, "conflict");
+        await write(runtime, lease, "charge", { receipt: "r-1" });
+        // The returned record holds the recorded value, so the caller can see
+        // the conflict and end the delivery as a retry.
+        expect(
+          await write(runtime, lease, "charge", { receipt: "r-2" }, { done: false })
+        ).toEqual({
+          stepResponseJson: JSON.stringify({ receipt: "r-1" }),
+          meta: { attempt: 0, done: true },
+        });
+        expect(await runtime.heap.readStep({ executionId: "conflict", stepKey: "charge" })).toEqual({
+          stepResponseJson: JSON.stringify({ receipt: "r-1" }),
+          meta: { attempt: 0, done: true },
+        });
+        // The next delivery replays the recorded value.
+        await runtime.executions.release({ lease });
+        expect(await runtime.heap.readStep({ executionId: "conflict", stepKey: "charge" })).toEqual({
+          stepResponseJson: JSON.stringify({ receipt: "r-1" }),
+          meta: { attempt: 0, done: true },
+        });
+      });
+
+      it("keeps a waiter when a stale holder's step result would delete it", async (ctx) => {
+        const { runtime } = ctx;
+        await admitSuspended(runtime, "stale-waiter");
+        const snapshot = await runtime.stores.getOrCreateStore({
+          definition: Store,
+          id: "stale-waiter",
+          initial: { messages: [] },
+        });
+        const registered = waiter("stale-waiter", snapshot.instanceId, snapshot.version);
+        await runtime.stores.registerWaiter(registered);
+        await runtime.executions.requestWake({ executionId: "stale-waiter", wakeAt: ctx.clock.now });
+        const { stale, current } = await reclaim(ctx, "stale-waiter");
+        expect(
+          await write(runtime, stale, registered.stepKey, { id: "m1" }, { attempt: 1 })
+        ).toEqual({ status: "lost" });
+        await runtime.executions.acknowledge({ lease: current, outcome: { status: "suspended" } });
+        // The waiter survived, so a commit still wakes the execution.
+        await appendMessage(runtime, "stale-waiter", "m1");
+        expect(await claimedIds(runtime)).toEqual(["stale-waiter"]);
+      });
+
+      it("applies a stale holder's idempotent store update once and returns the recorded result to the current holder", async (ctx) => {
+        const { runtime } = ctx;
+        await admit(runtime, "store-receipt");
+        await runtime.stores.getOrCreateStore({
+          definition: Store,
+          id: "store-receipt",
+          initial: { messages: [] },
+        });
+        const { stale, current } = await reclaim(ctx, "store-receipt");
+        const stepId = { executionId: "store-receipt", stepKey: "append" };
+        // Store updates are not fenced: the stale holder's commit applies.
+        const staleResult = await runtime.stores.updateStore({
+          definition: Store,
+          id: "store-receipt",
+          stepId,
+          updater(draft) {
+            draft.messages.push({ id: "stale" });
+          },
+        });
+        const currentResult = await runtime.stores.updateStore({
+          definition: Store,
+          id: "store-receipt",
+          stepId,
+          updater(draft) {
+            draft.messages.push({ id: "current" });
+          },
+        });
+        expect(currentResult).toEqual(staleResult);
+        expect(
+          await runtime.stores.getStore({ definition: Store, id: "store-receipt" })
+        ).toMatchObject({ state: { messages: [{ id: "stale" }] }, version: 1 });
+        // Only the current holder records the step that returns the receipt.
+        expect(await write(runtime, stale, "append", staleResult)).toEqual({ status: "lost" });
+        expect(await write(runtime, current, "append", currentResult)).toMatchObject({
+          meta: { done: true },
+        });
+      });
+
+      it("lets a stale holder's wake cause at most one extra delivery and leaves the outcome unchanged", async (ctx) => {
+        const { runtime } = ctx;
+        await admit(runtime, "stale-wake");
+        const { current } = await reclaim(ctx, "stale-wake");
+        await runtime.executions.acknowledge({ lease: current, outcome: { status: "suspended" } });
+        // The stale holder requests a wake (unfenced).
+        await runtime.executions.requestWake({ executionId: "stale-wake", wakeAt: ctx.clock.now });
+        const extra = await claimOne(runtime, "stale-wake");
+        // Replay absorbs it: the extra delivery suspends again.
+        await runtime.executions.acknowledge({ lease: extra, outcome: { status: "suspended" } });
+        ctx.advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
+        expect(await runtime.executions.get("stale-wake")).toMatchObject({
+          status: "suspended",
+          unacknowledgedDeliveries: 0,
+        });
+
+        // Against a terminal execution, a stale wake is ignored.
+        await admit(runtime, "stale-wake-done");
+        const done = await reclaim(ctx, "stale-wake-done");
+        await runtime.executions.acknowledge({
+          lease: done.current,
+          outcome: { status: "completed", result: "ok" },
+        });
+        expect(
+          await runtime.executions.requestWake({
+            executionId: "stale-wake-done",
+            wakeAt: ctx.clock.now,
+          })
+        ).toEqual({ status: "ignored" });
+        expect(await claim(runtime)).toEqual([]);
+      });
+    });
+
     describe("durability", () => {
       itAfterRestart("preserves admitted and suspended records and their pending wakes across a restart", async ({ runtime, clock, advance, restart }) => {
         await admit(runtime, "delayed");
