@@ -1,5 +1,6 @@
 export type { HeapClient, HeapRecord } from "./base/heap";
 export type { WorkflowInvoker } from "./base/invoker";
+export { WorkerExitedError } from "./base/invoker";
 export type { RuntimeOptions } from "./base/runtime";
 export { Runtime } from "./base/runtime";
 export type {
@@ -22,6 +23,7 @@ export {
   ExecutionAdmissionError,
   InfrastructureError,
   LeaseLostError,
+  StepConflictError,
   isLeaseLost,
   isTerminalExecutionStatus,
 } from "./base/execution";
@@ -52,7 +54,11 @@ export {
   toExecutionRecord,
   unacknowledgedDeliveriesAt,
 } from "./lib/execution-state";
-export { ExecutionDispatcher } from "./lib/execution-dispatcher";
+export type { DispatcherOptions } from "./lib/execution-dispatcher";
+export {
+  DEFAULT_DISPATCHER_CONCURRENCY,
+  ExecutionDispatcher,
+} from "./lib/execution-dispatcher";
 export { waitForExecutionOutcome } from "./lib/wait-for-outcome";
 export type { StandardSchemaV1 } from "@standard-schema/spec";
 export type {

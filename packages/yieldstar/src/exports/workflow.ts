@@ -29,6 +29,7 @@ import {
   WorkflowResult,
   InfrastructureError,
   LeaseLostError,
+  StepConflictError,
   isLeaseLost,
 } from "@yieldstar/core";
 
@@ -209,20 +210,31 @@ export function workflow<
        * If this step attempt is not already cached, cache it
        */
       if (!cached) {
+        const done = !needsRetry && !needsWake;
+        const stepResponseJson = serializeStepResponse(stepResponse);
         const written = await infrastructure(() =>
           heapClient.writeStep({
             lease,
             stepKey,
             stepAttempt,
-            done: !needsRetry && !needsWake,
-            stepResponseJson: serializeStepResponse(stepResponse),
+            done,
+            stepResponseJson,
           })
         );
         // Another claim has taken over: stop without an outcome.
-        // TODO(RFC 002 phase 2): end the delivery as a retry when `written`
-        // holds a different value from the one this delivery wrote.
         if (isLeaseLost(written)) {
           throw new InfrastructureError(new LeaseLostError(executionId));
+        }
+        // The step was already recorded with a different value. The record
+        // stands, so this delivery must not continue with its own value: end
+        // it as a retry, and the next delivery replays the recorded one.
+        if (
+          written.stepResponseJson !== stepResponseJson ||
+          written.meta.done !== done
+        ) {
+          throw new InfrastructureError(
+            new StepConflictError(executionId, stepKey)
+          );
         }
       }
 

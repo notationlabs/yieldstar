@@ -5,6 +5,7 @@ import type {
   WorkflowInvoker,
   WorkflowRunOutcome,
 } from "@yieldstar/core";
+import { WorkerExitedError } from "@yieldstar/core";
 import { EventEmitter } from "node:events";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -15,7 +16,12 @@ import type { WorkerDelivery, WorkerMessage } from "./worker";
  * Runs each delivery in a forked worker process. `deliver` resolves with the
  * worker's outcome, and rejects when the delivery ends without one: a spawn
  * error, a missing handshake, an infrastructure error in the worker, or an
- * exit before replying.
+ * exit before replying. An exit before replying rejects with a
+ * `WorkerExitedError`, so the dispatcher leaves the lease to expire instead of
+ * releasing it.
+ *
+ * The worker exits as soon as its IPC channel to this process closes, so a
+ * worker whose runtime process has died makes no further fenced writes.
  */
 export function createWorkflowInvoker(params: {
   workerPath: string;
@@ -78,7 +84,9 @@ export function createWorkflowInvoker(params: {
           if (settled) return;
           const detail = signal ? `signal ${signal}` : `code ${code}`;
           settle({
-            error: new Error(`Worker process exited before replying (${detail})`),
+            error: new WorkerExitedError(
+              `Worker process exited before replying (${detail})`
+            ),
           });
         });
 

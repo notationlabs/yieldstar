@@ -266,12 +266,13 @@ test("an infrastructure error leaves the status unchanged and the execution is d
   const { executionId } = await sdk.trigger({ workflowId: "flaky" });
   await dispatcher.tick();
   await dispatcher.drain();
+  // The rejection is a retry reply: the lease is released, unacknowledged.
   const record = await runtime.executions.get(executionId);
-  expect(record?.status).toBe("running");
+  expect(record).toMatchObject({ status: "admitted", unacknowledgedDeliveries: 1 });
   expect(record?.outcome).toBeUndefined();
 
-  // Not claimable again until the lease expires and the redelivery delay passes.
-  now += DEFAULT_LEASE_DURATION + redeliveryDelay(1) - 1;
+  // Not claimable again until the redelivery delay passes.
+  now += redeliveryDelay(1) - 1;
   await dispatcher.tick();
   await dispatcher.drain();
   expect(runs).toBe(1);

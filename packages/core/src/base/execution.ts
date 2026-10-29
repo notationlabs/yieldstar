@@ -192,6 +192,25 @@ export class LeaseLostError extends Error {
   }
 }
 
+/**
+ * Thrown by the driver when the current holder writes a step record that
+ * already exists with a different value. The recorded value stands: the
+ * delivery ends as a retry, and the next delivery replays the recorded value.
+ */
+export class StepConflictError extends Error {
+  readonly executionId: string;
+  readonly stepKey: string;
+
+  constructor(executionId: string, stepKey: string) {
+    super(
+      `Step "${stepKey}" of execution "${executionId}" is already recorded with a different value`
+    );
+    this.name = "StepConflictError";
+    this.executionId = executionId;
+    this.stepKey = stepKey;
+  }
+}
+
 export class ExecutionAdmissionError extends Error {
   readonly code: ExecutionAdmissionErrorCode;
 

@@ -14,6 +14,35 @@ export type WorkflowInvoker = {
    * without an outcome, when the delivery hits an infrastructure error or the
    * worker exits before replying. Every fenced write the delivery makes
    * carries `lease`.
+   *
+   * A worker that exits before replying rejects with a `WorkerExitedError`:
+   * the dispatcher then leaves the lease to expire, because the worker's last
+   * writes may still be landing. Every other rejection is a retry reply, and
+   * the dispatcher releases the lease.
    */
   deliver(event: WorkflowEvent, lease: ExecutionLease): Promise<WorkflowRunOutcome>;
 };
+
+const WORKER_EXITED = Symbol.for("yieldstar.workerExited");
+
+/**
+ * Rejects a delivery whose worker exited, or was killed, before replying.
+ * The dispatcher does not release the lease: it expires, and the execution is
+ * delivered again after the redelivery delay.
+ */
+export class WorkerExitedError extends Error {
+  readonly [WORKER_EXITED] = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkerExitedError";
+  }
+
+  static is(value: unknown): value is WorkerExitedError {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      (value as Record<symbol, unknown>)[WORKER_EXITED] === true
+    );
+  }
+}
