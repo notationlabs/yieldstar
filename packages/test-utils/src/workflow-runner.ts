@@ -13,7 +13,7 @@ import { createLocalSdk } from "yieldstar";
 
 export function createTestSdkFactory(params?: {
   logger?: Logger;
-  /** Passed to the memory runtime, e.g. a fixed clock or a short redelivery timeout. */
+  /** Passed to the memory runtime, e.g. a fixed clock. */
   runtime?: ConstructorParameters<typeof MemoryRuntime>[0];
 }) {
   const logger = params?.logger ?? pino({ level: "error" });

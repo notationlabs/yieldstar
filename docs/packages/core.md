@@ -119,7 +119,7 @@ interface ExecutionClient {
 
 `ExecutionAdmissionError` (`code: "EXECUTION_ID_CONFLICT" | "INVALID_EXECUTION_EVENT"`) is what the SDKs throw for a rejected admission. `InfrastructureError` wraps a runtime failure; `InfrastructureError.is(err)` recognises one even when several copies of `@yieldstar/core` are loaded.
 
-Runtime adapter authors can import the storage-neutral state machine that `SqliteRuntime` and `MemoryRuntime` share: `prepareExecutionAdmission`, `createExecutionState`, `requestExecutionWake`, `claimExecution`, `acknowledgeExecution`, `nextClaimAt`, `isExecutionClaimable`, `toExecutionRecord`, and the event and outcome codecs. An adapter persists `ExecutionState` however it likes and applies each transition inside one atomic write. `DEFAULT_REDELIVERY_TIMEOUT` is five minutes.
+Runtime adapter authors can import the storage-neutral state machine that `SqliteRuntime` and `MemoryRuntime` share: `prepareExecutionAdmission`, `createExecutionState`, `requestExecutionWake`, `claimExecution`, `acknowledgeExecution`, `nextClaimAt`, `isExecutionClaimable`, `toExecutionRecord`, and the event and outcome codecs. An adapter persists `ExecutionState` however it likes and applies each transition inside one atomic write. `REDELIVERY_TIMEOUT` is the fixed five-minute window an adapter passes to `claimExecution`.
 
 ## `ExecutionDispatcher`
 

@@ -32,11 +32,11 @@ For Node, change the import to `@yieldstar/sqlite-runtime/node`. No other runtim
 | A trigger reuses an execution ID                     | Admission is rejected with `EXECUTION_ID_CONFLICT`; the HTTP route returns `409`             |
 | A timer and a store commit wake the same execution   | The wakes merge on the record; the execution is delivered once, at the earlier time          |
 | A finished execution is claimed again                | The dispatcher returns the recorded outcome without forking a worker                         |
-| The worker throws an infrastructure error or exits   | The delivery is not acknowledged, and the execution is delivered again after `redeliveryTimeout` (default five minutes) |
+| The worker throws an infrastructure error or exits   | The delivery is not acknowledged, and the execution is delivered again after the five-minute redelivery timeout |
 | The app restarts                                     | `admitted` and `suspended` records and their pending wakes are still in the file, and the next dispatcher delivers them |
 | A store commit lands                                 | The wakes for the waiters it satisfies commit in the same transaction                        |
 
-**Keep `redeliveryTimeout` (`new SqliteRuntime(db, { redeliveryTimeout })`) longer than your longest delivery.** The runtime cannot tell a slow delivery from a lost one, so a delivery that runs past the timeout is claimed and delivered again while the first is still running. Execution leases (RFC 002) will replace this timeout.
+**Keep deliveries shorter than the five-minute redelivery timeout.** The runtime cannot tell a slow delivery from a lost one, so a delivery that runs past the timeout is claimed and delivered again while the first is still running. The timeout is fixed; execution leases (RFC 002) will replace it.
 
 ## Connector choice
 

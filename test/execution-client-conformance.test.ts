@@ -4,6 +4,7 @@ import {
   type Runtime,
   type StandardSchemaV1,
   type StoreWaiter,
+  REDELIVERY_TIMEOUT,
 } from "@yieldstar/core";
 import { MemoryRuntime } from "@yieldstar/test-runtime";
 import { SqliteRuntime } from "@yieldstar/sqlite-runtime";
@@ -20,7 +21,6 @@ const { createSqliteDb } = isBun
 
 type ExecutionHarnessOptions = {
   clock: () => number;
-  redeliveryTimeout: number;
 };
 
 type ExecutionHarness = {
@@ -36,7 +36,6 @@ type ExecutionConformanceOptions = {
 };
 
 const START = 1_000_000;
-const REDELIVERY_TIMEOUT = 1_000;
 
 type TestContext = {
   runtime: Runtime;
@@ -80,7 +79,6 @@ function registerExecutionClientConformance({
     const clock = { now: START };
     const harness = create({
       clock: () => clock.now,
-      redeliveryTimeout: REDELIVERY_TIMEOUT,
     });
     return {
       runtime: harness.runtime,
@@ -92,7 +90,7 @@ function registerExecutionClientConformance({
     };
   }
 
-  const probe = create({ clock: () => START, redeliveryTimeout: REDELIVERY_TIMEOUT });
+  const probe = create({ clock: () => START });
   const restartable = typeof probe.restart === "function";
   probe.dispose?.();
 

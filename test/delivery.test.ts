@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import {
   ExecutionDispatcher,
   InfrastructureError,
+  REDELIVERY_TIMEOUT,
   WorkflowRunner,
   type WorkflowRouter,
 } from "@yieldstar/core";
@@ -214,6 +215,7 @@ test("store errors caused by workflow code still reach its catch", async () => {
 
 test("an infrastructure error leaves the status unchanged and the execution is delivered again", async () => {
   let runs = 0;
+  let now = 1_000;
   const { runtime, sdk, dispatcher } = setup(
     {
       flaky: workflow(async function* (step) {
@@ -221,7 +223,7 @@ test("an infrastructure error leaves the status unchanged and the execution is d
         return yield* step.run("one", () => "ok");
       }),
     },
-    { redeliveryTimeout: 20 }
+    { clock: () => now }
   );
   const writeStep = runtime.heap.writeStep.bind(runtime.heap);
   vi.spyOn(runtime.heap, "writeStep")
@@ -233,14 +235,20 @@ test("an infrastructure error leaves the status unchanged and the execution is d
   await dispatcher.drain();
   expect((await runtime.executions.get(executionId))?.status).toBe("admitted");
 
-  // Once the redelivery timeout passes, the uncovered wake is delivered again.
-  dispatcher.start();
-  await vi.waitFor(async () =>
-    expect((await runtime.executions.get(executionId))?.outcome).toEqual({
-      status: "completed",
-      result: "ok",
-    })
-  );
+  // Not claimable again until the redelivery timeout passes.
+  now += REDELIVERY_TIMEOUT - 1;
+  await dispatcher.tick();
+  await dispatcher.drain();
+  expect(runs).toBe(1);
+
+  // Once it passes, the uncovered wake is delivered again.
+  now += 1;
+  await dispatcher.tick();
+  await dispatcher.drain();
+  expect((await runtime.executions.get(executionId))?.outcome).toEqual({
+    status: "completed",
+    result: "ok",
+  });
   expect(runs).toBe(2);
 });
 

@@ -39,7 +39,6 @@ const runtime = new SqliteRuntime(createSqliteDb({ path: "./.db/local.sqlite" })
 | Option              | Type           | Default      | Description                                                              |
 | ------------------- | -------------- | ------------ | ------------------------------------------------------------------------ |
 | `clock`             | `() => number` | `Date.now`   | Time source for every client operation and for delay and retry wake times |
-| `redeliveryTimeout` | `number`       | `300_000`    | Milliseconds a claimed delivery may go unacknowledged before it is delivered again |
 
 The runtime exposes three clients that share the database:
 

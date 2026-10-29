@@ -1,5 +1,5 @@
 import {
-  DEFAULT_REDELIVERY_TIMEOUT,
+  REDELIVERY_TIMEOUT,
   acknowledgeExecution,
   claimExecution,
   createExecutionState,
@@ -28,13 +28,10 @@ import {
 export class MemoryExecutionClient implements ExecutionClient {
   private executions = new Map<string, ExecutionState>();
   private clock: () => number;
-  private redeliveryTimeout: number;
 
-  constructor(options?: { clock?: () => number; redeliveryTimeout?: number }) {
+  constructor(options?: { clock?: () => number }) {
     // Read Date.now lazily so fake timers installed later still apply.
     this.clock = options?.clock ?? (() => Date.now());
-    this.redeliveryTimeout =
-      options?.redeliveryTimeout ?? DEFAULT_REDELIVERY_TIMEOUT;
   }
 
   async admit(
@@ -104,7 +101,7 @@ export class MemoryExecutionClient implements ExecutionClient {
         claimExecution(state, {
           now,
           token,
-          redeliveryTimeout: this.redeliveryTimeout,
+          redeliveryTimeout: REDELIVERY_TIMEOUT,
         })
       );
       deliveries.push({ executionId, token });

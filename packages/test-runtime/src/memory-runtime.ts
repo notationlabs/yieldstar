@@ -9,14 +9,11 @@ export class MemoryRuntime extends Runtime {
   readonly heap: MemoryHeapClient;
   readonly stores: MemoryStoreClient;
 
-  constructor(options?: RuntimeOptions & { redeliveryTimeout?: number }) {
+  constructor(options?: RuntimeOptions) {
     super();
     // Read Date.now lazily so fake timers installed later still apply.
     this.clock = options?.clock ?? (() => Date.now());
-    this.executions = new MemoryExecutionClient({
-      ...options,
-      clock: this.clock,
-    });
+    this.executions = new MemoryExecutionClient({ clock: this.clock });
     this.stores = new MemoryStoreClient({ executions: this.executions });
     this.heap = new MemoryHeapClient({
       // A waiter is deleted in the same synchronous write as its step's result.

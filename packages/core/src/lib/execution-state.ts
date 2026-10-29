@@ -37,8 +37,12 @@ export type ExecutionState = {
   claimExpiresAt: number | null;
 };
 
-/** Five minutes, matching the visibility window of the former task queue. */
-export const DEFAULT_REDELIVERY_TIMEOUT = 300_000;
+/**
+ * How long a claimed delivery may go unacknowledged before it is delivered
+ * again: five minutes, matching the former task queue's visibility window.
+ * Fixed until RFC 002's leases replace it.
+ */
+export const REDELIVERY_TIMEOUT = 300_000;
 
 export class ExecutionEventEncodingError extends Error {
   constructor(message: string) {

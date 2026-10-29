@@ -2,7 +2,7 @@ import {
   acknowledgeExecution,
   claimExecution,
   createExecutionState,
-  DEFAULT_REDELIVERY_TIMEOUT,
+  REDELIVERY_TIMEOUT,
   executionIdConflict,
   executionNotFound,
   isExecutionClaimable,
@@ -25,12 +25,6 @@ import { runTransaction } from "./sqlite-transaction";
 export type SqliteExecutionClientOptions = {
   /** Reads the current time. Defaults to `Date.now`. */
   clock?: () => number;
-  /**
-   * How long a claimed delivery may go unacknowledged before `claimDue`
-   * returns the execution again.
-   * @default DEFAULT_REDELIVERY_TIMEOUT
-   */
-  redeliveryTimeout?: number;
 };
 
 /**
@@ -43,15 +37,12 @@ export class SqliteExecutionClient implements ExecutionClient {
   private db: SqliteDriver;
   private executionsDao: ExecutionsDao;
   private clock: () => number;
-  private redeliveryTimeout: number;
 
   constructor(db: SqliteDriver, options: SqliteExecutionClientOptions = {}) {
     this.db = db;
     this.executionsDao = new ExecutionsDao(db);
     // Read Date.now lazily so fake timers installed later still apply.
     this.clock = options.clock ?? (() => Date.now());
-    this.redeliveryTimeout =
-      options.redeliveryTimeout ?? DEFAULT_REDELIVERY_TIMEOUT;
   }
 
   async admit(
@@ -117,7 +108,7 @@ export class SqliteExecutionClient implements ExecutionClient {
           claimExecution(state, {
             now,
             token,
-            redeliveryTimeout: this.redeliveryTimeout,
+            redeliveryTimeout: REDELIVERY_TIMEOUT,
           })
         );
         deliveries.push({ executionId, token });

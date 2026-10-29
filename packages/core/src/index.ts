@@ -22,7 +22,7 @@ export {
 } from "./base/execution";
 export type { ExecutionState } from "./lib/execution-state";
 export {
-  DEFAULT_REDELIVERY_TIMEOUT,
+  REDELIVERY_TIMEOUT,
   ExecutionEventEncodingError,
   acknowledgeExecution,
   claimExecution,
