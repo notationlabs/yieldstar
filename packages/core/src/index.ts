@@ -33,6 +33,36 @@ export {
   isTerminalExecutionStatus,
 } from "./base/execution";
 export type {
+  EffectBeginRequest,
+  EffectBeginResult,
+  EffectClient,
+  EffectConflictReport,
+  EffectDeliveryErrorCode,
+  EffectRecord,
+  EffectSettleRequest,
+  EffectSettleResult,
+  EffectWatchRequest,
+  WorkflowEffectErrorCode,
+} from "./base/effect";
+export { EffectClientInvariantError, WorkflowEffectError } from "./base/effect";
+export type {
+  EffectConflictState,
+  EffectState,
+  PreparedEffectBegin,
+  PreparedEffectSettle,
+} from "./lib/effect-state";
+export {
+  createEffectState,
+  effectNotFound,
+  matchEffectBegin,
+  prepareEffectBegin,
+  prepareEffectSettle,
+  prepareEffectWatch,
+  settleEffect,
+  toEffectRecord,
+  validateEffectRequest,
+} from "./lib/effect-state";
+export type {
   Durable,
   DurableDecoding,
   DurableObject,

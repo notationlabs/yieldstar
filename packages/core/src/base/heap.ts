@@ -15,7 +15,7 @@ export abstract class HeapClient {
    * Records one attempt of a step, fenced by `lease`. The token check and the
    * write are atomic: if the lease is not current, nothing changes and the
    * write returns `lost`. A `done` record also deletes the step's store
-   * waiters in the same write.
+   * and effect waiters in the same write.
    *
    * Records are keyed by execution, step key and attempt, and never change
    * once written. Rewriting an existing record succeeds without changing it,
