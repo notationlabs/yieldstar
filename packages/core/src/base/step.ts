@@ -66,6 +66,21 @@ export class StepStoreWait extends StepResponse {
   }
 }
 
+/**
+ * An effect step whose outcome is uncertain. The driver records it as an
+ * unfinished step after watching the effect, so the next delivery begins the
+ * effect again; `wakeAt` is when that delivery is due.
+ */
+export class StepEffectWait extends StepResponse {
+  static type = "effect-wait";
+  readonly type = "effect-wait";
+  wakeAt: number;
+  constructor(wakeAt: number) {
+    super();
+    this.wakeAt = wakeAt;
+  }
+}
+
 export class WorkflowRestart extends StepResponse {
   static type = "workflow-restart";
   readonly type = "workflow-restart";

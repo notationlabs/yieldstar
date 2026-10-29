@@ -1,6 +1,6 @@
 # `@yieldstar/store-conformance`
 
-This package contains the runnable qualification suites for YieldStar runtimes: one for store connectors and one for the execution client. The normative protocol is documented in the [store connector conformance specification](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md).
+This package contains the runnable qualification suites for YieldStar runtimes: one for store connectors, one for the execution client and one for the effect client. The normative protocol is documented in the [store connector conformance specification](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md).
 
 Install it with the test runner and core package:
 
@@ -52,7 +52,7 @@ vitest run store-conformance.test.ts
 
 ## Execution client suite
 
-`registerExecutionClientConformance` checks a runtime's `ExecutionClient` and fenced heap writes against RFC 001, RFC 002 and RFC 003: admission, wake merging, claims, acknowledgement and terminal outcomes; leases, renewal, release and the `running` status; the redelivery delay and `unacknowledgedDeliveryCount`; fencing of heap writes, renewals, releases and acknowledgements against a stale holder; and `start`, its idempotency by request ID, parameter validation, mismatches and the target's parent link. The suite passes a `clock` to `create`; build every runtime on it so the suite controls time, including lease expiry.
+`registerExecutionClientConformance` checks a runtime's `ExecutionClient` and fenced heap writes: admission, wake merging, claims, acknowledgement and terminal outcomes; leases, renewal, release and the `running` status; the redelivery delay and `unacknowledgedDeliveryCount`; fencing of heap writes, renewals, releases and acknowledgements against a stale holder; and `start`, its idempotency by request ID, parameter validation, mismatches and the target's parent link. The suite passes a `clock` to `create`; build every runtime on it so the suite controls time, including lease expiry.
 
 The harness has three optional capabilities:
 
@@ -79,5 +79,26 @@ registerExecutionClientConformance({
 });
 ```
 
-The suite covers the runtime adapter. RFC 003's workflow-driver and delivery cases for `step.start` are tested in the repository rather than here. RFC 002's dispatcher and worker cases, such as concurrency, releasing on a retry reply, a worker that exits without replying, and a worker whose runtime process dies, are properties of `ExecutionDispatcher` and the invoker rather than of an adapter; the repository tests them in `test/dispatcher.test.ts` and `test/worker-invoker.test.ts`.
+## Effect client suite
+
+`registerEffectClientConformance` checks a runtime's `EffectClient`: `begin` creating or reading one effect, mismatched operations and inputs, concurrent equal and different settlements and their conflict reports, `watch` registration and immediate wakes, settlement racing `watch`, waiter deletion with the step's result and its rejection for a stale holder, value encoding, and durability across a restart. Its harness takes the same `clock`, `createPeer` and `restart` as the execution client suite, plus `failEffectWatches`, which makes every `watch` on `runtime` fail before it commits and returns a function that stops the failures. Without it the case for a failed watch is skipped; the SQLite harness installs a temporary trigger that aborts the waiter insert.
+
+```ts
+import { registerEffectClientConformance } from "@yieldstar/store-conformance";
+
+registerEffectClientConformance({
+  name: "my-runtime",
+  create({ clock }) {
+    const backend = createCleanBackend();
+    return {
+      runtime: new MyRuntime(backend, { clock }),
+      createPeer: () => new MyRuntime(backend.connect(), { clock }),
+      restart: () => new MyRuntime(backend.reopen(), { clock }),
+      dispose: () => backend.close(),
+    };
+  },
+});
+```
+
+The suite covers the runtime adapter. The workflow-driver and delivery cases for `step.start` and `step.effect` are tested in the repository rather than here (`test/start.test.ts`, `test/effect.test.ts` and `test/effect-delivery.test.ts`). The dispatcher and worker cases, such as concurrency, releasing on a retry reply, a worker that exits without replying, and a worker whose runtime process dies, are properties of `ExecutionDispatcher` and the invoker rather than of an adapter; the repository tests them in `test/dispatcher.test.ts` and `test/worker-invoker.test.ts`.
 

@@ -3,6 +3,7 @@ export {
   SqliteExecutionClient,
   type SqliteExecutionClientOptions,
 } from "./sqlite-execution";
+export { SqliteEffectClient } from "./sqlite-effect";
 export { SqliteHeapClient } from "./sqlite-heap";
 export { SqliteStoreClient } from "./sqlite-store";
 export type {

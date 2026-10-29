@@ -31,6 +31,7 @@
 - A delivery that ends without an outcome is redelivered after a redelivery delay that starts at 1 second and doubles with each consecutive unacknowledged delivery, up to 5 minutes, instead of after five minutes.
 - `StepDelay.resumeIn` and `WorkflowDelay.resumeIn` are renamed `wakeAt`. Delay and retry steps read their wake time from the runtime clock instead of `Date.now()`, and `WorkflowGeneratorParams` carries that `clock`.
 - `WorkflowGeneratorParams` carries an `executionClient`, which `WorkflowRunner` sets from its runtime's `executions`.
+- `WorkflowGeneratorParams` carries an `effectClient`, which `WorkflowRunner` sets from its runtime's `effects` (RFC 005). Code that builds `WorkflowGeneratorParams` by hand must pass one.
 
 ### Added
 
@@ -57,6 +58,9 @@
 - Added `WorkflowStartError` and `WorkflowStartErrorCode` to `@yieldstar/core`, and the start transitions `prepareExecutionStart`, `matchStartRequest` and `createStartedExecution` (with `StartRequestState`) for runtime adapter authors.
 - `SqliteRuntime` stores start requests in a `start_requests` table and the parent link in `parent_execution_id` and `parent_step_key` columns on `executions`. A new start inserts the target and the request in one transaction.
 - Added RFC 003's `start` cases to `registerExecutionClientConformance`. Harnesses may return `failStartCommits` to run the case that a start which fails before it commits leaves no trace.
+- Added `EffectClient` (`begin`, `settle`, `watch`, `getEffect`), `EffectRecord`, `EffectClientInvariantError` (`EFFECT_RUNTIME_INVARIANT`), `WorkflowEffectError` (`INVALID_EFFECT_REQUEST`, `EFFECT_REQUEST_MISMATCH`), the `EffectDeliveryErrorCode` type and the effect transitions (`validateEffectRequest`, `prepareEffectBegin`, `prepareEffectSettle`, `prepareEffectWatch`, `createEffectState`, `matchEffectBegin`, `settleEffect`, `toEffectRecord`) to `@yieldstar/core` (RFC 005). `Runtime` gains `effects`; custom runtime adapters must implement it.
+- `MemoryRuntime` and `SqliteRuntime` expose `effects` (`MemoryEffectClient`, `SqliteEffectClient`). A settlement wakes every waiting execution in the same write, and the heap write that records a step's result deletes its effect waiters. `SqliteRuntime` stores effects in `effects`, `effect_conflicts` and `effect_waiters` tables.
+- Added `registerEffectClientConformance` to `@yieldstar/store-conformance` (RFC 005). Harnesses may return `failEffectWatches` to run the case that a watch which fails before it commits registers nothing.
 
 ### Changed
 
@@ -99,3 +103,7 @@
 - Retyped HTTP route handlers with standard `Request` and `Response` APIs while keeping the routes object compatible with `Bun.serve` and other Request-to-Response routers.
 - Replaced Bun-specific runtime utilities and targeted all package bundles at Node.
 - Replaced `Bun.randomUUIDv7()` with UUID v7 from the `uuid` package.
+- Added `step.effect(stepKey, { effectId, operation, input, lookup, perform, retryIn })` (RFC 005), which calls an external system under a stable effect ID. A new effect calls `perform`; a pending one calls `lookup` first and calls `perform` only on `not-found`. The result settles the effect before the step is recorded, so a replay after a crash reads it without an external call. An `unknown` lookup or a rejected callback watches the effect and suspends with `wakeAt = now + retryIn`, and a settlement elsewhere wakes the execution. `lookup` and `perform` are not called once the delivery's signal has aborted.
+- `step.effect` throws `WorkflowEffectError` (`INVALID_EFFECT_REQUEST` or `EFFECT_REQUEST_MISMATCH`) to workflow code, recorded so replay throws the same class and code. Client failures, malformed callback responses and client invariants record no step and reject the delivery with an `InfrastructureError` caused by `EffectDeliveryError` (`EFFECT_CLIENT_UNAVAILABLE`, `EFFECT_HANDLER_INVALID` or `EFFECT_RUNTIME_INVARIANT`). A conflicting settlement logs a warning and records the first result.
+- Added `EffectDeliveryError` and the `StepEffectWait` step response, recorded as an unfinished step, to `@yieldstar/core`. `WorkflowEffectError`, `EffectDeliveryError` and `EffectClientInvariantError` are registered error classes by default.
+- Re-exported `WorkflowEffectError`, `EffectDeliveryError`, `EffectClientInvariantError` and the `EffectRecord`, `WorkflowEffectErrorCode` and `EffectDeliveryErrorCode` types from `yieldstar`, and added the `EffectDescriptor` and `EffectLookup` types.

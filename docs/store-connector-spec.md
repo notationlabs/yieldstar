@@ -1,6 +1,6 @@
 # YieldStar store connector conformance specification
 
-Status: publishable specification for the YieldStar connector protocol, revised for RFC 001 (execution records) and RFC 002 (execution leases).
+Status: publishable specification for the YieldStar connector protocol, revised for RFC 001 (execution records), RFC 002 (execution leases) and RFC 005 (durable external effects).
 
 This document defines the observable contract for a YieldStar store connector. The words MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are normative.
 
@@ -14,10 +14,10 @@ Qualification applies to synchronous, transaction-capable drivers. Async remote 
 
 ## Runtime guarantees
 
-A `Runtime` bundles three clients: `executions` (`ExecutionClient`), `heap` (`HeapClient`) and `stores` (`StoreClient`). A runtime is defined by the guarantees its clients keep together, not by how many databases it uses.
+A `Runtime` bundles four clients: `executions` (`ExecutionClient`), `effects` (`EffectClient`), `heap` (`HeapClient`) and `stores` (`StoreClient`). A runtime is defined by the guarantees its clients keep together, not by how many databases it uses.
 
 - **Follow-on writes.** Where this specification requires one write to accompany another, such as the wakes for a store commit, the second MUST be durable once the first commits and MUST be applied eventually. A runtime MAY make both in one transaction or use an outbox.
-- **Waiter deletion.** A waiter MUST be deleted atomically with the heap write that records its step's result. Waiters are therefore stored with step records. A store kept in another database reaches its waiters through the follow-on rule above.
+- **Waiter deletion.** A store or effect waiter MUST be deleted atomically with the heap write that records its step's result. Waiters are therefore stored with step records. A store kept in another database reaches its waiters through the follow-on rule above.
 - **Fencing.** Heap step records and lease tokens MUST be checked in one place: a fenced heap write checks the lease token and writes in one atomic action. Other state MAY be kept elsewhere under the guarantees above.
 - **Clock.** Every client MUST read time from the runtime's clock (`RuntimeOptions.clock`, default `Date.now`), exposed as `Runtime.clock`. No client operation takes the current time as a parameter. Delay and retry steps read their wake times from the same clock.
 
@@ -73,6 +73,20 @@ Store mutations with a step receipt, store creation, and wake requests are not f
 - `start` is not fenced. Start-request records MUST survive a restart, and are kept until the caller is pruned.
 
 Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `prepareExecutionStart`, `matchStartRequest`, `createStartedExecution`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/store-conformance` exercises these rules; this repository runs it against both bundled runtimes.
+
+### Effects
+
+`EffectClient` records external effects by `effectId` (RFC 005). `begin`, `settle` and `watch` are not fenced; they are idempotent by effect ID.
+
+- `begin({ operation, effectId, input, executionId, stepKey })` MUST create a pending effect before returning `new`. For an existing effect it MUST return `pending` or `settled` with the stored result when `operation` and the canonical encoding of `input` match, and `EFFECT_REQUEST_MISMATCH` otherwise, without changing the effect. Concurrent calls with one effect ID MUST create one effect.
+- `settle({ operation, effectId, result })` MUST settle a pending effect once, and wake every waiting execution in the same atomic write. A later call with an equal canonical result returns the settled result. A different result MUST keep the first, return `conflict` with both values, and store a permanent conflict report; the bundled runtimes store one report per distinct conflicting result.
+- `watch({ effectId, executionId, stepKey })` MUST register one waiter per effect, execution and step, however often it is repeated, and request no timed wake. If the effect is already settled, it MUST wake the execution immediately, every time it is called.
+- Wakes are pending wakes on the execution record and follow the store wake rules above. A waiter MUST stay registered until the fenced heap write that records its step's result deletes it; a stale holder's rejected write deletes nothing.
+- Values MUST be stored with `durableValueCodec`, so `undefined`, errors and error-shaped plain objects keep their type. `getEffect` returns the record with every conflict report.
+- Effects, conflict reports and waiters MUST survive a restart. Effect records are never deleted with an execution.
+- A request with invalid values, a `settle` or `watch` for an unknown effect, a `settle` with a different `operation`, and stored data that cannot be decoded MUST throw `EffectClientInvariantError` (`EFFECT_RUNTIME_INVARIANT`). Any other rejection is treated as the client being unavailable.
+
+Adapters MAY build on `prepareEffectBegin`, `prepareEffectSettle`, `prepareEffectWatch`, `createEffectState`, `matchEffectBegin`, `settleEffect` and `toEffectRecord` from `@yieldstar/core`, applying each inside one atomic write. `registerEffectClientConformance` exercises these rules.
 
 ## Connector surface
 
@@ -142,4 +156,4 @@ Schema failures MUST surface as `StoreValidationError` (`validateStoreState` thr
 
 ## Running the suite
 
-See [`@yieldstar/store-conformance`](../packages/store-conformance/README.md) for the factory API and a minimal Vitest example. The YieldStar CI runs the same artifact against `MemoryRuntime` and `SqliteRuntime` under Bun and Node. SQLite declares shared-client and durable-restart capabilities, and also runs the execution suite over separate connections to one database file; the in-memory runtime qualifies only for process-local use.
+See [`@yieldstar/store-conformance`](../packages/store-conformance/README.md) for the factory API and a minimal Vitest example. The YieldStar CI runs the same artifact against `MemoryRuntime` and `SqliteRuntime` under Bun and Node. SQLite declares shared-client and durable-restart capabilities, and also runs the execution and effect suites over separate connections to one database file; the in-memory runtime qualifies only for process-local use.

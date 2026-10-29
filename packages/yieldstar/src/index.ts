@@ -3,8 +3,11 @@ export { createHttpSdkFactory } from "./exports/sdk-http";
 export { createWorkflowRouter } from "./exports/router";
 export { RetryableError } from "./exports/errors";
 export {
+  EffectClientInvariantError,
+  EffectDeliveryError,
   ExecutionAdmissionError,
   WORKFLOW_RESULT_STEP_KEY,
+  WorkflowEffectError,
   WorkflowStartError,
   WorkflowValueError,
   registerErrorClass,
@@ -14,6 +17,8 @@ export type { DurableWorkflowFn, WorkflowFn } from "./exports/workflow";
 export { defineStore } from "./internal/step-runner";
 export type {
   DurableStepFn,
+  EffectDescriptor,
+  EffectLookup,
   StepRunOptions,
   WorkflowStore,
 } from "./internal/step-runner";
@@ -44,4 +49,7 @@ export type {
   ErrorClass,
   WorkflowValueErrorCode,
   WorkflowStartErrorCode,
+  EffectDeliveryErrorCode,
+  EffectRecord,
+  WorkflowEffectErrorCode,
 } from "@yieldstar/core";

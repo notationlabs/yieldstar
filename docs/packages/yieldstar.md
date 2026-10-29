@@ -14,6 +14,7 @@ bun add yieldstar
 import { workflow, createWorkflow } from "yieldstar";
 import { createWorkflowRouter } from "yieldstar";
 import { RetryableError, ExecutionAdmissionError, WorkflowStartError } from "yieldstar";
+import { WorkflowEffectError, EffectDeliveryError, EffectClientInvariantError } from "yieldstar";
 import { defineStore } from "yieldstar";
 import { createLocalSdk } from "yieldstar";
 import { createHttpSdkFactory } from "yieldstar";
@@ -27,6 +28,11 @@ import type {
   DurableObject,
   DurableValue,
   WorkflowStartErrorCode,
+  EffectDescriptor,
+  EffectLookup,
+  EffectRecord,
+  WorkflowEffectErrorCode,
+  EffectDeliveryErrorCode,
 } from "yieldstar";
 ```
 
@@ -79,6 +85,14 @@ Thrown by both SDKs' `trigger` when admission is rejected. `err.code` is `"EXECU
 
 Thrown to workflow code by `step.start` when the runtime rejects the start. `err.code` is `"INVALID_START_PARAMETERS"` (`params` are not a durable value, or `workflowId` is empty) or `"START_REQUEST_MISMATCH"` (the step already started a different workflow or different `params`). See [`step.start`](../manual/steps.md#stepstart).
 
+## `WorkflowEffectError`
+
+Thrown to workflow code by `step.effect`. `err.code` is `"INVALID_EFFECT_REQUEST"` (the `effectId`, `operation`, `input`, `retryIn`, `lookup` or `perform` is invalid) or `"EFFECT_REQUEST_MISMATCH"` (the effect already exists with a different `operation` or `input`). It is recorded as the step's error, so replay throws the same class and code. See [`step.effect`](../manual/steps.md#stepeffect).
+
+## `EffectDeliveryError`
+
+The `cause` of the `InfrastructureError` with which `step.effect` ends a delivery without recording its step. It never reaches workflow code. `err.code` is `"EFFECT_CLIENT_UNAVAILABLE"`, `"EFFECT_HANDLER_INVALID"` or `"EFFECT_RUNTIME_INVARIANT"`, and `err.effectId` and `err.stepKey` name the effect and step. See [Effect errors](../manual/steps.md#effect-errors).
+
 ## `WorkflowValueError`
 
 Thrown to workflow code when a step's value cannot be recorded unchanged. `err.code` is `"INVALID_STEP_VALUE"` (a step result, store state or workflow result is not a durable value) or `"STEP_SCHEMA_INVALID"` (a step's `schema` rejected its value), and `err.stepKey` names the step; it is `WORKFLOW_RESULT_STEP_KEY` (`"$$workflow-result$$"`) for an invalid workflow result. See [Step values](../manual/steps.md#step-values).
@@ -121,8 +135,28 @@ yield * step.poll("key", opts, predicate);
 yield * step.store(definition, { id, initial });
 
 yield * step.start("key", { workflowId, params });
+
+yield * step.effect("key", { effectId, operation, input, lookup, perform, retryIn });
 ```
 
 `step.store` returns a `WorkflowStore` handle with `get`, `select`, `update`, `when`, and `take` – see [Durable Stores](../manual/stores.md) and [Waiting on State](../manual/store-waiting.md).
 
 `step.start` starts another workflow as its own execution, once per step key, and returns `{ executionId }` – see [Steps](../manual/steps.md#stepstart).
+
+`step.effect` calls an external system under a stable `effectId`, looking up an uncertain earlier attempt before performing it again, and returns the operation's result – see [Steps](../manual/steps.md#stepeffect). Its descriptor is typed `EffectDescriptor<T, Input>`, and `lookup` resolves with an `EffectLookup<T>`:
+
+```ts
+type EffectDescriptor<T, Input = DurableObject> = {
+  effectId: string;
+  operation: string;
+  input: Input; // checked with Durable<Input>
+  retryIn: number;
+  lookup(effectId: string): Promise<EffectLookup<T>>;
+  perform(effectId: string): Promise<T>; // T is checked with Durable<T>
+};
+
+type EffectLookup<T> =
+  | { status: "settled"; result: T }
+  | { status: "not-found" }
+  | { status: "unknown" };
+```

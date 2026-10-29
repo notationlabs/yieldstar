@@ -1,6 +1,7 @@
 import {
   DurableValueError,
   StepDelay,
+  StepEffectWait,
   StepError,
   StepInvalid,
   StepResult,
@@ -62,6 +63,9 @@ function encodeResponse(response: StepResponse, stepKey: string): string {
   if (response instanceof StepDelay) {
     return `{"type":"step-delay","wakeAt":${JSON.stringify(response.wakeAt)}}`;
   }
+  if (response instanceof StepEffectWait) {
+    return `{"type":"effect-wait","wakeAt":${JSON.stringify(response.wakeAt)}}`;
+  }
   if (response instanceof StepStoreWait || response instanceof StepInvalid) {
     return `{"type":${JSON.stringify(response.type)}}`;
   }
@@ -89,6 +93,8 @@ export function decodeStepRecord(json: string): StepResponse {
         });
       case "step-delay":
         return new StepDelay(record.wakeAt);
+      case "effect-wait":
+        return new StepEffectWait(record.wakeAt);
       case "store-wait":
         return new StepStoreWait();
       case "step-invalid":

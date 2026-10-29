@@ -10,12 +10,13 @@ bun add @yieldstar/core
 
 ## `Runtime` (abstract class)
 
-A runtime bundles the three clients that hold durable state, and the clock they all read. `SqliteRuntime` and `MemoryRuntime` extend it.
+A runtime bundles the four clients that hold durable state, and the clock they all read. `SqliteRuntime` and `MemoryRuntime` extend it.
 
 ```ts
 abstract class Runtime {
   abstract readonly clock: () => number; // shared by every client and by delay and retry steps
   abstract readonly executions: ExecutionClient;
+  abstract readonly effects: EffectClient; // step.effect's effect records (RFC 005)
   abstract readonly heap: HeapClient;
   abstract readonly stores: StoreClient;
 }
@@ -39,7 +40,7 @@ const runner = new WorkflowRunner(runtime, { router, logger });
 
 | Param            | Type             | Description                       |
 | ---------------- | ---------------- | --------------------------------- |
-| `runtime`        | `Runtime`        | Supplies `heap` and `stores`      |
+| `runtime`        | `Runtime`        | Supplies `heap`, `stores`, `executions` and `effects` |
 | `options.router` | `WorkflowRouter` | Map of workflow IDs to generators |
 | `options.logger` | `Logger`         | Pino logger                       |
 
@@ -52,12 +53,14 @@ type WorkflowRunOutcome =
   | { status: "failed"; error: Error };
 ```
 
-An event whose `workflowId` has no registered workflow resolves as `failed`. A store wait resolves as `suspended` without `wakeAt`, because a store commit wakes it.
+An event whose `workflowId` has no registered workflow resolves as `failed`. A store wait resolves as `suspended` without `wakeAt`, because a store commit wakes it. A `step.effect` whose outcome is uncertain resolves as `suspended` with `wakeAt` set to now plus its `retryIn`, after it has watched the effect and recorded the unfinished step.
 
 Two step-write results also reject with an `InfrastructureError`, and both end the delivery without an outcome:
 
 - The write returns `lost` because another claim has taken over. The cause is a `LeaseLostError`.
 - The step is already recorded with a different value. The cause is a `StepConflictError`. The record stands, the delivery ends as a retry, and the next delivery replays the recorded value.
+
+`step.effect` also ends a delivery with an `InfrastructureError`, whose cause is an `EffectDeliveryError`, when it records no step: `EFFECT_CLIENT_UNAVAILABLE` when an `EffectClient` call throws, `EFFECT_RUNTIME_INVARIANT` when it throws `EffectClientInvariantError` (or an error with that `code`) or answers with a malformed response, and `EFFECT_HANDLER_INVALID` when `lookup` or `perform` answers with a malformed response or a value that is not durable. The runner never calls `lookup` or `perform` once the delivery's `signal` has aborted.
 
 ## `ExecutionRecord`
 
@@ -203,7 +206,7 @@ So `{ a: undefined }` and `{}` stay distinct, and only a tagged value decodes as
 
 An error keeps its `name`, `message`, a string `stack` and `code`, its own `cause` (encoded recursively), a non-enumerable `errors` array such as `AggregateError`'s, and its own enumerable properties whose values are durable, under `fields`. Properties that are not durable are left out rather than rejecting the error. `encodeThrownValue(value)` encodes a thrown value as thrown when it is durable, and as `Error(String(value))` otherwise.
 
-`decode` revives an error as the class registered under its `name` with `registerErrorClass(name, errorClass)`, setting its prototype and fields without calling the constructor, and as an `Error` with the same name, message, code, cause and fields when no class is registered. Registration is per process. `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`, `AggregateError`, `WorkflowStartError`, `WorkflowValueError`, `StoreValidationError` and `StoreNotFoundError` are registered by default, and `yieldstar` registers `RetryableError`.
+`decode` revives an error as the class registered under its `name` with `registerErrorClass(name, errorClass)`, setting its prototype and fields without calling the constructor, and as an `Error` with the same name, message, code, cause and fields when no class is registered. Registration is per process. `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`, `AggregateError`, `WorkflowStartError`, `WorkflowValueError`, `WorkflowEffectError`, `EffectDeliveryError`, `EffectClientInvariantError`, `StoreValidationError` and `StoreNotFoundError` are registered by default, and `yieldstar` registers `RetryableError`.
 
 `WorkflowValueError` (`code: "INVALID_STEP_VALUE" | "STEP_SCHEMA_INVALID"`, `stepKey`) reports a value the codec or a step's schema rejects. A completed outcome whose result the codec rejects is recorded as `failed` with `INVALID_STEP_VALUE` and `stepKey` `WORKFLOW_RESULT_STEP_KEY` (`"$$workflow-result$$"`).
 
@@ -265,7 +268,7 @@ abstract writeStep(params: {
 }): Promise<HeapRecord | LeaseLost>;
 ```
 
-`readStep` returns the latest attempt. `writeStep` is fenced by `lease`: if the lease is not current, nothing changes and it returns `lost`. A `done` record deletes the step's store waiters in the same write. Records are keyed by execution, step key and attempt, and never change once written. Rewriting an existing record succeeds without changing it and resolves with the record as stored, so the caller can compare it with the value it wrote.
+`readStep` returns the latest attempt. `writeStep` is fenced by `lease`: if the lease is not current, nothing changes and it returns `lost`. A `done` record deletes the step's store and effect waiters in the same write. Records are keyed by execution, step key and attempt, and never change once written. Rewriting an existing record succeeds without changing it and resolves with the record as stored, so the caller can compare it with the value it wrote.
 
 ## `HeapRecord`
 
@@ -381,6 +384,7 @@ type WorkflowInvoker = {
 | `StepResult`      | `"step-result"`      | Wraps a successful step return value                |
 | `StepError`       | `"step-error"`       | Wraps a caught error with optional retry policy     |
 | `StepDelay`       | `"step-delay"`       | Carries a `wakeAt` timestamp                        |
+| `StepEffectWait`  | `"effect-wait"`      | An uncertain `step.effect`, recorded unfinished, with its `wakeAt` |
 | `StepInvalid`     | `"step-invalid"`     | Protocol violation (e.g., missing `yield*`)         |
 | `WorkflowResult`  | `"workflow-result"`  | Wraps the workflow's return value                   |
 | `WorkflowDelay`   | `"workflow-delay"`   | No longer emitted by `WorkflowRunner`               |

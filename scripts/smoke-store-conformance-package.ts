@@ -46,6 +46,7 @@ try {
   await writeFile(
     join(directory, "store-conformance.test.ts"),
     `import {
+  registerEffectClientConformance,
   registerExecutionClientConformance,
   registerStoreClientConformance,
 } from "@yieldstar/store-conformance";
@@ -59,6 +60,13 @@ registerStoreClientConformance({
 });
 
 registerExecutionClientConformance({
+  name: "installed-memory",
+  create(options) {
+    return { runtime: new MemoryRuntime(options) };
+  },
+});
+
+registerEffectClientConformance({
   name: "installed-memory",
   create(options) {
     return { runtime: new MemoryRuntime(options) };

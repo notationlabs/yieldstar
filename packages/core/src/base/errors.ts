@@ -1,3 +1,8 @@
+import {
+  EffectClientInvariantError,
+  EffectDeliveryError,
+  WorkflowEffectError,
+} from "./effect";
 import { WorkflowStartError } from "./execution";
 
 export type WorkflowValueErrorCode = "INVALID_STEP_VALUE" | "STEP_SCHEMA_INVALID";
@@ -60,5 +65,8 @@ const defaults: [string, ErrorClass][] = [
   ["AggregateError", AggregateError],
   ["WorkflowStartError", WorkflowStartError],
   ["WorkflowValueError", WorkflowValueError],
+  ["WorkflowEffectError", WorkflowEffectError],
+  ["EffectClientInvariantError", EffectClientInvariantError],
+  ["EffectDeliveryError", EffectDeliveryError],
 ];
 for (const [name, errorClass] of defaults) registerErrorClass(name, errorClass);

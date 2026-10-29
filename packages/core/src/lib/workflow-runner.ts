@@ -9,6 +9,7 @@ import type {
 import {
   InfrastructureError,
   StepDelay,
+  StepEffectWait,
   StepStoreWait,
   WorkflowResult,
 } from "..";
@@ -48,7 +49,11 @@ export class WorkflowRunner<
       };
     }
 
-    let response: WorkflowResult<unknown> | StepDelay | StepStoreWait;
+    let response:
+      | WorkflowResult<unknown>
+      | StepDelay
+      | StepEffectWait
+      | StepStoreWait;
     try {
       response = await this.runWorkflows({
         workflow,
@@ -66,6 +71,7 @@ export class WorkflowRunner<
       case "workflow-result":
         return { status: "completed", result: response.result };
       case "step-delay":
+      case "effect-wait":
         return { status: "suspended", wakeAt: response.wakeAt };
       case "store-wait":
         return { status: "suspended" };
@@ -82,7 +88,9 @@ export class WorkflowRunner<
     lease: ExecutionLease;
     signal: AbortSignal;
     logger: Logger;
-  }): Promise<WorkflowResult<Result> | StepDelay | StepStoreWait> {
+  }): Promise<
+    WorkflowResult<Result> | StepDelay | StepEffectWait | StepStoreWait
+  > {
     const { workflow, event, lease, signal, logger } = params;
 
     const workflowIterator = workflow({
@@ -92,6 +100,7 @@ export class WorkflowRunner<
       heapClient: this.runtime.heap,
       storeClient: this.runtime.stores,
       executionClient: this.runtime.executions,
+      effectClient: this.runtime.effects,
       clock: this.runtime.clock,
       logger,
     });
@@ -109,7 +118,10 @@ export class WorkflowRunner<
       return stageResponse;
     }
 
-    if (stageResponse instanceof StepStoreWait) {
+    if (
+      stageResponse instanceof StepEffectWait ||
+      stageResponse instanceof StepStoreWait
+    ) {
       return stageResponse;
     }
 
