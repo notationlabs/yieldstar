@@ -56,7 +56,7 @@ export class WorkflowRunner<
       case "workflow-result":
         return { status: "completed", result: response.result };
       case "step-delay":
-        return { status: "suspended", wakeAt: response.resumeIn };
+        return { status: "suspended", wakeAt: response.wakeAt };
       case "store-wait":
         return { status: "suspended" };
     }
@@ -77,6 +77,7 @@ export class WorkflowRunner<
       event,
       heapClient: this.runtime.heap,
       storeClient: this.runtime.stores,
+      clock: this.runtime.clock,
       logger,
     });
 
@@ -87,7 +88,7 @@ export class WorkflowRunner<
       return stageResponse as WorkflowResult<Result>;
     }
 
-    // A delay's `resumeIn` is the absolute time it elapses, which is exactly
+    // A delay's `wakeAt` is the absolute time it elapses, which is exactly
     // the `wakeAt` the suspended outcome reports.
     if (stageResponse instanceof StepDelay) {
       return stageResponse;

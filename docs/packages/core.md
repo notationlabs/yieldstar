@@ -10,10 +10,11 @@ bun add @yieldstar/core
 
 ## `Runtime` (abstract class)
 
-A runtime bundles the three clients that hold durable state. `SqliteRuntime` and `MemoryRuntime` extend it.
+A runtime bundles the three clients that hold durable state, and the clock they all read. `SqliteRuntime` and `MemoryRuntime` extend it.
 
 ```ts
 abstract class Runtime {
+  abstract readonly clock: () => number; // shared by every client and by delay and retry steps
   abstract readonly executions: ExecutionClient;
   abstract readonly heap: HeapClient;
   abstract readonly stores: StoreClient;
@@ -278,7 +279,7 @@ type WorkflowInvoker = {
 | `StepCacheCheck`  | `"cache-check"`      | Signals the runner to look up cached state          |
 | `StepResult`      | `"step-result"`      | Wraps a successful step return value                |
 | `StepError`       | `"step-error"`       | Wraps a caught error with optional retry policy     |
-| `StepDelay`       | `"step-delay"`       | Carries a `resumeIn` timestamp                      |
+| `StepDelay`       | `"step-delay"`       | Carries a `wakeAt` timestamp                        |
 | `StepInvalid`     | `"step-invalid"`     | Protocol violation (e.g., missing `yield*`)         |
 | `WorkflowResult`  | `"workflow-result"`  | Wraps the workflow's return value                   |
 | `WorkflowDelay`   | `"workflow-delay"`   | No longer emitted by `WorkflowRunner`               |

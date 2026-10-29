@@ -19,13 +19,19 @@ export type SqliteRuntimeOptions = RuntimeOptions & {
  * deleting a waiter with its step's result) holds in a single transaction.
  */
 export class SqliteRuntime extends Runtime {
+  readonly clock: () => number;
   readonly executions: SqliteExecutionClient;
   readonly heap: SqliteHeapClient;
   readonly stores: SqliteStoreClient;
 
   constructor(db: SqliteDriver, options: SqliteRuntimeOptions = {}) {
     super();
-    this.executions = new SqliteExecutionClient(db, options);
+    // Read Date.now lazily so fake timers installed later still apply.
+    this.clock = options.clock ?? (() => Date.now());
+    this.executions = new SqliteExecutionClient(db, {
+      ...options,
+      clock: this.clock,
+    });
     this.heap = new SqliteHeapClient(db);
     this.stores = new SqliteStoreClient({ db, executions: this.executions });
   }

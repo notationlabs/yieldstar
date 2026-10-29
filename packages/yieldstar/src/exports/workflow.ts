@@ -51,8 +51,14 @@ export function workflow<
    * yielding control to a workflow executor to do async work
    * @yields {StepResponse}
    */
-  return async function* workflowGenerator({ event, heapClient, storeClient, logger }) {
-    const stepRunner = createStepRunner({ event });
+  return async function* workflowGenerator({
+    event,
+    heapClient,
+    storeClient,
+    clock,
+    logger,
+  }) {
+    const stepRunner = createStepRunner({ event, clock });
     const workflowIterator = workflowFn(stepRunner, event, logger);
     const { executionId } = event;
 
@@ -233,7 +239,7 @@ export function workflow<
        */
       if (stepResponse instanceof StepError) {
         if (needsRetry) {
-          yield new StepDelay(Date.now() + stepResponse.retryInterval);
+          yield new StepDelay(clock() + stepResponse.retryInterval);
         } else {
           nextIteratorResult = await workflowIterator.throw(stepResponse.err);
           continue;
@@ -244,7 +250,7 @@ export function workflow<
        * If the delay has already elapsed, continue straight to next step
        */
       if (stepResponse instanceof StepDelay) {
-        if (stepResponse.resumeIn <= Date.now()) {
+        if (stepResponse.wakeAt <= clock()) {
           continue;
         }
       }

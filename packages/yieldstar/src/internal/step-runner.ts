@@ -82,8 +82,11 @@ export type WorkflowStore<T> = {
 
 export type StepRunner = ReturnType<typeof createStepRunner>;
 
-export function createStepRunner(params: { event: WorkflowEvent }) {
-  const { event } = params;
+export function createStepRunner(params: {
+  event: WorkflowEvent;
+  clock: () => number;
+}) {
+  const { event, clock } = params;
 
   function store<Schema extends StandardSchemaV1>(
     definition: StoreDefinition<Schema>,
@@ -106,7 +109,7 @@ export function createStepRunner(params: { event: WorkflowEvent }) {
     });
   }
 
-  return { run, delay, poll, store };
+  return { run, delay: createDelay(clock), poll, store };
 }
 
 async function* storeStep<Schema extends StandardSchemaV1>(params: {
@@ -304,40 +307,45 @@ function run<T extends any>(
   return durableStep(key, fn);
 }
 
-function delay(retryInterval: number): any;
-function delay(key: string, retryInterval: number): any;
+/** `step.delay`, reading its wake time from the runtime clock. */
+function createDelay(clock: () => number) {
+  function delay(retryInterval: number): any;
+  function delay(key: string, retryInterval: number): any;
+  function delay(
+    arg1: string | number,
+    arg2?: number
+  ): AsyncGenerator<any, void, StepDelay> {
+    let key: string | null = null;
+    let retryInterval: number;
 
-function delay(
-  arg1: string | number,
-  arg2?: number
-): AsyncGenerator<any, void, StepDelay> {
-  let key: string | null = null;
-  let retryInterval: number;
+    if (typeof arg1 === "string") {
+      key = arg1;
+      retryInterval = arg2!;
+    } else {
+      retryInterval = arg1;
+    }
 
-  if (typeof arg1 === "string") {
-    key = arg1;
-    retryInterval = arg2!;
-  } else {
-    retryInterval = arg1;
+    if (!key) key = getCallSiteHash(delay);
+
+    return delayStep(key, retryInterval, clock);
   }
 
-  if (!key) key = getCallSiteHash(delay);
-
-  return delayStep(key, retryInterval);
+  return delay;
 }
 
 async function* delayStep(
   key: string,
-  retryInterval: number
+  retryInterval: number,
+  clock: () => number
 ): AsyncGenerator<any, void, StepDelay> {
   yield new StepKey(key);
 
   const cached = yield new StepCacheCheck();
 
   if (cached) {
-    yield new StepDelay(cached.resumeIn);
+    yield new StepDelay(cached.wakeAt);
   } else {
-    yield new StepDelay(Date.now() + retryInterval);
+    yield new StepDelay(clock() + retryInterval);
   }
 }
 

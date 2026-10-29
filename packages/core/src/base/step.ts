@@ -45,10 +45,11 @@ export class WorkflowResult<T extends any> extends StepResponse {
 export class WorkflowDelay extends StepResponse {
   static type = "workflow-delay";
   readonly type = "workflow-delay";
-  resumeIn: number;
-  constructor(resumeIn: number) {
+  /** The absolute time the step's pause ends, read from the runtime clock. */
+  wakeAt: number;
+  constructor(wakeAt: number) {
     super();
-    this.resumeIn = resumeIn;
+    this.wakeAt = wakeAt;
   }
 }
 
@@ -96,9 +97,10 @@ export class StepError extends StepResponse {
 export class StepDelay extends StepResponse {
   static type = "step-delay";
   readonly type = "step-delay";
-  resumeIn: number;
-  constructor(resumeIn: number) {
+  /** The absolute time the step's pause ends, read from the runtime clock. */
+  wakeAt: number;
+  constructor(wakeAt: number) {
     super();
-    this.resumeIn = resumeIn;
+    this.wakeAt = wakeAt;
   }
 }

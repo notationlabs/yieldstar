@@ -15,11 +15,12 @@
 - Removed `StoreWaiter.event` and the SQLite `store_wake_outbox` table. `SqliteStoreClient` takes `{ db, executions? }` instead of a scheduler client.
 - `registerStoreClientConformance` factories return `{ runtime, createPeer?, restart?, dispose? }` instead of building a store client from a scheduler.
 - `MiddlewareEvent.executionId` is optional; it is absent when the runtime will choose the ID.
+- `StepDelay.resumeIn` and `WorkflowDelay.resumeIn` are renamed `wakeAt`. Delay and retry steps read their wake time from the runtime clock instead of `Date.now()`, and `WorkflowGeneratorParams` carries that `clock`.
 
 ### Added
 
 - Added `Runtime`, `ExecutionClient` (`admit`, `get`, `requestWake`, `claimDue`, `acknowledge`), `ExecutionRecord`, `ExecutionStatus`, `ExecutionOutcome`, `WorkflowRunOutcome`, `ExecutionAdmissionError`, and `InfrastructureError` to `@yieldstar/core`.
-- Added `SqliteRuntime(db, { clock?, redeliveryTimeout? })` and `MemoryRuntime({ clock?, redeliveryTimeout? })`, each exposing `executions`, `heap`, and `stores`.
+- Added `SqliteRuntime(db, { clock?, redeliveryTimeout? })` and `MemoryRuntime({ clock?, redeliveryTimeout? })`, each exposing `clock`, `executions`, `heap`, and `stores`.
 - Added `ExecutionDispatcher(runtime, { invoker, logger, pollInterval?, keepAlive? })` with `start`, `stop`, `tick`, and `drain`. It is the only component that delivers executions, and it returns a finished execution's recorded outcome without running workflow code.
 - Added `waitForExecutionOutcome` and the storage-neutral execution state machine (`prepareExecutionAdmission`, `claimExecution`, `acknowledgeExecution`, and related helpers) for runtime adapter authors.
 - Added `StoreValidationError` and `StoreNotFoundError`.

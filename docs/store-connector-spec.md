@@ -18,7 +18,7 @@ A `Runtime` bundles three clients: `executions` (`ExecutionClient`), `heap` (`He
 
 - **Follow-on writes.** Where this specification requires one write to accompany another, such as the wakes for a store commit, the second MUST be durable once the first commits and MUST be applied eventually. A runtime MAY make both in one transaction or use an outbox.
 - **Waiter deletion.** A waiter MUST be deleted atomically with the heap write that records its step's result. Waiters are therefore stored with step records. A store kept in another database reaches its waiters through the follow-on rule above.
-- **Clock.** Every client MUST read time from the runtime's clock (`RuntimeOptions.clock`, default `Date.now`). No client operation takes the current time as a parameter.
+- **Clock.** Every client MUST read time from the runtime's clock (`RuntimeOptions.clock`, default `Date.now`), exposed as `Runtime.clock`. No client operation takes the current time as a parameter. Delay and retry steps read their wake times from the same clock.
 
 `SqliteRuntime` and `MemoryRuntime` keep every guarantee in single transactions.
 

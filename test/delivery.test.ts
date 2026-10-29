@@ -12,6 +12,7 @@ import { MemoryRuntime } from "@yieldstar/test-runtime";
 import { testSchema } from "@yieldstar/test-utils";
 import {
   ExecutionAdmissionError,
+  RetryableError,
   createHttpSdkFactory,
   createLocalSdk,
   defineStore,
@@ -99,22 +100,58 @@ test("deliver rejects when an infrastructure operation fails, and nothing is rec
 });
 
 test("a delay records its step and suspends with the delay's wakeAt", async () => {
-  const { runtime, invoker } = setup({
-    waits: workflow(async function* (step) {
-      yield* step.delay("wait", 60_000);
-    }),
+  const { runtime, invoker } = setup(
+    {
+      waits: workflow(async function* (step) {
+        yield* step.delay("wait", 60_000);
+      }),
+    },
+    { clock: () => 1_000 }
+  );
+
+  await expect(invoker.deliver(event("waits"))).resolves.toEqual({
+    status: "suspended",
+    wakeAt: 61_000,
   });
-
-  const before = Date.now();
-  const outcome = await invoker.deliver(event("waits"));
-
-  expect(outcome.status).toBe("suspended");
-  const wakeAt = outcome.status === "suspended" ? outcome.wakeAt! : 0;
-  expect(wakeAt).toBeGreaterThanOrEqual(before + 60_000);
-  expect(wakeAt).toBeLessThanOrEqual(Date.now() + 60_000);
   expect(
     await runtime.heap.readStep({ executionId: "waits", stepKey: "wait" })
   ).not.toBeNull();
+});
+
+test("delay and retry wake times read the runtime clock", async () => {
+  let now = 1_000;
+  const { invoker } = setup(
+    {
+      waits: workflow(async function* (step) {
+        yield* step.delay("wait", 60_000);
+        return "woke";
+      }),
+      retries: workflow(async function* (step) {
+        yield* step.run("flaky", () => {
+          throw new RetryableError("again", { maxAttempts: 2, retryInterval: 5_000 });
+        });
+      }),
+    },
+    { clock: () => now }
+  );
+
+  // A replay before the recorded wakeAt stays suspended, whatever Date.now says.
+  now = 60_999;
+  await invoker.deliver(event("waits"));
+  await expect(invoker.deliver(event("waits"))).resolves.toEqual({
+    status: "suspended",
+    wakeAt: 120_999,
+  });
+  now = 120_999;
+  await expect(invoker.deliver(event("waits"))).resolves.toEqual({
+    status: "completed",
+    result: "woke",
+  });
+
+  await expect(invoker.deliver(event("retries"))).resolves.toEqual({
+    status: "suspended",
+    wakeAt: 125_999,
+  });
 });
 
 // Outcomes

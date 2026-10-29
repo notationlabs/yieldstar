@@ -18,6 +18,8 @@ export interface RuntimeOptions {
  * - Every client reads time from the runtime's clock.
  */
 export abstract class Runtime {
+  /** The clock every client, and every step's wake time, reads. */
+  abstract readonly clock: () => number;
   abstract readonly executions: ExecutionClient;
   abstract readonly heap: HeapClient;
   abstract readonly stores: StoreClient;

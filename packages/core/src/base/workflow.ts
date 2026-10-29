@@ -11,6 +11,8 @@ export type WorkflowGeneratorParams<
   event: WorkflowEvent<Params, Context>;
   heapClient: HeapClient;
   storeClient: StoreClient;
+  /** The runtime clock. Delay and retry wake times are read from it. */
+  clock: () => number;
   logger: Logger;
 };
 
