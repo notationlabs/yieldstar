@@ -1,6 +1,6 @@
 # Quick Start
 
-A Yieldstar application has three parts: **workflows** that define the work, a **worker** that executes it, and an **app** that triggers it. This guide sets up all three with SQLite persistence.
+A Yieldstar application has three parts: **workflows** that define the work, a **worker** that executes it, and an **app** that triggers it and runs the dispatcher that hands due executions to workers. This guide sets up all three with SQLite persistence.
 
 ## Install
 
@@ -16,8 +16,7 @@ A workflow is a generator function that yields steps. Each step is a checkpoint,
 
 ```ts [shared.ts]
 import { workflow, createWorkflowRouter } from "yieldstar";
-import { SqliteEventLoop } from "@yieldstar/sqlite-runtime";
-import { createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
+import { SqliteRuntime, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
 
 export const greet = workflow<{ name: string }, string>(async function* (step, event) {
   const greeting = yield* step.run(() => `Hello, ${event.params.name}`);
@@ -29,72 +28,60 @@ export const router = createWorkflowRouter({ greet });
 export type Router = typeof router;
 
 export const db = createSqliteDb({ path: "./.db/local.sqlite" });
-export const eventLoop = new SqliteEventLoop(db);
+export const runtime = new SqliteRuntime(db);
 ```
 
- `createWorkflowRouter` registers workflows by ID.  Those IDs become the typed keys the SDK uses to trigger them.
+`createWorkflowRouter` registers workflows by ID. Those IDs become the typed keys the SDK uses to trigger them.
+
+`SqliteRuntime` keeps execution records, step results and stores in one SQLite file. The app and the worker each construct one over the same file.
 
 ## 2. Create the worker
 
-The worker is a subprocess that runs workflow executions in isolation. It connects the `WorkflowRunner` to the SQLite heap, scheduler, and durable store, then listens for execution events over IPC.
+The worker is a subprocess that runs workflow deliveries in isolation. It connects the `WorkflowRunner` to the SQLite runtime, then listens for execution events over IPC.
 
 ```ts [worker.ts]
 import pino from "pino";
 import { WorkflowRunner } from "@yieldstar/core";
 import { createWorkflowWorker } from "@yieldstar/worker-invoker";
-import {
-  SqliteHeapClient,
-  SqliteSchedulerClient,
-  SqliteStoreClient,
-  SqliteTaskQueueClient,
-  SqliteTimersClient,
-} from "@yieldstar/sqlite-runtime";
-import { router, db } from "./shared";
+import { router, runtime } from "./shared";
 
 const logger = pino();
 
-const schedulerClient = new SqliteSchedulerClient({
-  taskQueueClient: new SqliteTaskQueueClient(db),
-  timersClient: new SqliteTimersClient(db),
-});
-
-const runner = new WorkflowRunner({
-  router,
-  heapClient: new SqliteHeapClient(db),
-  schedulerClient,
-  storeClient: new SqliteStoreClient({ db, schedulerClient }),
-  logger,
-});
+const runner = new WorkflowRunner(runtime, { router, logger });
 
 createWorkflowWorker(runner, logger).listen();
 ```
 
 ## 3. Trigger and await the result
 
-The app entry point starts the event loop, creates an invoker that spawns worker subprocesses on demand, and uses the typed SDK to trigger workflows.
+The app entry point creates an invoker that spawns worker subprocesses on demand, starts an `ExecutionDispatcher` that delivers due executions through that invoker, and uses the typed SDK to trigger workflows.
 
 ```ts [app.ts]
 import pino from "pino";
+import { ExecutionDispatcher } from "@yieldstar/core";
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
 import { createLocalSdk } from "yieldstar";
-import { eventLoop } from "./shared";
+import { runtime } from "./shared";
 import type { Router } from "./shared";
 
 const logger = pino();
 const workerPath = new URL("./worker.ts", import.meta.url).href;
 const invoker = createWorkflowInvoker({ workerPath, logger });
 
-eventLoop.start({ onNewEvent: invoker.execute, logger });
+const dispatcher = new ExecutionDispatcher(runtime, { invoker, logger });
+dispatcher.start();
 
-const sdk = createLocalSdk<Router>(invoker);
+const sdk = createLocalSdk<Router>(runtime, { invoker });
 const result = await sdk.triggerAndWait({
   workflowId: "greet",
   params: { name: "World" },
 });
 
 console.log(result); // "Hello, World!"
-eventLoop.stop();
+await dispatcher.stop();
 ```
+
+The SDK only admits the execution: it writes an execution record and makes it due. The dispatcher claims it, forks a worker, and records the outcome. `triggerAndWait` resolves once that record reaches `completed`.
 
 ## 4. Run it
 
@@ -104,8 +91,8 @@ bun app.ts
 
 The workflow executes two steps with a 1-second delay between them. 
 
-The first step computes a greeting, the delay pauses execution and persists the resume timestamp to SQLite, and the second step appends punctuation. 
+The first step computes a greeting. The delay suspends the execution, and its record becomes due again one second later. The dispatcher then delivers it to a new worker, and the second step appends punctuation.
 
-The state lives in `.db/local.sqlite`. 
+The state lives in `.db/local.sqlite`.
 
 On resume, completed steps replay from the heap without re-executing.

@@ -4,18 +4,19 @@ Stores are not workflow-only. Any code with a `StoreClient` – an HTTP handler,
 
 ## Getting a handle
 
-`storeClient.store(definition, id)` returns a plain async handle – no workflow, no steps.
+`runtime.stores.store(definition, id)` returns a plain async handle – no workflow, no steps.
 
 ```ts
-import { SqliteStoreClient } from "@yieldstar/sqlite-runtime";
+import { SqliteRuntime } from "@yieldstar/sqlite-runtime/bun";
 import { ConversationStore } from "./shared";
 
-const storeClient = new SqliteStoreClient({ db, schedulerClient });
+const runtime = new SqliteRuntime(db);
+const storeClient = runtime.stores;
 
 const conversation = storeClient.store(ConversationStore, "conversation:123");
 ```
 
-The constructor takes a scheduler as well as the database. When a write changes state that a suspended workflow is waiting on, the store client hands that workflow's event to the scheduler, which queues it for re-execution. See [Resident-process runtime](../runtimes/resident-process.md) for the full wiring.
+Take the store client from the runtime rather than constructing one, because the runtime wires it to the execution records. When a write changes state that a suspended workflow is waiting on, the store client makes that workflow's execution due in the same transaction as the write. A running dispatcher then delivers it. See [Resident-process runtime](../runtimes/resident-process.md) for the full wiring.
 
 ## Reading
 

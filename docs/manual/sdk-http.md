@@ -25,7 +25,7 @@ const sdk = createSdk({
 
 ## `sdk.trigger`
 
-Posts to `/trigger` and returns a handle containing `executionId`, `ack()`, and `waitForResult()`.
+Posts to `/trigger` and returns a handle containing `executionId`, `ack()`, and `waitForResult()`. The server admits the execution and responds with the execution ID it accepted; the SDK reads `executionId` from that response rather than generating one itself.
 
 ```ts
 const exec = await sdk.trigger({
@@ -34,9 +34,11 @@ const exec = await sdk.trigger({
 });
 ```
 
+When the server rejects the admission, `trigger` throws an `ExecutionAdmissionError` with the server's `code`: `EXECUTION_ID_CONFLICT` for a `409` (the supplied `executionId` is already in use) or `INVALID_EXECUTION_EVENT` for a `400` (the event cannot round-trip through JSON; see [Local SDK](./sdk-local.md#trigger-event-shape)). Any other non-2xx response throws the response's `statusText`.
+
 ## `exec.ack()`
 
-Reads and parses the trigger response body, returning `{ executionId }`. Call this when you need the ID but don't need to wait for the workflow to finish.
+Returns the parsed trigger response, `{ executionId }`.
 
 ```ts
 const { executionId } = await exec.ack();
@@ -44,13 +46,13 @@ const { executionId } = await exec.ack();
 
 ## `exec.waitForResult()`
 
-Posts to `/events` with the `executionId` and blocks until the workflow completes, then returns the result.
+Posts to `/events` with the `executionId` and blocks until the execution record reaches a terminal status, then returns the result.
 
 ```ts
 const result = await exec.waitForResult();
 ```
 
-If the workflow threw an error, `waitForResult` deserializes the error and re-throws it with the original stack trace preserved.
+If the record is `failed`, `waitForResult` deserializes the recorded error and re-throws it with the original stack trace preserved.
 
 ## Trigger event shape
 
@@ -58,5 +60,5 @@ If the workflow threw an error, `waitForResult` deserializes the error and re-th
 | ------------- | --------------------- | ------------------------ | ------------------------------------------------------------ |
 | `workflowId`  | `string`              | Yes                      | ID matching a key in the router                              |
 | `params`      | `Record<string, any>` | Depends on workflow type | Input data accessible via `event.params` inside the workflow |
-| `executionId` | `string`              | No                       | Custom execution ID. Auto-generated via `nanoid` if omitted  |
+| `executionId` | `string`              | No                       | Custom execution ID. The runtime chooses one if omitted      |
 | `context`     | `Record<string, any>` | No                       | Additional context passed through middleware                 |
