@@ -147,6 +147,7 @@ function toState(row: ExecutionRow): ExecutionState {
     leaseExpiresAt: toNumberOrNull(row.lease_expires_at),
     unacknowledgedDeliveryCount: Number(row.unacknowledged_delivery_count),
     redeliverAt: toNumberOrNull(row.redeliver_at),
+    parent: null,
   };
 }
 

@@ -1,3 +1,4 @@
+import type { DurableObject } from "./durable-value";
 import type { EventContext, EventParams } from "./event";
 
 export type ExecutionStatus =
@@ -11,6 +12,9 @@ export type ExecutionOutcome =
   | { status: "completed"; result: unknown }
   | { status: "failed"; error: Error };
 
+/** The execution and step that started an execution with `step.start`. */
+export type ExecutionParent = { executionId: string; stepKey: string };
+
 /**
  * The durable record of one workflow execution. Admission creates it and
  * stores the event once; every delivery reads the event from here.
@@ -23,6 +27,8 @@ export type ExecutionOutcome =
  * - `suspended`: the latest acknowledged delivery suspended the workflow.
  * - `completed` and `failed` are terminal. `outcome` is present only in these
  *   states.
+ *
+ * `parent` is present, and immutable, only on executions admitted by `start`.
  */
 export interface ExecutionRecord {
   executionId: string;
@@ -35,6 +41,7 @@ export interface ExecutionRecord {
   updatedAt: number;
   /** Consecutive deliveries that ended without an acknowledgement. */
   unacknowledgedDeliveryCount: number;
+  parent?: ExecutionParent;
 }
 
 export type ExecutionAdmissionErrorCode =
@@ -99,6 +106,25 @@ export type ExecutionAdmissionResult =
       message: string;
     };
 
+export type WorkflowStartErrorCode =
+  | "INVALID_START_PARAMETERS"
+  | "START_REQUEST_MISMATCH";
+
+export type ExecutionStartRequest = {
+  /** Identifies the request: the calling execution and its step key. */
+  requestId: { executionId: string; stepKey: string };
+  workflowId: string;
+  params?: DurableObject;
+};
+
+export type ExecutionStartResult =
+  | { status: "accepted"; executionId: string }
+  | {
+      status: "rejected";
+      code: WorkflowStartErrorCode;
+      message: string;
+    };
+
 export type ExecutionWakeResult =
   | { status: "requested" }
   | { status: "ignored" }
@@ -127,6 +153,17 @@ export interface ExecutionClient {
   admit(request: ExecutionAdmissionRequest): Promise<ExecutionAdmissionResult>;
 
   get(executionId: string): Promise<ExecutionRecord | undefined>;
+
+  /**
+   * Starts a workflow on behalf of the execution and step named by
+   * `requestId`, idempotently by that ID. A new start admits the target with
+   * the caller's context and a parent link to the caller, and records the
+   * start request, all-or-nothing. A repeated request returns the first
+   * target's ID if its workflow ID and canonical params match, and
+   * `START_REQUEST_MISMATCH` otherwise, whatever the target's status. Invalid
+   * params return `INVALID_START_PARAMETERS` and admit nothing. Not fenced.
+   */
+  start(request: ExecutionStartRequest): Promise<ExecutionStartResult>;
 
   /**
    * Requests a wake from outside a delivery, such as a store commit. Wakes not
@@ -217,6 +254,20 @@ export class ExecutionAdmissionError extends Error {
   constructor(code: ExecutionAdmissionErrorCode, message: string) {
     super(message);
     this.name = "ExecutionAdmissionError";
+    this.code = code;
+  }
+}
+
+/**
+ * Thrown to workflow code by `step.start` when the runtime rejects the start.
+ * The rejection is recorded as the step's result, so replay throws it again.
+ */
+export class WorkflowStartError extends Error {
+  readonly code: WorkflowStartErrorCode;
+
+  constructor(code: WorkflowStartErrorCode, message: string) {
+    super(message);
+    this.name = "WorkflowStartError";
     this.code = code;
   }
 }

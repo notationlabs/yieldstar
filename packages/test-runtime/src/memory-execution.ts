@@ -18,6 +18,8 @@ import {
   type ExecutionClient,
   type ExecutionLease,
   type ExecutionRecord,
+  type ExecutionStartRequest,
+  type ExecutionStartResult,
   type ExecutionReleaseResult,
   type ExecutionRenewResult,
   type ExecutionState,
@@ -63,6 +65,10 @@ export class MemoryExecutionClient implements ExecutionClient {
       })
     );
     return { status: "accepted", executionId: prepared.executionId };
+  }
+
+  async start(_request: ExecutionStartRequest): Promise<ExecutionStartResult> {
+    throw new Error("ExecutionClient.start is not implemented");
   }
 
   async get(executionId: string): Promise<ExecutionRecord | undefined> {
