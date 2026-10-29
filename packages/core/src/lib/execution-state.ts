@@ -14,7 +14,14 @@ import type {
   WorkflowRunOutcome,
 } from "../base/execution";
 import { isTerminalExecutionStatus } from "../base/execution";
-import { durableValueCodec, isPlainObject } from "../base/durable-value";
+import type { DurableValue } from "../base/durable-value";
+import {
+  decodeParsedValue,
+  durableValueCodec,
+  encodeThrownValue,
+  isPlainObject,
+} from "../base/durable-value";
+import { WORKFLOW_RESULT_STEP_KEY, WorkflowValueError } from "../base/errors";
 import { ReadOnlyMap } from "../utils/map";
 
 /**
@@ -95,93 +102,111 @@ export class ExecutionEventEncodingError extends Error {
 }
 
 /**
- * Encodes `params` and `context` so that decoding returns exactly what was
- * admitted. Values that JSON cannot round-trip (undefined properties, Dates,
- * class instances, non-finite numbers, cycles…) are rejected rather than
- * stored lossily.
+ * Encodes `params` with the durable value codec and `context` as its entries,
+ * so that decoding returns exactly what was admitted. Context keys must be
+ * strings. Throws `ExecutionEventEncodingError` for any value the codec
+ * rejects.
  */
 export function encodeExecutionEvent(event: {
   params: EventParams;
   context: EventContext | undefined;
 }): { params: string; context: string } {
-  if (event.params !== undefined) assertDurableJson(event.params, "params");
-  const entries: [unknown, unknown][] = event.context
-    ? [...event.context.entries()]
-    : [];
-  for (const [key, value] of entries) {
-    const label = `context[${JSON.stringify(key) ?? String(key)}]`;
-    if (
-      !(typeof key === "string" || typeof key === "number" || key === null) ||
-      (typeof key === "number" && !isDurableNumber(key))
-    ) {
+  const params = durableValueCodec.encode(event.params);
+  if (params.status === "invalid") {
+    throw new ExecutionEventEncodingError(`params${params.message.slice(1)}`);
+  }
+  const entries: unknown[] = [];
+  for (const [key, value] of event.context?.entries() ?? []) {
+    if (typeof key !== "string") {
       throw new ExecutionEventEncodingError(
-        `${label}: context keys must be strings or finite numbers`
+        `context: keys must be strings, got ${typeof key}`
       );
     }
-    assertDurableJson(value, label);
+    entries.push([key, value]);
   }
-  return {
-    params: JSON.stringify(event.params === undefined ? {} : { value: event.params }),
-    context: JSON.stringify(entries),
-  };
+  const context = durableValueCodec.encode(entries);
+  if (context.status === "invalid") {
+    throw new ExecutionEventEncodingError(`context${context.message.slice(1)}`);
+  }
+  return { params: params.canonical, context: context.canonical };
 }
 
 export function decodeExecutionEvent(encoded: {
   params: string;
   context: string;
 }): { params: EventParams; context: EventContext } {
-  const params = JSON.parse(encoded.params) as { value?: EventParams };
+  const entries = decodeOrThrow(encoded.context, "context");
+  if (
+    !Array.isArray(entries) ||
+    !entries.every(
+      (entry) => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string"
+    )
+  ) {
+    throw new Error("Invalid execution context encoding: expected [key, value] entries");
+  }
   return {
-    params: "value" in params ? params.value : undefined,
-    context: new ReadOnlyMap(new Map(JSON.parse(encoded.context))),
+    params: decodeOrThrow(encoded.params, "params") as EventParams,
+    context: new ReadOnlyMap(new Map(entries as [string, DurableValue][])),
   };
 }
 
+/**
+ * Encodes a terminal outcome. A completed result the codec rejects is recorded
+ * as a failed outcome with `WorkflowValueError` (`INVALID_STEP_VALUE`), and a
+ * failure that is not an error is recorded as `Error(String(value))`.
+ */
 export function encodeExecutionOutcome(outcome: ExecutionOutcome): string {
   if (outcome.status === "completed") {
-    return JSON.stringify({
-      status: "completed",
-      result: outcome.result === undefined ? {} : { value: outcome.result },
-    });
+    const result = durableValueCodec.encode(outcome.result);
+    if (result.status === "encoded") {
+      return `{"result":${result.canonical},"status":"completed"}`;
+    }
+    return encodeFailedOutcome(
+      new WorkflowValueError(
+        "INVALID_STEP_VALUE",
+        WORKFLOW_RESULT_STEP_KEY,
+        `Workflow result is not a durable value: ${result.message}`
+      )
+    );
   }
-  return JSON.stringify({ status: "failed", error: encodeError(outcome.error) });
+  return encodeFailedOutcome(outcome.error);
+}
+
+function encodeFailedOutcome(error: unknown) {
+  // An outcome's error is always an Error, so a thrown value that is not one
+  // is recorded as Error(String(value)) even when it is durable.
+  const encoded = encodeThrownValue(
+    error instanceof Error ? error : new Error(safeString(error))
+  );
+  return `{"error":${encoded},"status":"failed"}`;
 }
 
 export function decodeExecutionOutcome(encoded: string): ExecutionOutcome {
   const parsed = JSON.parse(encoded);
   if (parsed.status === "completed") {
-    return {
-      status: "completed",
-      result: "value" in parsed.result ? parsed.result.value : undefined,
-    };
+    return { status: "completed", result: decodeParsedValue(parsed.result, "result") };
   }
-  return { status: "failed", error: decodeError(parsed.error) };
+  const error = decodeParsedValue(parsed.error, "error");
+  if (!(error instanceof Error)) {
+    throw new Error("Invalid failed outcome encoding: expected an error");
+  }
+  return { status: "failed", error };
 }
 
-function encodeError(error: unknown) {
-  const err = error instanceof Error ? error : new Error(String(error));
-  const code = (err as { code?: unknown }).code;
-  return {
-    name: err.name,
-    message: err.message,
-    stack: err.stack,
-    ...(typeof code === "string" ? { code } : {}),
-  };
+function decodeOrThrow(canonical: string, label: string) {
+  const decoding = durableValueCodec.decode(canonical);
+  if (decoding.status === "invalid") {
+    throw new Error(`Invalid ${label} encoding: ${decoding.message}`);
+  }
+  return decoding.value;
 }
 
-function decodeError(encoded: {
-  name: string;
-  message: string;
-  stack?: string;
-  code?: string;
-}): Error {
-  const error = new Error(encoded.message);
-  error.name = encoded.name;
-  if (encoded.stack !== undefined) error.stack = encoded.stack;
-  if (encoded.code !== undefined) {
-    (error as Error & { code?: string }).code = encoded.code;
+function safeString(value: unknown) {
+  try {
+    return String(value);
+  } catch {
+    return "Thrown value is not a durable value";
   }
-  return error;
 }
 
 export function createExecutionState(params: {
@@ -401,11 +426,14 @@ export function acknowledgeExecution(
   };
 
   if (outcome.status !== "suspended") {
-    const terminal: ExecutionOutcome =
+    const encoded = encodeExecutionOutcome(
       outcome.status === "completed"
         ? { status: "completed", result: outcome.result }
-        : { status: "failed", error: outcome.error };
-    const encoded = encodeExecutionOutcome(terminal);
+        : { status: "failed", error: outcome.error }
+    );
+    // An invalid result is recorded as failed, so the status comes from the
+    // encoding rather than the reported outcome.
+    const terminal = decodeExecutionOutcome(encoded);
     return {
       // Reaching a terminal status clears every pending wake.
       state: {
@@ -415,7 +443,7 @@ export function acknowledgeExecution(
         outcome: encoded,
         dueAt: null,
       },
-      result: decodeExecutionOutcome(encoded),
+      result: terminal,
     };
   }
 
@@ -436,54 +464,6 @@ function earliest(a: number | null, b: number | null): number | null {
   if (a === null) return b;
   if (b === null) return a;
   return Math.min(a, b);
-}
-
-function isDurableNumber(value: number) {
-  return Number.isFinite(value) && !Object.is(value, -0);
-}
-
-function assertDurableJson(value: unknown, path: string, seen = new Set<object>()) {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return;
-  }
-  if (typeof value === "number") {
-    if (!isDurableNumber(value)) {
-      throw new ExecutionEventEncodingError(`${path}: ${value} cannot round-trip`);
-    }
-    return;
-  }
-  if (typeof value !== "object") {
-    throw new ExecutionEventEncodingError(`${path}: ${typeof value} cannot round-trip`);
-  }
-  if (seen.has(value)) {
-    throw new ExecutionEventEncodingError(`${path}: circular reference`);
-  }
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      if (!(i in value)) {
-        throw new ExecutionEventEncodingError(`${path}[${i}]: sparse array hole`);
-      }
-      assertDurableJson(value[i], `${path}[${i}]`, seen);
-    }
-  } else {
-    const proto = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) {
-      throw new ExecutionEventEncodingError(
-        `${path}: ${proto?.constructor?.name ?? "object"} instances cannot round-trip`
-      );
-    }
-    if (Object.getOwnPropertySymbols(value).length > 0) {
-      throw new ExecutionEventEncodingError(`${path}: symbol keys cannot round-trip`);
-    }
-    for (const [key, child] of Object.entries(value)) {
-      if (key === "__proto__") {
-        throw new ExecutionEventEncodingError(`${path}.__proto__ cannot round-trip`);
-      }
-      assertDurableJson(child, `${path}.${key}`, seen);
-    }
-  }
-  seen.delete(value);
 }
 
 /**
@@ -650,10 +630,8 @@ export function createStartedExecution(params: {
   const target = createExecutionState({
     executionId,
     workflowId: start.workflowId,
-    // The canonical encoding is JSON, so it fits encodeExecutionEvent's
-    // `{ value }` envelope verbatim.
     encoded: {
-      params: start.params === null ? "{}" : `{"value":${start.params}}`,
+      params: start.params ?? encodeExecutionEvent({ params: undefined, context: undefined }).params,
       context: caller.context,
     },
     now,

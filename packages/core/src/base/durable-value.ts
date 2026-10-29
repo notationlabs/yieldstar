@@ -1,27 +1,63 @@
+import { registeredErrorClass } from "./errors";
+
 export type DurableValue =
   | null
   | boolean
   | number
   | string
+  | undefined
+  | Error
   | DurableValue[]
   | DurableObject;
 
 export type DurableObject = { [key: string]: DurableValue };
 
+/**
+ * Compile-time check for a value that will be recorded. Unlike an index
+ * signature, it accepts interfaces. The codec still validates every value at
+ * runtime.
+ */
+export type Durable<T> = T extends
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | Error
+  ? T
+  : T extends readonly (infer U)[]
+  ? readonly Durable<U>[]
+  : T extends Function | Date | Map<any, any> | Set<any> | bigint
+  ? never
+  : { [K in keyof T]: Durable<T[K]> };
+
 export type DurableValueEncoding =
   | { status: "encoded"; canonical: string }
+  | { status: "invalid"; message: string };
+
+export type DurableDecoding =
+  | { status: "decoded"; value: DurableValue }
   | { status: "invalid"; message: string };
 
 export interface DurableValueCodec {
   /**
    * Validates `value` recursively and returns its canonical JSON: object keys
    * sorted by UTF-16 code unit and `-0` written as `0`, so equal values always
-   * encode to the same string. Never throws for an invalid value.
+   * encode to the same string. `undefined`, errors and plain objects with an
+   * own `$type` key are written as tagged objects. Never throws for an invalid
+   * value.
    */
   encode(value: unknown): DurableValueEncoding;
+
+  /**
+   * Reads an encoding back into the value that was encoded. Errors are revived
+   * as the class registered under their `name`, without calling its
+   * constructor. Never throws for an invalid encoding.
+   */
+  decode(canonical: string): DurableDecoding;
 }
 
-class DurableValueError extends Error {}
+export class DurableValueError extends Error {}
 
 export const durableValueCodec: DurableValueCodec = {
   encode(value) {
@@ -32,7 +68,38 @@ export const durableValueCodec: DurableValueCodec = {
       return { status: "invalid", message: err.message };
     }
   },
+
+  decode(canonical) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(canonical);
+    } catch (err) {
+      return { status: "invalid", message: `not JSON: ${(err as Error).message}` };
+    }
+    try {
+      return { status: "decoded", value: decodeParsedValue(parsed) };
+    } catch (err) {
+      if (!(err instanceof DurableValueError)) throw err;
+      return { status: "invalid", message: err.message };
+    }
+  },
 };
+
+/**
+ * Encodes a thrown value: as thrown when it is a `DurableValue`, and as
+ * `Error(String(value))` otherwise. Always succeeds.
+ */
+export function encodeThrownValue(value: unknown): string {
+  const encoding = durableValueCodec.encode(value);
+  if (encoding.status === "encoded") return encoding.canonical;
+  let message: string;
+  try {
+    message = String(value);
+  } catch {
+    message = "Thrown value is not a durable value";
+  }
+  return encodeValue(new Error(message), "$", new Set());
+}
 
 /**
  * Whether `value` is an object with the default object prototype or `null`.
@@ -44,9 +111,15 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
   return proto === Object.prototype || proto === null;
 }
 
+const UNDEFINED_TAG = '{"$type":"undefined"}';
+
+const ERROR_KEYS = new Set(["name", "message", "stack", "code", "cause"]);
+
 function encodeValue(value: unknown, path: string, ancestors: Set<object>): string {
   if (value === null) return "null";
   switch (typeof value) {
+    case "undefined":
+      return UNDEFINED_TAG;
     case "boolean":
       return value ? "true" : "false";
     case "string":
@@ -68,11 +141,15 @@ function encodeValue(value: unknown, path: string, ancestors: Set<object>): stri
     throw new DurableValueError(`${path}: reference cycle`);
   }
   ancestors.add(value);
-  const encoded = Array.isArray(value)
-    ? encodeArray(value, path, ancestors)
-    : encodeObject(value, path, ancestors);
-  ancestors.delete(value);
-  return encoded;
+  try {
+    if (Array.isArray(value)) return encodeArray(value, path, ancestors);
+    if (value instanceof Error) return encodeError(value, path, ancestors);
+    return encodeObject(value, path, ancestors);
+  } finally {
+    // Error encoding recovers from invalid properties, so the set must be
+    // restored when a nested value throws.
+    ancestors.delete(value);
+  }
 }
 
 function encodeArray(value: unknown[], path: string, ancestors: Set<object>) {
@@ -105,21 +182,93 @@ function encodeObject(value: object, path: string, ancestors: Set<object>) {
     const name = Object.getPrototypeOf(value)?.constructor?.name ?? "object";
     throw new DurableValueError(`${path}: ${name} instances are not plain objects`);
   }
-  const keys: string[] = [];
+  const entries: [string, string][] = [];
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key === "symbol") {
       throw new DurableValueError(`${path}: symbol properties are not durable`);
     }
-    keys.push(key);
-  }
-  keys.sort();
-  const entries = keys.map((key) => {
     const keyPath = `${path}[${JSON.stringify(key)}]`;
     const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-    const child = encodeValue(dataValue(descriptor, keyPath), keyPath, ancestors);
-    return `${JSON.stringify(key)}:${child}`;
-  });
-  return `{${entries.join(",")}}`;
+    entries.push([key, encodeValue(dataValue(descriptor, keyPath), keyPath, ancestors)]);
+  }
+  return objectLiteral(entries);
+}
+
+/**
+ * Writes a plain object from encoded entries, wrapping it as
+ * `{ $type: "object", value }` when it has its own `$type` key so that it can
+ * never be read as a tag.
+ */
+function objectLiteral(entries: [string, string][]) {
+  const literal = sortedLiteral(entries);
+  return entries.some(([key]) => key === "$type")
+    ? `{"$type":"object","value":${literal}}`
+    : literal;
+}
+
+function sortedLiteral(entries: [string, string][]) {
+  const sorted = [...entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${sorted.map(([key, value]) => `${JSON.stringify(key)}:${value}`).join(",")}}`;
+}
+
+/**
+ * Tags an error with its name, message, string `stack` and `code`, its
+ * `cause`, a non-enumerable `errors` array (as on `AggregateError`) and its
+ * own enumerable fields. Properties that are not durable are left out rather
+ * than rejecting the error.
+ */
+function encodeError(error: Error, path: string, ancestors: Set<object>) {
+  const name = readProperty(error, "name");
+  const message = readProperty(error, "message");
+  const stack = readProperty(error, "stack");
+  const code = readProperty(error, "code");
+  const tag: [string, string][] = [
+    ["$type", '"error"'],
+    ["name", JSON.stringify(typeof name === "string" ? name : "Error")],
+    ["message", JSON.stringify(typeof message === "string" ? message : "")],
+  ];
+  if (typeof stack === "string") tag.push(["stack", JSON.stringify(stack)]);
+  if (typeof code === "string") tag.push(["code", JSON.stringify(code)]);
+
+  if (Object.hasOwn(error, "cause")) {
+    const cause = encodeOptional(readProperty(error, "cause"), `${path}.cause`, ancestors);
+    if (cause !== undefined) tag.push(["cause", cause]);
+  }
+
+  const errors = Object.getOwnPropertyDescriptor(error, "errors");
+  if (errors && !errors.enumerable && Array.isArray(errors.value)) {
+    const encoded = encodeOptional(errors.value, `${path}.errors`, ancestors);
+    if (encoded !== undefined) tag.push(["errors", encoded]);
+  }
+
+  const fields: [string, string][] = [];
+  for (const key of Object.keys(error)) {
+    if (ERROR_KEYS.has(key)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(error, key)!;
+    if (!("value" in descriptor)) continue;
+    const encoded = encodeOptional(descriptor.value, `${path}.${key}`, ancestors);
+    if (encoded !== undefined) fields.push([key, encoded]);
+  }
+  if (fields.length > 0) tag.push(["fields", objectLiteral(fields)]);
+
+  return sortedLiteral(tag);
+}
+
+function encodeOptional(value: unknown, path: string, ancestors: Set<object>) {
+  try {
+    return encodeValue(value, path, ancestors);
+  } catch (err) {
+    if (!(err instanceof DurableValueError)) throw err;
+    return undefined;
+  }
+}
+
+function readProperty(error: Error, key: string): unknown {
+  try {
+    return (error as unknown as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
 }
 
 /** Reads a property without invoking accessors. */
@@ -136,4 +285,148 @@ function dataValue(descriptor: PropertyDescriptor, path: string) {
 function isArrayIndex(key: string, length: number) {
   const index = Number(key);
   return Number.isInteger(index) && index >= 0 && index < length && String(index) === key;
+}
+
+/**
+ * Decodes a value already parsed from an encoding's JSON, so that adapters can
+ * embed encodings in a larger JSON document. Throws `DurableValueError` for an
+ * invalid encoding.
+ */
+export function decodeParsedValue(parsed: unknown, path = "$"): DurableValue {
+  if (parsed === null) return null;
+  switch (typeof parsed) {
+    case "boolean":
+    case "string":
+      return parsed;
+    case "number":
+      if (!Number.isFinite(parsed)) {
+        throw new DurableValueError(`${path}: ${parsed} is not a finite number`);
+      }
+      return parsed;
+    case "object":
+      break;
+    default:
+      throw new DurableValueError(`${path}: ${typeof parsed} is not a durable value`);
+  }
+  if (Array.isArray(parsed)) {
+    return parsed.map((item, i) => decodeParsedValue(item, `${path}[${i}]`));
+  }
+  const object = parsed as Record<string, unknown>;
+  if (!Object.hasOwn(object, "$type")) return decodeObject(object, path);
+
+  switch (object.$type) {
+    case "undefined":
+      expectKeys(object, path, ["$type"], []);
+      return undefined;
+    case "object": {
+      expectKeys(object, path, ["$type", "value"], []);
+      const value = object.value;
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new DurableValueError(`${path}.value: a wrapped object must be an object`);
+      }
+      return decodeObject(value as Record<string, unknown>, `${path}.value`);
+    }
+    case "error":
+      return decodeError(object, path);
+    default:
+      throw new DurableValueError(`${path}: unknown $type ${JSON.stringify(object.$type)}`);
+  }
+}
+
+function decodeObject(object: Record<string, unknown>, path: string): DurableObject {
+  const decoded: DurableObject = {};
+  for (const key of Object.keys(object)) {
+    // Defined rather than assigned, so an own `__proto__` key stays data.
+    Object.defineProperty(decoded, key, {
+      value: decodeParsedValue(object[key], `${path}[${JSON.stringify(key)}]`),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return decoded;
+}
+
+function decodeError(tag: Record<string, unknown>, path: string): Error {
+  expectKeys(
+    tag,
+    path,
+    ["$type", "name", "message"],
+    ["stack", "code", "cause", "errors", "fields"]
+  );
+  const { name, message, stack, code } = tag;
+  for (const [key, value, optional] of [
+    ["name", name, false],
+    ["message", message, false],
+    ["stack", stack, true],
+    ["code", code, true],
+  ] as const) {
+    if (typeof value !== "string" && !(optional && value === undefined)) {
+      throw new DurableValueError(`${path}.${key}: must be a string`);
+    }
+  }
+
+  const errorClass = registeredErrorClass(name as string) ?? Error;
+  // Constructing a base Error with the class as new.target gives a native error
+  // (one `Error.isError` accepts) with the class's prototype, without calling
+  // the class's constructor, which may require arguments or have side effects.
+  const error: Error = Reflect.construct(Error, [], errorClass);
+  const hidden = (key: string, value: unknown) =>
+    Object.defineProperty(error, key, {
+      value,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  const visible = (key: string, value: unknown) =>
+    Object.defineProperty(error, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+
+  // Classes that inherit their name have it set in the constructor, which
+  // makes it an own enumerable property.
+  if (error.name !== name) visible("name", name);
+  hidden("message", message);
+  // Otherwise the stack captured here would stand in for the original.
+  if (stack !== undefined) hidden("stack", stack);
+  else delete error.stack;
+  if (code !== undefined) visible("code", code);
+  if (Object.hasOwn(tag, "cause")) {
+    hidden("cause", decodeParsedValue(tag.cause, `${path}.cause`));
+  }
+  if (Object.hasOwn(tag, "errors")) {
+    if (!Array.isArray(tag.errors)) {
+      throw new DurableValueError(`${path}.errors: must be an array`);
+    }
+    hidden("errors", decodeParsedValue(tag.errors, `${path}.errors`));
+  }
+  if (Object.hasOwn(tag, "fields")) {
+    const fields = decodeParsedValue(tag.fields, `${path}.fields`);
+    if (!isPlainObject(fields)) {
+      throw new DurableValueError(`${path}.fields: must be an object`);
+    }
+    for (const key of Object.keys(fields)) visible(key, fields[key]);
+  }
+  return error;
+}
+
+function expectKeys(
+  object: Record<string, unknown>,
+  path: string,
+  required: string[],
+  optional: string[]
+) {
+  for (const key of required) {
+    if (!Object.hasOwn(object, key)) {
+      throw new DurableValueError(`${path}: tag is missing ${key}`);
+    }
+  }
+  for (const key of Object.keys(object)) {
+    if (!required.includes(key) && !optional.includes(key)) {
+      throw new DurableValueError(`${path}: unexpected tag key ${JSON.stringify(key)}`);
+    }
+  }
 }

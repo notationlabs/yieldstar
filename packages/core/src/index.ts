@@ -33,12 +33,20 @@ export {
   isTerminalExecutionStatus,
 } from "./base/execution";
 export type {
+  Durable,
+  DurableDecoding,
   DurableObject,
   DurableValue,
   DurableValueCodec,
   DurableValueEncoding,
 } from "./base/durable-value";
-export { durableValueCodec } from "./base/durable-value";
+export { durableValueCodec, encodeThrownValue } from "./base/durable-value";
+export type { ErrorClass, WorkflowValueErrorCode } from "./base/errors";
+export {
+  WORKFLOW_RESULT_STEP_KEY,
+  WorkflowValueError,
+  registerErrorClass,
+} from "./base/errors";
 export type {
   ExecutionState,
   PreparedExecutionStart,
