@@ -8,6 +8,7 @@ export type {
   ExecutionAdmissionErrorCode,
   ExecutionAdmissionRequest,
   ExecutionAdmissionResult,
+  ExecutionClaimFilter,
   ExecutionClient,
   ExecutionLease,
   ExecutionOutcome,

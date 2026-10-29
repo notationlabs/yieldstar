@@ -63,6 +63,16 @@ export type ExecutionLease = {
 };
 
 /**
+ * Limits a claim to the executions that match. The claim applies it in the same
+ * atomic step, so an execution that does not match is not leased and gains no
+ * redelivery delay.
+ */
+export type ExecutionClaimFilter = {
+  /** Claims only executions whose ID is in this list. An empty list claims nothing. */
+  executionIds?: readonly string[];
+};
+
+/**
  * Returned by a fenced write whose lease is no longer current: a higher token
  * has been issued, or the lease has ended. The write changed nothing, and its
  * holder must stop.
@@ -184,12 +194,8 @@ export interface ExecutionClient {
   claimDue(request: {
     limit: number;
     duration: number;
-    /**
-     * Claims only executions whose ID is in this list, as part of the same
-     * atomic claim. An empty list claims nothing. When absent, any execution
-     * whose due time has passed may be claimed.
-     */
-    executionIds?: readonly string[];
+    /** When absent, any execution whose due time has passed may be claimed. */
+    filter?: ExecutionClaimFilter;
   }): Promise<ExecutionLease[]>;
 
   /**

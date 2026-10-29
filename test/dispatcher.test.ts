@@ -103,10 +103,10 @@ function clocked() {
 
 // Filtering
 
-test("delivers only the executions named in executionIds", async () => {
+test("delivers only the executions named in filter.executionIds", async () => {
   const { runtime } = clocked();
   const { invoker, stats } = stubInvoker(async () => ({ status: "completed", result: "ok" }));
-  const dispatcher = dispatcherFor(runtime, invoker, { executionIds: ["mine"] });
+  const dispatcher = dispatcherFor(runtime, invoker, { filter: { executionIds: ["mine"] } });
   for (const id of ["other", "mine"]) await admit(runtime, id);
 
   expect(await dispatcher.tick()).toBe(1);
@@ -117,6 +117,14 @@ test("delivers only the executions named in executionIds", async () => {
     status: "admitted",
     unacknowledgedDeliveryCount: 0,
   });
+});
+
+test("rejects an empty filter.executionIds", () => {
+  const { runtime } = clocked();
+  const { invoker } = stubInvoker(async () => ({ status: "completed", result: "ok" }));
+  expect(() => dispatcherFor(runtime, invoker, { filter: { executionIds: [] } })).toThrow(
+    RangeError
+  );
 });
 
 // Concurrency

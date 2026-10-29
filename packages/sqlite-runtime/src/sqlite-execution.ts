@@ -16,6 +16,7 @@ import {
   type ExecutionAcknowledgeResult,
   type ExecutionAdmissionRequest,
   type ExecutionAdmissionResult,
+  type ExecutionClaimFilter,
   type ExecutionClient,
   type ExecutionLease,
   type ExecutionRecord,
@@ -142,9 +143,10 @@ export class SqliteExecutionClient implements ExecutionClient {
   async claimDue(request: {
     limit: number;
     duration: number;
-    executionIds?: readonly string[];
+    filter?: ExecutionClaimFilter;
   }): Promise<ExecutionLease[]> {
-    if (request.limit <= 0 || request.executionIds?.length === 0) return [];
+    const executionIds = request.filter?.executionIds;
+    if (request.limit <= 0 || executionIds?.length === 0) return [];
     // The IMMEDIATE transaction holds the write lock, so concurrent claims from
     // any process sharing the file see each other's leases.
     return runTransaction(this.db, () => {
@@ -154,7 +156,7 @@ export class SqliteExecutionClient implements ExecutionClient {
       for (const executionId of this.executionsDao.getClaimableIds(
         now,
         request.limit,
-        request.executionIds
+        executionIds
       )) {
         const state = this.executionsDao.getState(executionId);
         if (!state || !isExecutionClaimable(state, now)) continue;

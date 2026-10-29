@@ -1089,7 +1089,7 @@ export function registerExecutionClientConformance({
       }) => {
         for (const id of ["a", "b", "c", "d"]) await admit(runtime, id);
         const claimIds = (executionIds: string[]) =>
-          runtime.executions.claimDue({ limit: 100, duration: LEASE, executionIds });
+          runtime.executions.claimDue({ limit: 100, duration: LEASE, filter: { executionIds } });
 
         expect(await claimIds([])).toEqual([]);
         const leases = await claimIds(["d", "b", "unknown"]);

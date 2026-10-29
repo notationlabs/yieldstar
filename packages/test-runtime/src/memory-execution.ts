@@ -18,6 +18,7 @@ import {
   type ExecutionAcknowledgeResult,
   type ExecutionAdmissionRequest,
   type ExecutionAdmissionResult,
+  type ExecutionClaimFilter,
   type ExecutionClient,
   type ExecutionLease,
   type ExecutionRecord,
@@ -140,10 +141,10 @@ export class MemoryExecutionClient implements ExecutionClient {
   async claimDue(request: {
     limit: number;
     duration: number;
-    executionIds?: readonly string[];
+    filter?: ExecutionClaimFilter;
   }): Promise<ExecutionLease[]> {
     const now = this.clock();
-    const ids = request.executionIds && new Set(request.executionIds);
+    const ids = request.filter?.executionIds && new Set(request.filter.executionIds);
     const claimable = [...this.executions.values()]
       .filter(
         (state) =>
