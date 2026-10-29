@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1 - 2026-10-29
+
+### Added
+
+- `ExecutionClient.claimDue` takes an optional `filter: { executionIds }` and claims only executions whose ID is in it, atomically with the claim. An empty list claims nothing. The SQLite and memory runtimes implement it, and `registerExecutionClientConformance` checks that a filtered claim leaves other executions unclaimed.
+- `ExecutionDispatcher` takes a `filter` option and passes it to every claim, so a process can run only the executions it was asked to run without claiming, failing or delaying other executions in a shared backend. An empty `filter.executionIds` throws a `RangeError`.
+
 ## 0.6.0 - 2026-10-29
 
 ### Breaking changes

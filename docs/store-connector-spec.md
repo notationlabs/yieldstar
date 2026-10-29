@@ -35,9 +35,10 @@ The `ExecutionClient` contract that wakes rely on:
 
 ### Leases
 
-`claimDue({ limit, duration })` grants a lease, `{ executionId, token, expiresAt }`, on each execution it returns.
+`claimDue({ limit, duration, filter? })` grants a lease, `{ executionId, token, expiresAt }`, on each execution it returns.
 
 - `claimDue` MUST return at most `limit` leases, each for a due execution with no live lease, earliest due time first.
+- When `filter.executionIds` is given, `claimDue` MUST claim only executions whose ID is in it, and MUST apply the filter in the same atomic step as the claim, so other executions are neither leased nor counted as unacknowledged deliveries. An empty list MUST claim nothing.
 - An execution MUST have at most one live lease at any time, across every runtime sharing the backend.
 - Each claim MUST give the execution a token greater than every earlier token for that execution.
 - The record's status MUST be `running` while a lease is live. When the lease ends without a terminal acknowledgement, the status returns to `suspended` if an earlier delivery was acknowledged as suspended, and to `admitted` otherwise.

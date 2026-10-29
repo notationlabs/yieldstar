@@ -4,6 +4,7 @@ import { WorkerExitedError } from "../base/invoker";
 import type { Runtime } from "../base/runtime";
 import type {
   ExecutionAcknowledgeResult,
+  ExecutionClaimFilter,
   ExecutionLease,
   WorkflowRunOutcome,
 } from "../base/execution";
@@ -41,6 +42,14 @@ export interface DispatcherOptions {
    * @default 1_000
    */
   abortGracePeriod?: number;
+  /**
+   * Delivers only the executions that match. It is passed to every `claimDue`,
+   * so other executions are never claimed and gain no redelivery delay. An
+   * empty `executionIds` list is rejected, since the dispatcher would never
+   * deliver anything.
+   * @default every execution whose due time has passed
+   */
+  filter?: ExecutionClaimFilter;
 }
 
 /**
@@ -74,6 +83,7 @@ export class ExecutionDispatcher {
   private leaseDuration: number;
   private renewInterval: number;
   private abortGracePeriod: number;
+  private filter: ExecutionClaimFilter | undefined;
   private running = false;
   private looping = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -91,6 +101,7 @@ export class ExecutionDispatcher {
     this.leaseDuration = options.leaseDuration ?? DEFAULT_LEASE_DURATION;
     this.renewInterval = options.renewInterval ?? this.leaseDuration / 3;
     this.abortGracePeriod = options.abortGracePeriod ?? DEFAULT_ABORT_GRACE_PERIOD;
+    this.filter = options.filter;
     if (!Number.isInteger(this.concurrency) || this.concurrency < 1) {
       throw new RangeError("concurrency must be a positive integer");
     }
@@ -102,6 +113,9 @@ export class ExecutionDispatcher {
     }
     if (!(this.abortGracePeriod >= 0)) {
       throw new RangeError("abortGracePeriod must not be negative");
+    }
+    if (this.filter?.executionIds?.length === 0) {
+      throw new RangeError("filter.executionIds must not be empty");
     }
   }
 
@@ -137,6 +151,7 @@ export class ExecutionDispatcher {
       leases = await this.runtime.executions.claimDue({
         limit: slots,
         duration: this.leaseDuration,
+        filter: this.filter,
       });
     } finally {
       this.claiming -= slots;
