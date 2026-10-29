@@ -1,5 +1,4 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import type { WorkflowEvent } from "./event";
 
 export type Draft<T> = T extends object
   ? { -readonly [K in keyof T]: Draft<T[K]> }
@@ -96,7 +95,6 @@ export type StoreWaiter = {
   workflowId: string;
   executionId: string;
   stepKey: string;
-  event: WorkflowEvent;
   storeName: string;
   storeId: string;
   instanceId: string;
@@ -128,6 +126,22 @@ export type RuntimeStore<T> = {
   ): Promise<StoreUpdateFromResult<T>>;
   deleteFrom(snapshot: StoreSnapshot<T>): Promise<StoreDeleteFromResult>;
 };
+
+/** A store state failed its schema. Workflow code can catch it. */
+export class StoreValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StoreValidationError";
+  }
+}
+
+/** The addressed store does not exist. Workflow code can catch it. */
+export class StoreNotFoundError extends Error {
+  constructor(storeName: string, storeId: string) {
+    super(`Store "${storeName}:${storeId}" does not exist`);
+    this.name = "StoreNotFoundError";
+  }
+}
 
 export function defineStore<Schema extends StandardSchemaV1>(
   name: string,
@@ -251,8 +265,10 @@ export abstract class StoreClient {
   /**
    * Registers a versioned read observation. Registration must be linearizable
    * with mutations: a stale observation is woken immediately, while a current
-   * observation is woken by a later intersecting mutation. Wake delivery is
-   * at-least-once and must remain retryable after scheduler failure.
+   * observation is woken by a later intersecting mutation. A wake requests a
+   * delivery of `waiter.executionId`; it carries no copy of the event. Once a
+   * mutation is durable, the wakes it requires are durable too. The waiter
+   * stays registered until the heap records its step's result.
    */
   abstract registerWaiter(waiter: StoreWaiter): Promise<void>;
 
@@ -586,7 +602,9 @@ export async function validateStoreState<Schema extends StandardSchemaV1>(
 
   if ("issues" in result && result.issues) {
     const messages = result.issues.map((issue) => issue.message).join("; ");
-    throw new Error(`Invalid store state for "${definition.name}": ${messages}`);
+    throw new StoreValidationError(
+      `Invalid store state for "${definition.name}": ${messages}`
+    );
   }
 
   return result.value as StoreState<Schema>;
