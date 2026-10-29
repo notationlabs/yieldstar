@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type {
-  ExecutionLease,
+  DeliveryOptions,
   WorkflowEvent,
   WorkflowInvoker,
   WorkflowRunOutcome,
@@ -9,8 +9,8 @@ import { WorkerExitedError } from "@yieldstar/core";
 import { EventEmitter } from "node:events";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { deserializeError } from "serialize-error";
-import type { WorkerDelivery, WorkerMessage } from "./worker";
+import { deserializeError, serializeError } from "serialize-error";
+import type { WorkerDelivery, WorkerMessage, WorkerRequest } from "./worker";
 
 /**
  * Runs each delivery in a forked worker process. `deliver` resolves with the
@@ -19,6 +19,10 @@ import type { WorkerDelivery, WorkerMessage } from "./worker";
  * exit before replying. An exit before replying rejects with a
  * `WorkerExitedError`, so the dispatcher leaves the lease to expire instead of
  * releasing it.
+ *
+ * When `options.signal` aborts, the invoker sends the worker an `abort`
+ * message carrying the reason; the worker aborts its delivery's signal, and
+ * its driver stops before the next step function or fenced write.
  *
  * The worker exits as soon as its IPC channel to this process closes, so a
  * worker whose runtime process has died makes no further fenced writes.
@@ -33,7 +37,7 @@ export function createWorkflowInvoker(params: {
   const { logger, workerPath, execPath, handshakeTimeout = 5_000 } = params;
   return {
     workflowEndEmitter,
-    deliver(event: WorkflowEvent, lease: ExecutionLease) {
+    deliver(event: WorkflowEvent, { lease, signal }: DeliveryOptions) {
       const { executionId } = event;
 
       const filePath = workerPath.startsWith("file:")
@@ -50,8 +54,16 @@ export function createWorkflowInvoker(params: {
         });
         let settled = false;
 
+        const request = (message: WorkerRequest) =>
+          childProcess.send(message, (error) => {
+            if (error) settle({ error });
+          });
+
+        const onAbort = () => request({ type: "abort", reason: serializeError(signal.reason) });
+
         const settle = (result: { outcome: WorkflowRunOutcome } | { error: Error }) => {
           clearTimeout(handshakeTimer);
+          signal.removeEventListener("abort", onAbort);
           if (settled) return;
           settled = true;
           if ("error" in result) {
@@ -100,15 +112,15 @@ export function createWorkflowInvoker(params: {
               // Advanced serialization carries a Map but not a ReadonlyMap
               // wrapper, so send the context as a plain Map.
               const delivery: WorkerDelivery = {
+                type: "deliver",
                 event: { ...event, context: new Map(event.context) },
                 lease,
+                aborted: signal.aborted
+                  ? { reason: serializeError(signal.reason) }
+                  : undefined,
               };
-              childProcess.send(
-                delivery,
-                (error) => {
-                  if (error) settle({ error });
-                }
-              );
+              request(delivery);
+              if (!signal.aborted) signal.addEventListener("abort", onAbort, { once: true });
               return;
             case "outcome": {
               const { outcome } = message;

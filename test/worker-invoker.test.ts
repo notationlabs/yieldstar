@@ -41,6 +41,11 @@ const leaseFor = (event: WorkflowEvent): ExecutionLease => ({
   expiresAt: Date.now() + 30_000,
 });
 
+const optionsFor = (event: WorkflowEvent) => ({
+  lease: leaseFor(event),
+  signal: new AbortController().signal,
+});
+
 const deliver = ({
   fixture,
   execPath,
@@ -56,7 +61,7 @@ const deliver = ({
     execPath,
     handshakeTimeout,
     logger,
-  }).deliver(event(overrides), leaseFor(event(overrides)));
+  }).deliver(event(overrides), optionsFor(event(overrides)));
 
 test("forks a worker, preserves its Map context and resolves with its outcome", { timeout: 2_000 }, async () => {
   await expect(
@@ -154,8 +159,8 @@ test("worker and test invokers deliver the same outcomes", { timeout: 10_000 }, 
 
   for (const parityEvent of cases) {
     const [fromWorker, fromTest] = await Promise.all([
-      workerInvoker.deliver(parityEvent, leaseFor(parityEvent)),
-      testInvoker.deliver(parityEvent, leaseFor(parityEvent)),
+      workerInvoker.deliver(parityEvent, optionsFor(parityEvent)),
+      testInvoker.deliver(parityEvent, optionsFor(parityEvent)),
     ]);
     expect(normalize(fromWorker)).toEqual(normalize(fromTest));
   }

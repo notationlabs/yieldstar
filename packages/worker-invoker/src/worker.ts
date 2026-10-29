@@ -7,7 +7,7 @@ import type {
   WorkflowRunner,
 } from "@yieldstar/core";
 import { ReadOnlyMap } from "@yieldstar/core";
-import { serializeError } from "serialize-error";
+import { deserializeError, serializeError } from "serialize-error";
 
 let context: EventContext;
 
@@ -22,11 +22,22 @@ export type WorkerMessage =
   | { status: "outcome"; outcome: SerializedOutcome }
   | { status: "error"; error: unknown };
 
-/** The message a parent sends its worker: one delivery and its lease. */
+/**
+ * The message a parent sends its worker to start one delivery under its
+ * lease. `aborted` is set when the delivery's signal had already aborted.
+ */
 export type WorkerDelivery = {
+  type: "deliver";
   event: Omit<WorkflowEvent, "context"> & { context: Map<any, any> };
   lease: ExecutionLease;
+  aborted?: { reason: unknown };
 };
+
+/** Aborts the worker's delivery: its lease was lost. */
+export type WorkerAbort = { type: "abort"; reason: unknown };
+
+/** Messages a parent sends its worker. */
+export type WorkerRequest = WorkerDelivery | WorkerAbort;
 
 export type SerializedOutcome =
   | Exclude<WorkflowRunOutcome, { status: "failed" }>
@@ -53,28 +64,37 @@ export function createWorkflowWorker(
         );
         process.exit(WORKER_ORPHANED_EXIT_CODE);
       });
-      process.on(
-        "message",
-        async ({ event, lease }: WorkerDelivery) => {
-          const workflowEvent: WorkflowEvent = {
-            ...event,
-            context: new ReadOnlyMap(event.context),
-          };
-          context = workflowEvent.context;
-          try {
-            const outcome = await workflowRunner.run(workflowEvent, lease, logger);
-            send({
-              status: "outcome",
-              outcome:
-                outcome.status === "failed"
-                  ? { status: "failed", error: serializeError(outcome.error) }
-                  : outcome,
-            });
-          } catch (error: any) {
-            send({ status: "error", error: serializeError(error) });
-          }
+      // One worker runs one delivery, so one controller serves it.
+      const controller = new AbortController();
+      process.on("message", async (message: WorkerRequest) => {
+        if (message.type === "abort") {
+          controller.abort(deserializeError(message.reason));
+          return;
         }
-      );
+        const { event, lease, aborted } = message;
+        if (aborted) controller.abort(deserializeError(aborted.reason));
+        const workflowEvent: WorkflowEvent = {
+          ...event,
+          context: new ReadOnlyMap(event.context),
+        };
+        context = workflowEvent.context;
+        try {
+          const outcome = await workflowRunner.run(workflowEvent, {
+            lease,
+            signal: controller.signal,
+            logger,
+          });
+          send({
+            status: "outcome",
+            outcome:
+              outcome.status === "failed"
+                ? { status: "failed", error: serializeError(outcome.error) }
+                : outcome,
+          });
+        } catch (error: any) {
+          send({ status: "error", error: serializeError(error) });
+        }
+      });
       send({ status: "ready" });
     },
   };

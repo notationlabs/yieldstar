@@ -32,7 +32,7 @@ invoker
       params: record.params,
       context: record.context,
     },
-    lease
+    { lease, signal: new AbortController().signal }
   )
   .catch(() => {});
 

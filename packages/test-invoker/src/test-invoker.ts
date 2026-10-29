@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type {
-  ExecutionLease,
+  DeliveryOptions,
   WorkflowEvent,
   WorkflowInvoker,
   WorkflowRunner,
@@ -16,10 +16,10 @@ export function createWorkflowInvoker(params: {
   const { logger, runner } = params;
   return {
     workflowEndEmitter,
-    async deliver(event: WorkflowEvent, lease: ExecutionLease) {
+    async deliver(event: WorkflowEvent, { lease, signal }: DeliveryOptions) {
       const { executionId } = event;
       logger.info({ executionId }, "Starting workflow delivery");
-      return runner.run(event, lease, logger);
+      return runner.run(event, { lease, signal, logger });
     },
   };
 }

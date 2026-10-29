@@ -2,6 +2,19 @@ import type { EventEmitter } from "node:events";
 import type { WorkflowEvent } from "./event";
 import type { ExecutionLease, WorkflowRunOutcome } from "./execution";
 
+/** What the dispatcher passes with each delivery. */
+export type DeliveryOptions = {
+  /** The delivery's lease. Every fenced write the delivery makes carries it. */
+  lease: ExecutionLease;
+  /**
+   * Aborted when the delivery must stop: the dispatcher aborts it, with a
+   * `LeaseLostError` as its reason, when a renewal returns `lost`. The driver
+   * checks it before each step function and each fenced write, and ends an
+   * aborted delivery without running more workflow code.
+   */
+  signal: AbortSignal;
+};
+
 export type WorkflowInvoker = {
   /**
    * @deprecated The execution record is the source of truth for outcomes.
@@ -13,14 +26,16 @@ export type WorkflowInvoker = {
    * Runs one delivery of an execution and resolves with its outcome. Rejects,
    * without an outcome, when the delivery hits an infrastructure error or the
    * worker exits before replying. Every fenced write the delivery makes
-   * carries `lease`.
+   * carries `options.lease`. Once `options.signal` aborts, the delivery runs
+   * no more workflow code and makes no more fenced writes; it rejects with an
+   * `InfrastructureError` whose cause is the signal's reason.
    *
    * A worker that exits before replying rejects with a `WorkerExitedError`:
    * the dispatcher then leaves the lease to expire, because the worker's last
    * writes may still be landing. Every other rejection is a retry reply, and
    * the dispatcher releases the lease.
    */
-  deliver(event: WorkflowEvent, lease: ExecutionLease): Promise<WorkflowRunOutcome>;
+  deliver(event: WorkflowEvent, options: DeliveryOptions): Promise<WorkflowRunOutcome>;
 };
 
 const WORKER_EXITED = Symbol.for("yieldstar.workerExited");

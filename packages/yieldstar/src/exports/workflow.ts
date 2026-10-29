@@ -58,6 +58,7 @@ export function workflow<
   return async function* workflowGenerator({
     event,
     lease,
+    signal,
     heapClient,
     storeClient,
     clock,
@@ -84,6 +85,7 @@ export function workflow<
         iteratorResult = nextIteratorResult;
         nextIteratorResult = null;
       } else {
+        stopIfAborted(signal);
         iteratorResult = await workflowIterator.next();
       }
 
@@ -158,6 +160,8 @@ export function workflow<
         const cachedResponse = cached
           ? deserializeStepResponse(cached.stepResponseJson)
           : null;
+        // Resuming the step runs the step function unless it is cached.
+        stopIfAborted(signal);
         iteratorResult = await workflowIterator.next(cachedResponse);
         stepResponse = iteratorResult.value;
 
@@ -167,6 +171,7 @@ export function workflow<
          * An infrastructure error rejects the delivery without resuming it.
          */
         while (stepResponse instanceof StepRuntimeCall) {
+          stopIfAborted(signal);
           const callResult = await executeRuntimeCall(stepResponse, {
             stores: storeClient,
           });
@@ -212,6 +217,7 @@ export function workflow<
       if (!cached) {
         const done = !needsRetry && !needsWake;
         const stepResponseJson = serializeStepResponse(stepResponse);
+        stopIfAborted(signal);
         const written = await infrastructure(() =>
           heapClient.writeStep({
             lease,
@@ -263,6 +269,7 @@ export function workflow<
         if (needsRetry) {
           yield new StepDelay(clock() + stepResponse.retryInterval);
         } else {
+          stopIfAborted(signal);
           nextIteratorResult = await workflowIterator.throw(stepResponse.err);
           continue;
         }
@@ -297,3 +304,12 @@ export function workflow<
 }
 
 export const createWorkflow = workflow;
+
+/**
+ * Ends the delivery once its signal has aborted, before it runs more workflow
+ * code or makes another fenced write. Like a lost lease found by a fenced
+ * write, it rejects with an infrastructure error, which is not acknowledged.
+ */
+function stopIfAborted(signal: AbortSignal) {
+  if (signal.aborted) throw new InfrastructureError(signal.reason);
+}

@@ -7,7 +7,7 @@ import type {
   ExecutionLease,
   WorkflowRunOutcome,
 } from "../base/execution";
-import { isTerminalExecutionStatus } from "../base/execution";
+import { LeaseLostError, isTerminalExecutionStatus } from "../base/execution";
 import { DEFAULT_LEASE_DURATION } from "./execution-state";
 
 /** How many deliveries a dispatcher runs at once unless configured: 10. */
@@ -41,7 +41,8 @@ export interface DispatcherOptions {
  *   executions as slots free up, without waiting for earlier deliveries.
  * - It renews each lease every `renewInterval` while the delivery runs. If a
  *   renewal returns `lost`, another claim has taken over: the dispatcher stops
- *   renewing and does not acknowledge.
+ *   renewing, aborts the delivery's signal so it runs no more workflow code,
+ *   and neither acknowledges nor releases.
  * - A delivery that rejects is not acknowledged. If the worker exited before
  *   replying, the lease is left to expire; any other rejection is a retry
  *   reply, and the lease is released. Either way the wakes stay pending and the
@@ -193,7 +194,7 @@ export class ExecutionDispatcher {
             params: record.params,
             context: record.context,
           },
-          lease
+          { lease, signal: renewal.signal }
         );
       } catch (err) {
         const current = await renewal.stop();
@@ -232,11 +233,13 @@ export class ExecutionDispatcher {
   }
 
   /**
-   * Renews `lease` every `renewInterval` until stopped. `stop` waits for any
+   * Renews `lease` every `renewInterval` until stopped. `signal` aborts, with
+   * a `LeaseLostError`, once a renewal returns `lost`. `stop` waits for any
    * renewal in flight and resolves with the latest lease, or `undefined` once
    * a renewal has returned `lost`.
    */
   private renew(lease: ExecutionLease) {
+    const controller = new AbortController();
     let current: ExecutionLease | undefined = lease;
     let pending: Promise<void> | undefined;
     let stopped = false;
@@ -253,6 +256,7 @@ export class ExecutionDispatcher {
               current = undefined;
               clearInterval(timer);
               this.warnLost(lease);
+              controller.abort(new LeaseLostError(lease.executionId));
             } else if (current) {
               current = result.lease;
             }
@@ -273,6 +277,7 @@ export class ExecutionDispatcher {
     if (!this.keepAlive) timer.unref?.();
 
     return {
+      signal: controller.signal,
       async stop() {
         stopped = true;
         clearInterval(timer);

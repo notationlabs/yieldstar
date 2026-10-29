@@ -13,6 +13,7 @@ import {
   WorkflowResult,
 } from "..";
 import type { Runtime } from "../base/runtime";
+import type { DeliveryOptions } from "../base/invoker";
 import { EventContext } from "../base/event";
 
 export class WorkflowRunner<
@@ -29,15 +30,15 @@ export class WorkflowRunner<
   }
 
   /**
-   * Runs one delivery under `lease` and resolves with its outcome. Rejects
-   * only with an infrastructure error, which must not be acknowledged as an
-   * outcome; a lost lease is one.
+   * Runs one delivery under `options.lease` and resolves with its outcome.
+   * Rejects only with an infrastructure error, which must not be acknowledged
+   * as an outcome; a lost lease is one, and so is an aborted `options.signal`.
    */
   run = async (
     event: WorkflowEvent,
-    lease: ExecutionLease,
-    logger: Logger = this.logger
+    options: DeliveryOptions & { logger?: Logger }
   ): Promise<WorkflowRunOutcome> => {
+    const { lease, signal, logger = this.logger } = options;
     const workflow = this.router[event.workflowId];
 
     if (!workflow) {
@@ -49,7 +50,13 @@ export class WorkflowRunner<
 
     let response: WorkflowResult<unknown> | StepDelay | StepStoreWait;
     try {
-      response = await this.runWorkflows({ workflow, logger, event, lease });
+      response = await this.runWorkflows({
+        workflow,
+        logger,
+        event,
+        lease,
+        signal,
+      });
     } catch (err) {
       if (InfrastructureError.is(err)) throw err;
       return { status: "failed", error: toError(err) };
@@ -73,13 +80,15 @@ export class WorkflowRunner<
     workflow: WorkflowGenerator<Params, Result, Context>;
     event: WorkflowEvent<Params, Context>;
     lease: ExecutionLease;
+    signal: AbortSignal;
     logger: Logger;
   }): Promise<WorkflowResult<Result> | StepDelay | StepStoreWait> {
-    const { workflow, event, lease, logger } = params;
+    const { workflow, event, lease, signal, logger } = params;
 
     const workflowIterator = workflow({
       event,
       lease,
+      signal,
       heapClient: this.runtime.heap,
       storeClient: this.runtime.stores,
       clock: this.runtime.clock,

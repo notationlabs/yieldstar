@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -11,6 +11,7 @@ import {
   WorkerExitedError,
   WorkflowRunner,
   redeliveryDelay,
+  type DeliveryOptions,
   type DispatcherOptions,
   type ExecutionLease,
   type Runtime,
@@ -57,19 +58,19 @@ function dispatcherFor(
 
 /** An invoker whose deliveries run `handle`, and that tracks what is running. */
 function stubInvoker(
-  handle: (event: WorkflowEvent, lease: ExecutionLease) => Promise<WorkflowRunOutcome>
+  handle: (event: WorkflowEvent, options: DeliveryOptions) => Promise<WorkflowRunOutcome>
 ) {
   const active = new Set<string>();
   const stats = { delivered: [] as string[], maxActive: 0, overlaps: [] as string[] };
   const invoker: WorkflowInvoker = {
     workflowEndEmitter: new EventEmitter(),
-    async deliver(event, lease) {
+    async deliver(event, options) {
       if (active.has(event.executionId)) stats.overlaps.push(event.executionId);
       active.add(event.executionId);
       stats.delivered.push(event.executionId);
       stats.maxActive = Math.max(stats.maxActive, active.size);
       try {
-        return await handle(event, lease);
+        return await handle(event, options);
       } finally {
         active.delete(event.executionId);
       }
@@ -492,4 +493,114 @@ test("ends a delivery as a retry when a step is already recorded with a differen
     outcome: { status: "completed", result: { receipt: "r-recorded" } },
   });
   expect(runs).toBe(1);
+});
+
+// Aborting a delivery whose lease is lost
+
+test("a renewal that returns lost stops the delivery before its next step function, with no further fenced writes", async () => {
+  const runtime = new MemoryRuntime();
+  const slowStarted = deferred();
+  const renewLost = deferred();
+  const ran: string[] = [];
+  const router = {
+    leaseLost: workflow(async function* (step) {
+      yield* step.run("before", () => ran.push("before"));
+      yield* step.run("slow", async () => {
+        ran.push("slow");
+        slowStarted.resolve();
+        await renewLost.promise;
+        // The dispatcher aborts the signal as the renewal settles.
+        await new Promise((r) => setTimeout(r, 5));
+        return "finished after the lease was lost";
+      });
+      yield* step.run("after", () => ran.push("after"));
+      return "done";
+    }),
+  };
+  const runner = new WorkflowRunner(runtime, { router, logger });
+  const invoker = createTestInvoker({ runner, logger });
+  const deliver = vi.spyOn(invoker, "deliver");
+  vi.spyOn(runtime.executions, "renew").mockImplementation(async () => {
+    await slowStarted.promise;
+    renewLost.resolve();
+    return { status: "lost" };
+  });
+  const writeStep = vi.spyOn(runtime.heap, "writeStep");
+  const acknowledge = vi.spyOn(runtime.executions, "acknowledge");
+  const release = vi.spyOn(runtime.executions, "release");
+  const dispatcher = dispatcherFor(runtime, invoker, {
+    leaseDuration: 1_000,
+    renewInterval: 10,
+  });
+
+  await admit(runtime, "lease-lost", "leaseLost");
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  const signal = deliver.mock.calls[0][1].signal;
+  expect(signal.aborted).toBe(true);
+  await expect(deliver.mock.results[0].value).rejects.toMatchObject({
+    name: "InfrastructureError",
+    cause: { name: "LeaseLostError", executionId: "lease-lost" },
+  });
+  expect(ran).toEqual(["before", "slow"]);
+  // Only the step finished before the lease was lost was written.
+  expect(writeStep.mock.calls.map(([params]) => params.stepKey)).toEqual(["before"]);
+  expect(acknowledge).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  expect(await runtime.executions.get("lease-lost")).toMatchObject({ status: "running" });
+});
+
+test("a renewal that returns lost stops a worker's delivery before its next step function, with no further fenced writes", { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "yieldstar-lease-lost-"));
+  const db = createSqliteDb({ path: join(dir, "shared.db"), wal: true });
+  cleanups.push(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const runtime = new SqliteRuntime(db);
+  const invoker = createWorkerInvoker({
+    workerPath: new URL("lease-lost-worker.mjs", fixtures).href,
+    logger,
+  });
+  const deliver = vi.spyOn(invoker, "deliver");
+  // The lease stays current in the database, so only the abort can stop the
+  // worker's writes: fencing alone would let them land.
+  vi.spyOn(runtime.executions, "renew").mockImplementation(async () => {
+    await vi.waitFor(() => expect(existsSync(join(dir, "slow-started"))).toBe(true), {
+      timeout: 5_000,
+      interval: 5,
+    });
+    return { status: "lost" };
+  });
+  const acknowledge = vi.spyOn(runtime.executions, "acknowledge");
+  const release = vi.spyOn(runtime.executions, "release");
+  const dispatcher = dispatcherFor(runtime, invoker, {
+    leaseDuration: 5_000,
+    renewInterval: 10,
+  });
+
+  await runtime.executions.admit({
+    executionId: "worker-lease-lost",
+    workflowId: "lease-lost",
+    params: { dir },
+    context: new Map(),
+  });
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  await expect(deliver.mock.results[0].value).rejects.toMatchObject({
+    name: "InfrastructureError",
+    cause: { name: "LeaseLostError", executionId: "worker-lease-lost" },
+  });
+  expect(existsSync(join(dir, "after-ran"))).toBe(false);
+  expect(readFileSync(join(dir, "writes"), "utf8")).toBe("before\n");
+  expect(
+    await runtime.heap.readStep({ executionId: "worker-lease-lost", stepKey: "slow" })
+  ).toBeNull();
+  expect(acknowledge).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  expect(await runtime.executions.get("worker-lease-lost")).toMatchObject({
+    status: "running",
+  });
 });

@@ -62,7 +62,10 @@ function setup<W extends WorkflowRouter>(
       if (!lease) throw new Error(`could not lease "${executionId}"`);
       leases.set(executionId, lease);
     }
-    return invoker.deliver(event(workflowId, executionId), lease);
+    return invoker.deliver(event(workflowId, executionId), {
+      lease,
+      signal: new AbortController().signal,
+    });
   }
 
   return { runtime, runner, invoker, dispatcher, sdk, deliver };

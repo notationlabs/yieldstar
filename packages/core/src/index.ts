@@ -1,5 +1,5 @@
 export type { HeapClient, HeapRecord } from "./base/heap";
-export type { WorkflowInvoker } from "./base/invoker";
+export type { DeliveryOptions, WorkflowInvoker } from "./base/invoker";
 export { WorkerExitedError } from "./base/invoker";
 export type { RuntimeOptions } from "./base/runtime";
 export { Runtime } from "./base/runtime";

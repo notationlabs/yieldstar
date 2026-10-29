@@ -12,6 +12,11 @@ export type WorkflowGeneratorParams<
   event: WorkflowEvent<Params, Context>;
   /** The delivery's lease. Every heap step write is fenced by it. */
   lease: ExecutionLease;
+  /**
+   * Aborted when the delivery must stop. The driver checks it before each
+   * step function and each fenced write.
+   */
+  signal: AbortSignal;
   heapClient: HeapClient;
   storeClient: StoreClient;
   /** The runtime clock. Delay and retry wake times are read from it. */
