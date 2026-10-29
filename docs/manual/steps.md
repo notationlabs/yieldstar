@@ -297,7 +297,7 @@ Errors fall into two groups, and only the first reaches workflow code.
 | ----------------------------------------------------------------------------- | -------------------------------------------------------------- |
 | Errors thrown by your step functions                                         | The heap or store database throws                              |
 | Errors thrown by your store updaters, selectors, claims and initial states    | A worker crashes or exits before reporting an outcome          |
-| `StoreValidationError` (a state failed its schema), `StoreNotFoundError`      | The execution client throws during `step.start`                |
+| `StoreValidationError` (a state failed its schema)                            | The execution client throws during `step.start`                |
 | `WorkflowStartError` (`step.start` was rejected)                              | `step.effect` cannot reach or trust its effect records, or a callback returns a malformed answer (`EffectDeliveryError`) |
 | `WorkflowValueError` (a value is not durable, or failed its step's schema)    |                                                                |
 | `WorkflowEffectError` (`step.effect` was invalid or mismatched)               |                                                                |
@@ -305,7 +305,7 @@ Errors fall into two groups, and only the first reaches workflow code.
 Steps do not call runtime clients themselves. A store step yields a request, and the driver makes the call outside workflow code, then resumes the step with the result. If the call fails with an infrastructure error, the driver does not resume the step, so a `try/catch` around it never runs:
 
 ```ts
-const order = yield* step.store(OrderStore, { id: event.params.orderId });
+const order = step.store(OrderStore, { id: event.params.orderId });
 
 try {
   yield* order.update("mark-paid", (draft) => {
