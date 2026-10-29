@@ -71,6 +71,7 @@ test("resumes workflow after a set delay", async () => {
   const delay = result.secondExecutionTime - result.firstExecutionTime;
 
   expect(delay).toBeGreaterThanOrEqual(10);
-  // allow 5ms margin of error
-  expect(delay).toBeLessThanOrEqual(15);
+  // Wall-clock margin for slow CI runners. A wake that falls back to redelivery
+  // takes at least 1s, so this still catches a missed wake.
+  expect(delay).toBeLessThanOrEqual(20);
 });
