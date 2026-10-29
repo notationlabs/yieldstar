@@ -258,6 +258,9 @@ importers:
       '@yieldstar/core':
         specifier: workspace:*
         version: link:../packages/core
+      '@yieldstar/http-server':
+        specifier: workspace:*
+        version: link:../packages/http-server
       '@yieldstar/sqlite-runtime':
         specifier: workspace:*
         version: link:../packages/sqlite-runtime

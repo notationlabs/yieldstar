@@ -10,6 +10,7 @@
   "type": "module",
   "dependencies": {
     "@yieldstar/core": "workspace:*",
+    "@yieldstar/http-server": "workspace:*",
     "@yieldstar/sqlite-runtime": "workspace:*",
     "@yieldstar/store-conformance": "workspace:*",
     "@yieldstar/test-invoker": "workspace:*",
