@@ -19,7 +19,7 @@ export class MemoryHeapClient implements HeapClient {
     isLeaseCurrent: (lease: ExecutionLease) => boolean;
     /**
      * Called synchronously when a step's result is recorded, so the runtime
-     * deletes the step's store waiters in the same write.
+     * deletes the step's store and effect waiters in the same write.
      */
     onStepDone?: (step: { executionId: string; stepKey: string }) => void;
   }) {
