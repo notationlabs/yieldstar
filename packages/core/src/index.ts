@@ -148,6 +148,8 @@ export type {
   StoreWaiter,
   StoreMutation,
   StoreMutationCommitResult,
+  StoreDeletion,
+  StoreReadSnapshot,
   TrackedStoreUpdater,
 } from "./base/store";
 export {

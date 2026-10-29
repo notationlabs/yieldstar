@@ -13,6 +13,12 @@ export type StoreDefinition<Schema extends StandardSchemaV1 = StandardSchemaV1> 
   {
     name: string;
     schema: Schema;
+    /**
+     * The state a store starts with. Every operation on a missing store
+     * creates it from this state, so it is evaluated only when the store with
+     * this `id` does not exist.
+     */
+    initial: (id: string) => StoreState<Schema>;
   };
 
 export type StoreState<Schema extends StandardSchemaV1> =
@@ -69,12 +75,6 @@ export type StoreDeleteFromResult =
       actualInstanceId: string;
       expectedVersion: StoreVersion;
       actualVersion: StoreVersion;
-    }
-  | {
-      deleted: false;
-      reason: "not-found";
-      expectedInstanceId: string;
-      expectedVersion: StoreVersion;
     };
 
 export type StoreSelector<T, R> = (state: Readonly<T>) => R;
@@ -107,16 +107,37 @@ export type StoreWaiter = {
 export type StoreMutationCommitResult =
   | { status: "committed" }
   | { status: "already-applied"; result: unknown }
-  | { status: "conflict"; snapshot: StoreSnapshot<unknown> };
+  | { status: "conflict"; snapshot: StoreSnapshot<unknown> }
+  | { status: "missing" };
+
+/**
+ * A snapshot read from a store, or, when `created` is true, the initial state
+ * of a store that did not exist when it was read. A created snapshot's
+ * `instanceId` is new and its `version` is 0.
+ */
+export type StoreReadSnapshot<T> = StoreSnapshot<T> & { created: boolean };
 
 export type StoreMutation = {
   definition: StoreDefinition;
   id: string;
-  expected: StoreSnapshot<unknown>;
+  /**
+   * The snapshot the mutation was computed from. When `created` is true the
+   * commit first inserts it as the store's initial state, and conflicts if
+   * the store exists by then.
+   */
+  expected: StoreReadSnapshot<unknown>;
   nextState: unknown;
   changedPaths: StorePath[];
   stepId?: StoreStepId;
   result: unknown;
+};
+
+export type StoreDeletion = {
+  definition: StoreDefinition;
+  id: string;
+  expected: StoreSnapshot<unknown>;
+  stepId?: StoreStepId;
+  result: StoreDeleteFromResult;
 };
 
 export type RuntimeStore<T> = {
@@ -137,7 +158,10 @@ export class StoreValidationError extends Error {
   }
 }
 
-/** The addressed store does not exist. Workflow code can catch it. */
+/**
+ * The addressed store did not exist. Operations now create missing stores, so
+ * nothing throws it; it stays registered so recorded failures still decode.
+ */
 export class StoreNotFoundError extends Error {
   constructor(storeName: string, storeId: string) {
     super(`Store "${storeName}:${storeId}" does not exist`);
@@ -162,9 +186,16 @@ export type DurableStoreSchema<Schema extends StandardSchemaV1> = IfDurable<
 
 export function defineStore<Schema extends StandardSchemaV1>(
   name: string,
-  schema: Schema & DurableStoreSchema<Schema>
+  schema: Schema & DurableStoreSchema<Schema>,
+  options: {
+    initial: (id: string) => Durable<StoreState<Schema>>;
+  }
 ): StoreDefinition<Schema> {
-  return { name, schema };
+  return {
+    name,
+    schema,
+    initial: options.initial as (id: string) => StoreState<Schema>,
+  };
 }
 
 export abstract class StoreClient {
@@ -200,14 +231,13 @@ export abstract class StoreClient {
     };
   }
 
-  abstract getOrCreateStore<Schema extends StandardSchemaV1>(params: {
-    definition: StoreDefinition<Schema>;
-    id: string;
-    initial?:
-      | StoreState<Schema>
-      | (() => StoreState<Schema> | Promise<StoreState<Schema>>);
-  }): Promise<StoreSnapshot<StoreState<Schema>>>;
-
+  /**
+   * Every operation that takes a `definition` and `id`, except `deleteStore`,
+   * first creates a missing store from `definition.initial(id)`, in the same
+   * atomic write as the operation. `initial` is evaluated only when the store
+   * is missing, and concurrent operations on a missing store record exactly
+   * one initial state. A creation is version 0 of a new instance.
+   */
   abstract getStore<Schema extends StandardSchemaV1>(params: {
     definition: StoreDefinition<Schema>;
     id: string;
@@ -300,14 +330,19 @@ export abstract class StoreClient {
   /**
    * Removes a physical store instance and its waiters. Applied-step receipts
    * remain authoritative for the logical store key across recreation. A no-op
-   * if the store does not exist.
+   * if the store does not exist; it never creates one.
    */
   abstract deleteStore(params: {
     definition: StoreDefinition;
     id: string;
   }): Promise<void>;
 
-  /** Deletes a store only if its instance ID and version still match the snapshot. */
+  /**
+   * Deletes a store only if its instance ID and version still match the
+   * snapshot. A missing store is created first, so the result is a conflict
+   * with the new instance. With a `stepId`, a committed deletion is recorded
+   * and a repeated call returns the recorded result.
+   */
   abstract deleteStoreFrom(params: {
     definition: StoreDefinition;
     id: string;
@@ -319,9 +354,27 @@ export abstract class StoreClient {
 /**
  * Implements store transformations as read/compute/compare-and-swap loops.
  * Storage connectors only implement the atomic mutation protocol and never
- * execute application callbacks while holding a storage transaction.
+ * execute application callbacks, including `initial`, while holding a storage
+ * transaction.
  */
 export abstract class CasStoreClient extends StoreClient {
+  /** Reads a store's current snapshot, or `undefined` if it does not exist. */
+  protected abstract readStore(params: {
+    definition: StoreDefinition;
+    id: string;
+  }): Promise<StoreSnapshot<unknown> | undefined>;
+
+  /**
+   * Atomically inserts `snapshot` as a store's initial state unless the store
+   * exists, and returns the store's snapshot after the write: `snapshot` if it
+   * was inserted, otherwise the existing store's.
+   */
+  protected abstract insertStore(params: {
+    definition: StoreDefinition;
+    id: string;
+    snapshot: StoreSnapshot<unknown>;
+  }): Promise<StoreSnapshot<unknown>>;
+
   protected abstract getAppliedStoreStep(params: {
     definition: StoreDefinition;
     id: string;
@@ -329,13 +382,38 @@ export abstract class CasStoreClient extends StoreClient {
   }): Promise<{ result: unknown } | undefined>;
 
   /**
-   * Atomically compares `expected`, writes the next state, records the optional
-   * step result, and records the wake obligations created by `changedPaths`.
-   * A transactional outbox is recommended but is not part of the protocol.
+   * Atomically compares `expected`, writes the next state at
+   * `expected.version + 1`, records the optional step result, and records the
+   * wake obligations created by `changedPaths`. When `expected.created` is
+   * true the store must still be missing, and the commit inserts it under
+   * `expected.instanceId`; otherwise a missing store returns `missing`. A
+   * recorded step result wins over both checks. A transactional outbox is
+   * recommended but is not part of the protocol.
    */
   protected abstract commitStoreMutation(
     mutation: StoreMutation
   ): Promise<StoreMutationCommitResult>;
+
+  /**
+   * Atomically compares `expected`, deletes the store and its waiters, and
+   * records the optional step result. A recorded step result wins over the
+   * comparison, and a missing store returns `missing`.
+   */
+  protected abstract commitStoreDeletion(
+    deletion: StoreDeletion
+  ): Promise<StoreMutationCommitResult>;
+
+  /** Names the instance a store is created as. Connectors may override it. */
+  protected createInstanceId(): string {
+    return crypto.randomUUID();
+  }
+
+  async getStore<Schema extends StandardSchemaV1>(params: {
+    definition: StoreDefinition<Schema>;
+    id: string;
+  }): Promise<StoreSnapshot<StoreState<Schema>>> {
+    return this.getOrInsertStore(params.definition, params.id);
+  }
 
   async updateStore<Schema extends StandardSchemaV1>(params: {
     definition: StoreDefinition<Schema>;
@@ -348,16 +426,14 @@ export abstract class CasStoreClient extends StoreClient {
       return applied.result as StoreUpdateResult<StoreState<Schema>>;
     }
 
-    let snapshot = await this.getStore({
-      definition: params.definition,
-      id: params.id,
-    });
+    const stepKey = params.stepId?.stepKey;
+    let snapshot = await this.readOrInitialize(params.definition, params.id, stepKey);
     while (true) {
       const prepared = await prepareStoreUpdate(
         params.definition,
         snapshot,
         params.updater,
-        params.stepId?.stepKey
+        stepKey
       );
       const result: StoreUpdateResult<StoreState<Schema>> = {
         state: cloneStoreState(prepared.nextState),
@@ -378,7 +454,10 @@ export abstract class CasStoreClient extends StoreClient {
       if (committed.status === "already-applied") {
         return committed.result as StoreUpdateResult<StoreState<Schema>>;
       }
-      snapshot = committed.snapshot as StoreSnapshot<StoreState<Schema>>;
+      snapshot =
+        committed.status === "conflict"
+          ? existing(committed.snapshot as StoreSnapshot<StoreState<Schema>>)
+          : await this.readOrInitialize(params.definition, params.id, stepKey);
       // TODO: add a configurable retry cap/backoff policy before remote CAS
       // connectors are introduced; SQLite serializes commits locally.
     }
@@ -398,10 +477,8 @@ export abstract class CasStoreClient extends StoreClient {
 
     assertStoreSnapshotInstanceId(params.snapshot);
 
-    const current = await this.getStore({
-      definition: params.definition,
-      id: params.id,
-    });
+    const stepKey = params.stepId?.stepKey;
+    const current = await this.getOrInsertStore(params.definition, params.id, stepKey);
     if (!sameStoreVersion(current, params.snapshot)) {
       return storeUpdateConflict(params.snapshot, current);
     }
@@ -410,7 +487,7 @@ export abstract class CasStoreClient extends StoreClient {
       params.definition,
       params.snapshot,
       params.updater,
-      params.stepId?.stepKey
+      stepKey
     );
     const result: StoreUpdateFromResult<StoreState<Schema>> = {
       updated: true,
@@ -421,7 +498,7 @@ export abstract class CasStoreClient extends StoreClient {
     const committed = await this.commitStoreMutation({
       definition: params.definition,
       id: params.id,
-      expected: params.snapshot,
+      expected: existing(params.snapshot),
       nextState: prepared.nextState,
       changedPaths: prepared.changedPaths,
       stepId: params.stepId,
@@ -432,7 +509,54 @@ export abstract class CasStoreClient extends StoreClient {
     if (committed.status === "already-applied") {
       return committed.result as StoreUpdateFromResult<StoreState<Schema>>;
     }
-    return storeUpdateConflict(params.snapshot, committed.snapshot);
+    return storeUpdateConflict(
+      params.snapshot,
+      committed.status === "conflict"
+        ? committed.snapshot
+        : await this.getOrInsertStore(params.definition, params.id, stepKey)
+    );
+  }
+
+  async deleteStoreFrom(params: {
+    definition: StoreDefinition;
+    id: string;
+    snapshot: StoreSnapshot<unknown>;
+    stepId?: StoreStepId;
+  }): Promise<StoreDeleteFromResult> {
+    const applied = await this.getAppliedResult(params);
+    if (applied) return applied.result as StoreDeleteFromResult;
+
+    assertStoreSnapshotInstanceId(params.snapshot);
+
+    const stepKey = params.stepId?.stepKey;
+    let current = await this.getOrInsertStore(params.definition, params.id, stepKey);
+    while (sameStoreVersion(current, params.snapshot)) {
+      const result: StoreDeleteFromResult = { deleted: true };
+      const committed = await this.commitStoreDeletion({
+        definition: params.definition,
+        id: params.id,
+        expected: params.snapshot,
+        stepId: params.stepId,
+        result,
+      });
+
+      if (committed.status === "committed") return result;
+      if (committed.status === "already-applied") {
+        return committed.result as StoreDeleteFromResult;
+      }
+      current =
+        committed.status === "conflict"
+          ? committed.snapshot
+          : await this.getOrInsertStore(params.definition, params.id, stepKey);
+    }
+    return {
+      deleted: false,
+      reason: "conflict",
+      expectedInstanceId: params.snapshot.instanceId,
+      actualInstanceId: current.instanceId,
+      expectedVersion: params.snapshot.version,
+      actualVersion: current.version,
+    };
   }
 
   async takeFromStore<Schema extends StandardSchemaV1, R>(params: {
@@ -448,10 +572,8 @@ export abstract class CasStoreClient extends StoreClient {
     const applied = await this.getAppliedResult(params);
     if (applied) return applied.result as StoreTakeResult<R>;
 
-    let snapshot = await this.getStore({
-      definition: params.definition,
-      id: params.id,
-    });
+    const stepKey = params.stepId?.stepKey;
+    let snapshot = await this.readOrInitialize(params.definition, params.id, stepKey);
     while (true) {
       const previousState = cloneStoreState(snapshot.state);
       const draft = cloneStoreState(previousState) as Draft<StoreState<Schema>>;
@@ -462,6 +584,19 @@ export abstract class CasStoreClient extends StoreClient {
       );
 
       if (!isStoreSelectorMatch(selectedResult)) {
+        // An unmatched take still creates the store, so a waiter registered
+        // from this result observes an instance that exists.
+        if (snapshot.created) {
+          const stored = await this.insertStore({
+            definition: params.definition,
+            id: params.id,
+            snapshot: detach(snapshot),
+          });
+          if (stored.instanceId !== snapshot.instanceId) {
+            snapshot = existing(stored as StoreSnapshot<StoreState<Schema>>);
+            continue;
+          }
+        }
         return {
           matched: false,
           instanceId: snapshot.instanceId,
@@ -477,13 +612,13 @@ export abstract class CasStoreClient extends StoreClient {
         previousState,
         draft,
         tracked,
-        stepKey: params.stepId?.stepKey,
+        stepKey,
       });
       // Checked before the commit, so a selection that cannot be recorded
       // leaves the store unchanged.
       assertDurableStoreValue(
         selected,
-        params.stepId?.stepKey ?? "",
+        stepKey ?? "",
         `Store take selection for "${params.definition.name}"`
       );
       const selectedSnapshot = cloneStoreState(selected);
@@ -507,9 +642,48 @@ export abstract class CasStoreClient extends StoreClient {
       if (committed.status === "already-applied") {
         return committed.result as StoreTakeResult<R>;
       }
-      snapshot = committed.snapshot as StoreSnapshot<StoreState<Schema>>;
+      snapshot =
+        committed.status === "conflict"
+          ? existing(committed.snapshot as StoreSnapshot<StoreState<Schema>>)
+          : await this.readOrInitialize(params.definition, params.id, stepKey);
       // TODO: share the configurable retry cap/backoff policy with updateStore.
     }
+  }
+
+  /**
+   * Reads a store, or evaluates and validates `definition.initial` when it is
+   * missing. Nothing is written: a created snapshot is committed by the
+   * operation computed from it.
+   */
+  private async readOrInitialize<Schema extends StandardSchemaV1>(
+    definition: StoreDefinition<Schema>,
+    id: string,
+    stepKey?: string
+  ): Promise<StoreReadSnapshot<StoreState<Schema>>> {
+    const snapshot = await this.readStore({ definition, id });
+    if (snapshot) return existing(snapshot as StoreSnapshot<StoreState<Schema>>);
+
+    const state = await validateStoreState(definition, definition.initial(id), stepKey);
+    return {
+      state,
+      instanceId: this.createInstanceId(),
+      version: 0,
+      created: true,
+    };
+  }
+
+  private async getOrInsertStore<Schema extends StandardSchemaV1>(
+    definition: StoreDefinition<Schema>,
+    id: string,
+    stepKey?: string
+  ): Promise<StoreSnapshot<StoreState<Schema>>> {
+    const snapshot = await this.readOrInitialize(definition, id, stepKey);
+    if (!snapshot.created) return detach(snapshot);
+    return (await this.insertStore({
+      definition,
+      id,
+      snapshot: detach(snapshot),
+    })) as StoreSnapshot<StoreState<Schema>>;
   }
 
   private getAppliedResult(params: {
@@ -525,6 +699,23 @@ export abstract class CasStoreClient extends StoreClient {
         })
       : Promise.resolve(undefined);
   }
+}
+
+function existing<T>(snapshot: StoreSnapshot<T>): StoreReadSnapshot<T> {
+  return {
+    state: snapshot.state,
+    instanceId: snapshot.instanceId,
+    version: snapshot.version,
+    created: false,
+  };
+}
+
+function detach<T>(snapshot: StoreReadSnapshot<T>): StoreSnapshot<T> {
+  return {
+    state: snapshot.state,
+    instanceId: snapshot.instanceId,
+    version: snapshot.version,
+  };
 }
 
 async function prepareStoreUpdate<Schema extends StandardSchemaV1>(
