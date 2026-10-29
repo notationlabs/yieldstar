@@ -1,0 +1,495 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { EventEmitter } from "node:events";
+import { afterEach, expect, test, vi } from "vitest";
+import type { Logger } from "pino";
+import {
+  DEFAULT_LEASE_DURATION,
+  ExecutionDispatcher,
+  InfrastructureError,
+  WorkerExitedError,
+  WorkflowRunner,
+  redeliveryDelay,
+  type DispatcherOptions,
+  type ExecutionLease,
+  type Runtime,
+  type WorkflowEvent,
+  type WorkflowInvoker,
+  type WorkflowRunOutcome,
+} from "@yieldstar/core";
+import { createWorkflowInvoker as createTestInvoker } from "@yieldstar/test-invoker";
+import { createWorkflowInvoker as createWorkerInvoker } from "@yieldstar/worker-invoker";
+import { MemoryRuntime } from "@yieldstar/test-runtime";
+import { SqliteRuntime } from "@yieldstar/sqlite-runtime";
+import { workflow } from "yieldstar";
+
+const isBun = "Bun" in globalThis;
+const { createSqliteDb } = isBun
+  ? await import("@yieldstar/sqlite-runtime/bun")
+  : await import("@yieldstar/sqlite-runtime/node");
+
+const logger = { info() {}, error() {}, warn() {} } as unknown as Logger;
+const fixtures = new URL("./fixtures/worker-invoker/", import.meta.url);
+
+const cleanups: (() => unknown)[] = [];
+
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  vi.restoreAllMocks();
+});
+
+function dispatcherFor(
+  runtime: Runtime,
+  invoker: WorkflowInvoker,
+  options: Partial<DispatcherOptions> = {}
+) {
+  const dispatcher = new ExecutionDispatcher(runtime, {
+    invoker,
+    logger,
+    pollInterval: 1,
+    keepAlive: false,
+    ...options,
+  });
+  cleanups.push(() => dispatcher.stop());
+  return dispatcher;
+}
+
+/** An invoker whose deliveries run `handle`, and that tracks what is running. */
+function stubInvoker(
+  handle: (event: WorkflowEvent, lease: ExecutionLease) => Promise<WorkflowRunOutcome>
+) {
+  const active = new Set<string>();
+  const stats = { delivered: [] as string[], maxActive: 0, overlaps: [] as string[] };
+  const invoker: WorkflowInvoker = {
+    workflowEndEmitter: new EventEmitter(),
+    async deliver(event, lease) {
+      if (active.has(event.executionId)) stats.overlaps.push(event.executionId);
+      active.add(event.executionId);
+      stats.delivered.push(event.executionId);
+      stats.maxActive = Math.max(stats.maxActive, active.size);
+      try {
+        return await handle(event, lease);
+      } finally {
+        active.delete(event.executionId);
+      }
+    },
+  };
+  return { invoker, stats, active };
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+async function admit(runtime: Runtime, executionId: string, workflowId = "workflow") {
+  const result = await runtime.executions.admit({
+    executionId,
+    workflowId,
+    params: undefined,
+    context: new Map(),
+  });
+  expect(result).toEqual({ status: "accepted", executionId });
+}
+
+/** A runtime on a controlled clock. */
+function clocked() {
+  const clock = { now: 1_000_000 };
+  const runtime = new MemoryRuntime({ clock: () => clock.now });
+  return { runtime, clock };
+}
+
+// Concurrency
+
+test("delivers N due executions at once when concurrency is N", async () => {
+  const { runtime } = clocked();
+  const gate = deferred();
+  const { invoker, stats } = stubInvoker(async () => {
+    await gate.promise;
+    return { status: "completed", result: "ok" };
+  });
+  const dispatcher = dispatcherFor(runtime, invoker, { concurrency: 5 });
+  for (let i = 0; i < 5; i++) await admit(runtime, `e${i}`);
+
+  expect(await dispatcher.tick()).toBe(5);
+  // Every delivery has started while none has finished.
+  await vi.waitFor(() => expect(stats.delivered).toHaveLength(5));
+  expect(stats.maxActive).toBe(5);
+  expect(dispatcher.activeDeliveries).toBe(5);
+
+  gate.resolve();
+  await dispatcher.drain();
+  for (let i = 0; i < 5; i++) {
+    expect((await runtime.executions.get(`e${i}`))?.status).toBe("completed");
+  }
+});
+
+test("runs no more than `concurrency` deliveries at once when more are due", async () => {
+  const runtime = new MemoryRuntime();
+  const { invoker, stats } = stubInvoker(async () => {
+    await new Promise((r) => setTimeout(r, 5));
+    return { status: "completed", result: "ok" };
+  });
+  const dispatcher = dispatcherFor(runtime, invoker, { concurrency: 3 });
+  const ids = Array.from({ length: 12 }, (_, i) => `e${i}`);
+  for (const id of ids) await admit(runtime, id);
+
+  // A manual claim takes only the free slots.
+  expect(await dispatcher.tick()).toBe(3);
+  expect(await dispatcher.tick()).toBe(0);
+
+  dispatcher.start();
+  await vi.waitFor(
+    async () => {
+      for (const id of ids) {
+        expect((await runtime.executions.get(id))?.status).toBe("completed");
+      }
+    },
+    { timeout: 2_000 }
+  );
+  expect(stats.maxActive).toBe(3);
+  expect(stats.delivered.sort()).toEqual([...ids].sort());
+});
+
+test("defaults to 10 deliveries at once", async () => {
+  const { runtime } = clocked();
+  const gate = deferred();
+  const { invoker } = stubInvoker(async () => {
+    await gate.promise;
+    return { status: "suspended" };
+  });
+  const dispatcher = dispatcherFor(runtime, invoker);
+  for (let i = 0; i < 12; i++) await admit(runtime, `e${i}`);
+  expect(await dispatcher.tick()).toBe(10);
+  gate.resolve();
+  await dispatcher.drain();
+});
+
+test("claims new executions without waiting for earlier deliveries to reach an outcome", async () => {
+  const runtime = new MemoryRuntime();
+  const slow = deferred();
+  const { invoker } = stubInvoker(async (event) => {
+    if (event.executionId === "slow") await slow.promise;
+    return { status: "completed", result: event.executionId };
+  });
+  const dispatcher = dispatcherFor(runtime, invoker);
+  dispatcher.start();
+  await admit(runtime, "slow");
+  await vi.waitFor(async () =>
+    expect((await runtime.executions.get("slow"))?.status).toBe("running")
+  );
+  await admit(runtime, "fast");
+  await vi.waitFor(async () =>
+    expect((await runtime.executions.get("fast"))?.status).toBe("completed")
+  );
+  expect((await runtime.executions.get("slow"))?.status).toBe("running");
+  slow.resolve();
+  await vi.waitFor(async () =>
+    expect((await runtime.executions.get("slow"))?.status).toBe("completed")
+  );
+});
+
+function sharedBackends(): { name: string; open(): Runtime[] }[] {
+  return [
+    {
+      name: "one memory runtime",
+      open() {
+        const runtime = new MemoryRuntime();
+        return [runtime, runtime, runtime];
+      },
+    },
+    {
+      name: "separate SQLite connections to one file",
+      open() {
+        const dir = mkdtempSync(join(tmpdir(), "yieldstar-dispatchers-"));
+        const path = join(dir, "dispatchers.db");
+        const dbs = [0, 1, 2].map(() => createSqliteDb({ path, wal: true }));
+        cleanups.push(() => {
+          for (const db of dbs) db.close();
+          rmSync(dir, { recursive: true, force: true });
+        });
+        return dbs.map((db) => new SqliteRuntime(db));
+      },
+    },
+  ];
+}
+
+for (const backend of sharedBackends()) {
+  test(`never gives an execution two live leases across several dispatchers (${backend.name})`, async () => {
+    const runtimes = backend.open();
+    const ids = Array.from({ length: 30 }, (_, i) => `shared-${i}`);
+    for (const id of ids) await admit(runtimes[0], id);
+
+    // One invoker across all dispatchers sees every delivery.
+    const { invoker, stats } = stubInvoker(async () => {
+      await new Promise((r) => setTimeout(r, 2));
+      return { status: "completed", result: "ok" };
+    });
+    const dispatchers = runtimes.map((runtime) =>
+      dispatcherFor(runtime, invoker, { concurrency: 4 })
+    );
+    for (const dispatcher of dispatchers) dispatcher.start();
+
+    await vi.waitFor(
+      async () => {
+        for (const id of ids) {
+          expect((await runtimes[0].executions.get(id))?.status).toBe("completed");
+        }
+      },
+      { timeout: 5_000 }
+    );
+    expect(stats.overlaps).toEqual([]);
+    // Each execution was delivered exactly once.
+    expect(stats.delivered.sort()).toEqual([...ids].sort());
+  });
+}
+
+// Renewal
+
+test("renews a lease so a delivery longer than one lease period completes with one claim", async () => {
+  const runtime = new MemoryRuntime();
+  const peer = runtime;
+  const { invoker, stats } = stubInvoker(async () => {
+    await new Promise((r) => setTimeout(r, 400));
+    return { status: "completed", result: "long" };
+  });
+  const dispatcher = dispatcherFor(runtime, invoker, {
+    leaseDuration: 100,
+    renewInterval: 25,
+  });
+  await admit(runtime, "long");
+  expect(await dispatcher.tick()).toBe(1);
+
+  // Another dispatcher keeps trying to claim while the delivery runs.
+  const stolen: ExecutionLease[] = [];
+  const poll = setInterval(async () => {
+    stolen.push(...(await peer.executions.claimDue({ limit: 10, duration: 100 })));
+  }, 10);
+  try {
+    await dispatcher.drain();
+  } finally {
+    clearInterval(poll);
+  }
+  expect(stolen).toEqual([]);
+  expect(stats.delivered).toEqual(["long"]);
+  expect(await runtime.executions.get("long")).toMatchObject({
+    status: "completed",
+    unacknowledgedDeliveries: 0,
+  });
+});
+
+test("stops renewing and does not acknowledge once a renewal returns lost", async () => {
+  const runtime = new MemoryRuntime();
+  const renewed = deferred();
+  vi.spyOn(runtime.executions, "renew").mockImplementation(async () => {
+    renewed.resolve();
+    return { status: "lost" };
+  });
+  const acknowledge = vi.spyOn(runtime.executions, "acknowledge");
+  const { invoker } = stubInvoker(async () => {
+    await renewed.promise;
+    return { status: "completed", result: "stale" };
+  });
+  const dispatcher = dispatcherFor(runtime, invoker, {
+    leaseDuration: 100,
+    renewInterval: 10,
+  });
+  await admit(runtime, "lost-renewal");
+  await dispatcher.tick();
+  await dispatcher.drain();
+  expect(runtime.executions.renew).toHaveBeenCalledTimes(1);
+  expect(acknowledge).not.toHaveBeenCalled();
+  expect((await runtime.executions.get("lost-renewal"))?.outcome).toBeUndefined();
+});
+
+// Rejections
+
+test("releases the lease when a delivery replies retry, counting one unacknowledged delivery", async () => {
+  const { runtime, clock } = clocked();
+  const release = vi.spyOn(runtime.executions, "release");
+  let replies = 0;
+  const { invoker } = stubInvoker(async () => {
+    replies++;
+    throw new InfrastructureError(new Error("database is locked"));
+  });
+  const dispatcher = dispatcherFor(runtime, invoker);
+  await admit(runtime, "retry");
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(await runtime.executions.get("retry")).toMatchObject({
+    status: "admitted",
+    unacknowledgedDeliveries: 1,
+  });
+  // Released, not expired: claimable after the redelivery delay, well
+  // before the lease would have expired.
+  clock.now += redeliveryDelay(1) - 1;
+  expect(await dispatcher.tick()).toBe(0);
+  clock.now += 1;
+  expect(await dispatcher.tick()).toBe(1);
+  await dispatcher.drain();
+  expect(replies).toBe(2);
+});
+
+test("waits a non-zero delay, never shorter than the last, before each redelivery after a retry", async () => {
+  const { runtime, clock } = clocked();
+  const { invoker } = stubInvoker(async () => {
+    throw new Error("retry");
+  });
+  const dispatcher = dispatcherFor(runtime, invoker);
+  await admit(runtime, "backoff");
+  await dispatcher.tick();
+  await dispatcher.drain();
+
+  const delays: number[] = [];
+  const step = 100;
+  for (let i = 0; i < 4; i++) {
+    let waited = 0;
+    while ((await dispatcher.tick()) === 0) {
+      clock.now += step;
+      waited += step;
+      if (waited > 3_600_000) throw new Error("never redelivered");
+    }
+    await dispatcher.drain();
+    delays.push(waited);
+  }
+  expect(delays.every((d) => d > 0)).toBe(true);
+  for (let i = 1; i < delays.length; i++) {
+    expect(delays[i]).toBeGreaterThanOrEqual(delays[i - 1]);
+  }
+  expect((await runtime.executions.get("backoff"))?.unacknowledgedDeliveries).toBe(5);
+});
+
+test("counts both a retry reply and a later lease expiry", async () => {
+  const { runtime, clock } = clocked();
+  const replies: (() => never)[] = [
+    () => {
+      throw new Error("retry");
+    },
+    () => {
+      throw new WorkerExitedError("Worker process exited before replying (code 1)");
+    },
+  ];
+  const { invoker } = stubInvoker(async () => replies.shift()!());
+  const release = vi.spyOn(runtime.executions, "release");
+  const dispatcher = dispatcherFor(runtime, invoker);
+  await admit(runtime, "both");
+
+  await dispatcher.tick();
+  await dispatcher.drain();
+  clock.now += redeliveryDelay(1);
+  expect(await dispatcher.tick()).toBe(1);
+  await dispatcher.drain();
+  expect(release).toHaveBeenCalledTimes(1);
+
+  clock.now += DEFAULT_LEASE_DURATION;
+  expect(await runtime.executions.get("both")).toMatchObject({
+    status: "admitted",
+    unacknowledgedDeliveries: 2,
+  });
+});
+
+test("resets the count when a delivery is acknowledged after several retries, so the next wake is not delayed", async () => {
+  const { runtime, clock } = clocked();
+  let failures = 3;
+  const { invoker } = stubInvoker(async () => {
+    if (failures-- > 0) throw new Error("retry");
+    return { status: "suspended" };
+  });
+  const dispatcher = dispatcherFor(runtime, invoker);
+  await admit(runtime, "recovers");
+  for (let i = 0; i < 4; i++) {
+    while ((await dispatcher.tick()) === 0) clock.now += 100;
+    await dispatcher.drain();
+  }
+  expect(await runtime.executions.get("recovers")).toMatchObject({
+    status: "suspended",
+    unacknowledgedDeliveries: 0,
+  });
+
+  await runtime.executions.requestWake({ executionId: "recovers", wakeAt: clock.now });
+  expect(await dispatcher.tick()).toBe(1);
+  await dispatcher.drain();
+});
+
+test("leaves the lease to expire when the worker exits without replying, then delivers again", async () => {
+  const { runtime, clock } = clocked();
+  const release = vi.spyOn(runtime.executions, "release");
+  const invoker = createWorkerInvoker({
+    workerPath: new URL("early-exit.mjs", fixtures).href,
+    logger,
+  });
+  const deliver = vi.spyOn(invoker, "deliver");
+  const dispatcher = dispatcherFor(runtime, invoker);
+  await admit(runtime, "exits");
+
+  await dispatcher.tick();
+  await dispatcher.drain();
+  expect(deliver).toHaveBeenCalledTimes(1);
+  await expect(deliver.mock.results[0].value).rejects.toBeInstanceOf(WorkerExitedError);
+  expect(release).not.toHaveBeenCalled();
+  expect((await runtime.executions.get("exits"))?.status).toBe("running");
+
+  // Not claimable while the lease is live, nor until the delay after it.
+  clock.now += DEFAULT_LEASE_DURATION + redeliveryDelay(1) - 1;
+  expect(await dispatcher.tick()).toBe(0);
+  clock.now += 1;
+  expect(await dispatcher.tick()).toBe(1);
+  await dispatcher.drain();
+  expect(deliver).toHaveBeenCalledTimes(2);
+  // The expired lease counts as one unacknowledged delivery.
+  expect((await runtime.executions.get("exits"))?.unacknowledgedDeliveries).toBe(1);
+});
+
+// Driver
+
+test("ends a delivery as a retry when a step is already recorded with a different value, and replays the recorded value", async () => {
+  const { runtime, clock } = clocked();
+  let runs = 0;
+  const router = {
+    charge: workflow(async function* (step) {
+      return yield* step.run("charge", () => {
+        runs++;
+        return { receipt: `r-${runs}` };
+      });
+    }),
+  };
+  const runner = new WorkflowRunner(runtime, { router, logger });
+  const invoker = createTestInvoker({ runner, logger });
+  const deliver = vi.spyOn(invoker, "deliver");
+  const dispatcher = dispatcherFor(runtime, invoker);
+
+  // Another write records the step between this delivery's read and write.
+  const writeStep = runtime.heap.writeStep.bind(runtime.heap);
+  vi.spyOn(runtime.heap, "writeStep").mockImplementationOnce(async (params) => {
+    await writeStep({
+      ...params,
+      stepResponseJson: params.stepResponseJson.replace("r-1", "r-recorded"),
+    });
+    return writeStep(params);
+  });
+
+  await admit(runtime, "conflict", "charge");
+  await dispatcher.tick();
+  await dispatcher.drain();
+  await expect(deliver.mock.results[0].value).rejects.toMatchObject({
+    name: "InfrastructureError",
+    cause: { name: "StepConflictError", stepKey: "charge" },
+  });
+  expect(await runtime.executions.get("conflict")).toMatchObject({
+    status: "admitted",
+    unacknowledgedDeliveries: 1,
+  });
+
+  clock.now += redeliveryDelay(1);
+  expect(await dispatcher.tick()).toBe(1);
+  await dispatcher.drain();
+  expect(await runtime.executions.get("conflict")).toMatchObject({
+    status: "completed",
+    outcome: { status: "completed", result: { receipt: "r-recorded" } },
+  });
+  expect(runs).toBe(1);
+});
