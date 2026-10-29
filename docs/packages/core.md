@@ -287,13 +287,13 @@ ledger, and the wakes a commit requests from the runtime's `ExecutionClient`. Th
 `(executionId, stepKey)` so replay can return the result without applying the
 update again.
 
-```ts
-abstract getOrCreateStore(params: {
-  definition: StoreDefinition;
-  id: string;
-  initial?: State | (() => State | Promise<State>);
-}): Promise<StoreSnapshot>;
+A `StoreDefinition` is `{ name, schema, initial }`, made by
+`defineStore(name, schema, { initial: (id) => state })`. There is no creation
+operation: every operation below except `listStores`, `deleteStore` and
+`registerWaiter` first creates a missing store from `definition.initial(id)`, in
+the same atomic write as the operation.
 
+```ts
 abstract getStore(params: {
   definition: StoreDefinition;
   id: string;
@@ -323,42 +323,61 @@ abstract takeFromStore(params): Promise<StoreTakeResult>;
 abstract registerWaiter(waiter: StoreWaiter): Promise<void>;
 ```
 
-The base class also provides `storeClient.store(definition, id)`, the external read/write handle described in [External Store Access](../manual/store-external.md).
+The base class also provides `storeClient.store(definition, id)`, the external read/write handle described in [External Store Access](../manual/store-external.md). Its `get`, `update`, `updateFrom` and `deleteFrom` create a missing store in the same way.
 
 An implementation must uphold these contracts:
 
-- Every store instance has a UUIDv7 instance ID; `(definition.name, id)` remains the unique logical lookup key.
+- Every store instance has a UUID instance ID; `(definition.name, id)` remains the unique logical lookup key.
+- An operation on a missing store evaluates `initial(id)` only then, and creates the store with the operation as one write: version 0 for `getStore`, version 1 with the operation's state for a mutation. Concurrent operations on a missing store record exactly one initial state; a failing `initial` or operation creates nothing. A store deleted between operations is created again by the next one.
+- An unmatched take on a missing store still creates it, and a conditional update or delete on a missing store creates it and returns a conflict, so `StoreDeleteFromResult` has no not-found outcome.
 - Each update atomically writes the state, increments the version by one, and records its workflow-step result when a `stepId` is present.
 - Snapshot-based updates and deletions compare both the instance ID and version.
-- When `stepId` is provided and the ledger already holds that step, the implementation returns the recorded result and does not run the updater.
+- When `stepId` is provided and the ledger already holds that step, the implementation returns the recorded result and does not run the updater or `initial`, even if the store has since been deleted.
 - `registerWaiter` compares the store's current instance and version with the waiter; if either has moved on, it wakes the waiter immediately rather than leaving it to sleep through a write that already happened.
 - A commit that satisfies a waiter requests a wake for the waiter's `executionId`. Once the commit is durable, that wake is durable too. A waiter carries no copy of the workflow event.
 - A waiter stays registered until the heap write that records its step's result deletes it.
-- Schema failures throw `StoreValidationError` and a missing store throws `StoreNotFoundError`. A state, initial state or take selection that is not a durable value throws `WorkflowValueError` (`INVALID_STEP_VALUE`) before anything commits; `validateStoreState` makes this check after the schema. Workflow code can catch these three; any other error a client throws is treated as an infrastructure error and abandons the delivery.
+- Schema failures throw `StoreValidationError`. No operation throws `StoreNotFoundError` any more; it stays registered so recorded failures decode. A state, initial state or take selection that is not a durable value throws `WorkflowValueError` (`INVALID_STEP_VALUE`) before anything commits; `validateStoreState` makes this check after the schema. Workflow code can catch these two; any other error a client throws is treated as an infrastructure error and abandons the delivery.
 
 ## `CasStoreClient` (abstract class)
 
 Base class for connectors that support compare-and-swap (CAS). It implements
-`updateStore`, `updateStoreFrom`, and `takeFromStore`; a connector supplies
-ledger lookup and the atomic mutation operation:
+`getStore`, `updateStore`, `updateStoreFrom`, `takeFromStore` and
+`deleteStoreFrom`, including missing-store creation; a connector supplies reads,
+inserts, ledger lookup and the atomic commits:
 
 ```ts
+abstract readStore(params): Promise<StoreSnapshot<unknown> | undefined>;
+abstract insertStore(params: {
+  definition: StoreDefinition;
+  id: string;
+  snapshot: StoreSnapshot<unknown>;
+}): Promise<StoreSnapshot<unknown>>;
 abstract getAppliedStoreStep(params): Promise<{ result: unknown } | undefined>;
 
-abstract commitStoreMutation(
-  mutation: StoreMutation
-): Promise<
+abstract commitStoreMutation(mutation: StoreMutation): Promise<StoreMutationCommitResult>;
+abstract commitStoreDeletion(deletion: StoreDeletion): Promise<StoreMutationCommitResult>;
+
+type StoreMutationCommitResult =
   | { status: "committed" }
   | { status: "already-applied"; result: unknown }
   | { status: "conflict"; snapshot: StoreSnapshot<unknown> }
->;
+  | { status: "missing" };
+
+createInstanceId(): string; // crypto.randomUUID() unless overridden
 ```
 
+`readStore` never creates a store. `insertStore` inserts a version-zero snapshot
+unless the store exists, and returns the store's snapshot either way.
 `commitStoreMutation` checks the applied-step ledger first, compares the
 expected instance ID and version, and atomically writes the next state, version,
-step result, and the wakes for any waiters the commit satisfies. On conflict it returns the current
-snapshot so the base class can recompute the update. Application callbacks run
-outside the connector's transaction and may run more than once.
+step result, and the wakes for any waiters the commit satisfies. When
+`mutation.expected.created` is true, the expected snapshot is an initial state
+from `initial`, and the commit inserts the store, failing with a conflict if it
+exists by then. On conflict it returns the current snapshot so the base class can
+recompute the update; on `missing` the base class reads again and creates the
+store. `commitStoreDeletion` does the same for a conditional delete.
+Application callbacks, including `initial`, run outside the connector's
+transaction and may run more than once.
 
 ## `WorkflowInvoker` (type)
 
