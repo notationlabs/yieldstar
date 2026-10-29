@@ -1,7 +1,8 @@
 import pino from "pino";
 import { createMiddleware, createRoutes } from "@yieldstar/http-server";
+import { ExecutionDispatcher } from "@yieldstar/core";
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
-import { sqliteEventLoop } from "./shared";
+import { runtime } from "./shared";
 
 const logger = pino();
 const workerPath = new URL("worker.ts", import.meta.url).href;
@@ -11,7 +12,8 @@ const invoker = createWorkflowInvoker({
   logger,
 });
 
-sqliteEventLoop.start({ onNewEvent: invoker.execute, logger });
+const dispatcher = new ExecutionDispatcher(runtime, { invoker, logger });
+dispatcher.start();
 
 const authMiddleware = createMiddleware(async (req, event, next) => {
   const token = req.headers.get("Authorization");
@@ -36,6 +38,7 @@ Bun.serve({
     "/status": new Response("OK"),
     ...createRoutes({
       logger,
+      runtime,
       invoker,
       middleware: [corsMiddleware, authMiddleware],
     }),

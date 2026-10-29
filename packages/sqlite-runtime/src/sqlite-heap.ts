@@ -1,12 +1,18 @@
 import type { HeapClient } from "@yieldstar/core";
 import { StepResponsesDao } from "./dao/step-response-dao";
+import { StoreWaitersDao } from "./dao/store-waiters-dao";
 import type { SqliteDriver } from "./sqlite-driver";
+import { runTransaction } from "./sqlite-transaction";
 
 export class SqliteHeapClient implements HeapClient {
+  private db: SqliteDriver;
   private stepResponsesDao: StepResponsesDao;
+  private storeWaitersDao: StoreWaitersDao;
 
   constructor(db: SqliteDriver) {
+    this.db = db;
     this.stepResponsesDao = new StepResponsesDao(db);
+    this.storeWaitersDao = new StoreWaitersDao(db);
   }
 
   async getAllSteps() {
@@ -43,12 +49,22 @@ export class SqliteHeapClient implements HeapClient {
     stepDone: boolean;
     stepResponseJson: string;
   }) {
-    this.stepResponsesDao.insertStepResponse(
-      params.executionId,
-      params.stepKey,
-      params.stepAttempt,
-      params.stepDone,
-      params.stepResponseJson
-    );
+    runTransaction(this.db, () => {
+      this.stepResponsesDao.insertStepResponse(
+        params.executionId,
+        params.stepKey,
+        params.stepAttempt,
+        params.stepDone,
+        params.stepResponseJson
+      );
+      // A waiter is deleted with the write that records its step's result.
+      // Unfinished attempts (e.g. a store wait) keep the waiter they registered.
+      if (params.stepDone) {
+        this.storeWaitersDao.deleteStepWaiters(
+          params.executionId,
+          params.stepKey
+        );
+      }
+    });
   }
 }

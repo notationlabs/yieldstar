@@ -1,65 +1,64 @@
 import type { Logger } from "pino";
 import type {
   WorkflowGenerator,
-  HeapClient,
-  SchedulerClient,
-  StoreClient,
-  EventProcessor,
   WorkflowEvent,
   EventParams,
+  WorkflowRunOutcome,
 } from "..";
-import { StepDelay, StepStoreWait, WorkflowDelay, WorkflowResult } from "..";
+import {
+  InfrastructureError,
+  StepDelay,
+  StepStoreWait,
+  WorkflowResult,
+} from "..";
+import type { Runtime } from "../base/runtime";
 import { EventContext } from "../base/event";
 
 export class WorkflowRunner<
   Router extends Record<string, WorkflowGenerator<any, any, any>>
 > {
-  private heapClient: HeapClient;
-  private schedulerClient: SchedulerClient;
-  private storeClient: StoreClient;
+  private runtime: Runtime;
   private router: Router;
+  private logger: Logger;
 
-  constructor(params: {
-    heapClient: HeapClient;
-    schedulerClient: SchedulerClient;
-    storeClient: StoreClient;
-    router: Router;
-    logger: Logger;
-  }) {
-    this.heapClient = params.heapClient;
-    this.schedulerClient = params.schedulerClient;
-    this.storeClient = params.storeClient;
-    this.router = params.router;
+  constructor(runtime: Runtime, options: { router: Router; logger: Logger }) {
+    this.runtime = runtime;
+    this.router = options.router;
+    this.logger = options.logger;
   }
 
-  run: EventProcessor = async (event, logger) => {
+  /**
+   * Runs one delivery and resolves with its outcome. Rejects only with an
+   * infrastructure error, which must not be acknowledged as an outcome.
+   */
+  run = async (
+    event: WorkflowEvent,
+    logger: Logger = this.logger
+  ): Promise<WorkflowRunOutcome> => {
     const workflow = this.router[event.workflowId];
 
     if (!workflow) {
-      throw new Error(`No workflow registered for "${event.workflowId}"`);
+      return {
+        status: "failed",
+        error: new Error(`No workflow registered for "${event.workflowId}"`),
+      };
     }
 
+    let response: WorkflowResult<unknown> | StepDelay | StepStoreWait;
     try {
-      const response = await this.runWorkflows({
-        workflow,
-        logger,
-        event,
-      });
-
-      switch (response.type) {
-        case "workflow-result":
-          return response;
-
-        case "workflow-delay":
-          this.schedulerClient.requestWakeUp(event, response.resumeIn);
-          break;
-
-        case "store-wait":
-          break;
-      }
+      response = await this.runWorkflows({ workflow, logger, event });
     } catch (err) {
-      // todo: distinguish between a workflow error and a system error
-      throw err;
+      if (InfrastructureError.is(err)) throw err;
+      return { status: "failed", error: toError(err) };
+    }
+
+    switch (response.type) {
+      case "workflow-result":
+        return { status: "completed", result: response.result };
+      case "step-delay":
+        return { status: "suspended", wakeAt: response.wakeAt };
+      case "store-wait":
+        return { status: "suspended" };
     }
   };
 
@@ -71,16 +70,16 @@ export class WorkflowRunner<
     workflow: WorkflowGenerator<Params, Result, Context>;
     event: WorkflowEvent<Params, Context>;
     logger: Logger;
-  }): Promise<WorkflowResult<Result> | WorkflowDelay | StepStoreWait> {
+  }): Promise<WorkflowResult<Result> | StepDelay | StepStoreWait> {
     const { workflow, event, logger } = params;
 
     const workflowIterator = workflow({
       event,
-      heapClient: this.heapClient,
-      storeClient: this.storeClient,
+      heapClient: this.runtime.heap,
+      storeClient: this.runtime.stores,
+      clock: this.runtime.clock,
       logger,
     });
-
 
     const iteratorResult = await workflowIterator.next();
     const stageResponse = iteratorResult.value;
@@ -89,8 +88,10 @@ export class WorkflowRunner<
       return stageResponse as WorkflowResult<Result>;
     }
 
+    // A delay's `wakeAt` is the absolute time it elapses, which is exactly
+    // the `wakeAt` the suspended outcome reports.
     if (stageResponse instanceof StepDelay) {
-      return new WorkflowDelay(stageResponse.resumeIn - Date.now());
+      return stageResponse;
     }
 
     if (stageResponse instanceof StepStoreWait) {
@@ -101,4 +102,8 @@ export class WorkflowRunner<
       "Workflow runner critical error. This is likely because your worklow and worker are referencing different versions of @yieldstar/core."
     );
   }
+}
+
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
 }

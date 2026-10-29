@@ -1,6 +1,6 @@
 # yieldstar
 
-The main SDK package. Exports the workflow definition API, router factory, retry error class, and both SDK clients.
+The main SDK package. Exports the workflow definition API, router factory, error classes, and both SDK clients.
 
 ## Install
 
@@ -13,11 +13,11 @@ bun add yieldstar
 ```ts
 import { workflow, createWorkflow } from "yieldstar";
 import { createWorkflowRouter } from "yieldstar";
-import { RetryableError } from "yieldstar";
+import { RetryableError, ExecutionAdmissionError } from "yieldstar";
 import { defineStore } from "yieldstar";
 import { createLocalSdk } from "yieldstar";
 import { createHttpSdkFactory } from "yieldstar";
-import type { WorkflowFn, WorkflowStore } from "yieldstar";
+import type { WorkflowFn, WorkflowStore, ExecutionRecord, ExecutionStatus } from "yieldstar";
 ```
 
 ## `workflow(fn)` / `createWorkflow(fn)`
@@ -61,9 +61,13 @@ throw new RetryableError(message, { maxAttempts, retryInterval });
 | `maxAttempts`   | `number` | Total attempts including the first |
 | `retryInterval` | `number` | Milliseconds between attempts      |
 
-## `createLocalSdk<Router>(invoker)`
+## `ExecutionAdmissionError`
 
-Creates a local SDK client. See [Local SDK](../manual/sdk-local.md).
+Thrown by both SDKs' `trigger` when admission is rejected. `err.code` is `"EXECUTION_ID_CONFLICT"` (the `executionId` is already in use) or `"INVALID_EXECUTION_EVENT"` (the event cannot round-trip through JSON).
+
+## `createLocalSdk<Router>(runtime, { invoker?, pollInterval? })`
+
+Creates a local SDK client that admits executions into `runtime`. See [Local SDK](../manual/sdk-local.md).
 
 ## `createHttpSdkFactory<Router>()`
 

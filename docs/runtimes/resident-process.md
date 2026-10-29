@@ -4,30 +4,39 @@ The resident-process runtime keeps coordination inside the application that owns
 
 The long-lived process owns four pieces:
 
-- A `SqliteDriver` connection selected through the Bun or Node connector.
-- A `SqliteEventLoop` that moves expired timers into the task queue and dispatches pending executions.
-- A `WorkflowInvoker` that forks a fresh child process for each execution.
-- A local SDK or HTTP routes that accept trigger requests and observe completed results.
+- A `SqliteRuntime` over a `SqliteDriver` connection selected through the Bun or Node connector.
+- An `ExecutionDispatcher` that claims due executions, delivers each through the invoker, and acknowledges the outcome on the execution record.
+- A `WorkflowInvoker` that forks a fresh child process for each delivery.
+- A local SDK or HTTP routes that admit executions and read their outcomes from the record.
 
-The child process creates a `WorkflowRunner` using heap, scheduler, and store clients connected to the same SQLite file. On every invocation it replays cached steps, executes until the next durable boundary, sends a result when complete, and exits. Delayed and state-suspended workflows resume later in a new child.
+The child process creates its own `SqliteRuntime` over the same SQLite file and a `WorkflowRunner` on top of it. On every delivery it replays cached steps, runs until the next durable boundary, sends the outcome (`completed`, `suspended` or `failed`) to the parent, and exits. Delayed and state-suspended executions become due again on their record, and the dispatcher delivers them to a new child.
 
 ## Shared runtime surface
 
-Import runtime clients from the package root and import only the native database factory from a connector entry point:
+Import `SqliteRuntime` and `createSqliteDb` from a connector entry point. `SqliteRuntime` is also exported from the package root.
 
 ```ts
-import {
-  SqliteEventLoop,
-  SqliteHeapClient,
-  SqliteSchedulerClient,
-  SqliteStoreClient,
-  SqliteTaskQueueClient,
-  SqliteTimersClient,
-} from "@yieldstar/sqlite-runtime";
-import { createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
+import { SqliteRuntime, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
+
+const runtime = new SqliteRuntime(createSqliteDb({ path: "./.db/local.sqlite" }));
 ```
 
-For Node, change the final import to `@yieldstar/sqlite-runtime/node`. No other runtime wiring changes.
+For Node, change the import to `@yieldstar/sqlite-runtime/node`. No other runtime wiring changes.
+
+## Delivery guarantees
+
+`SqliteRuntime` keeps execution records, step results, stores and waiters in one database, so it keeps every [runtime guarantee](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md#runtime-guarantees) in single transactions:
+
+| Situation                                            | Behavior                                                                                     |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| A trigger reuses an execution ID                     | Admission is rejected with `EXECUTION_ID_CONFLICT`; the HTTP route returns `409`             |
+| A timer and a store commit wake the same execution   | The wakes merge on the record; the execution is delivered once, at the earlier time          |
+| A finished execution is claimed again                | The dispatcher returns the recorded outcome without forking a worker                         |
+| The worker throws an infrastructure error or exits   | The delivery is not acknowledged, and the execution is delivered again after the five-minute redelivery timeout |
+| The app restarts                                     | `admitted` and `suspended` records and their pending wakes are still in the file, and the next dispatcher delivers them |
+| A store commit lands                                 | The wakes for the waiters it satisfies commit in the same transaction                        |
+
+**Keep deliveries shorter than the five-minute redelivery timeout.** The runtime cannot tell a slow delivery from a lost one, so a delivery that runs past the timeout is claimed and delivered again while the first is still running. The timeout is fixed; execution leases (RFC 002) will replace it.
 
 ## Connector choice
 

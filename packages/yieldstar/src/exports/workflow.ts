@@ -13,6 +13,11 @@ import {
 } from "../internal/serialise";
 import { createStepRunner } from "../internal/step-runner";
 import {
+  StepRuntimeCall,
+  executeRuntimeCall,
+  infrastructure,
+} from "../internal/runtime-call";
+import {
   StepResponse,
   StepKey,
   StepError,
@@ -46,8 +51,14 @@ export function workflow<
    * yielding control to a workflow executor to do async work
    * @yields {StepResponse}
    */
-  return async function* workflowGenerator({ event, heapClient, storeClient, logger }) {
-    const stepRunner = createStepRunner({ event, storeClient });
+  return async function* workflowGenerator({
+    event,
+    heapClient,
+    storeClient,
+    clock,
+    logger,
+  }) {
+    const stepRunner = createStepRunner({ event, clock });
     const workflowIterator = workflowFn(stepRunner, event, logger);
     const { executionId } = event;
 
@@ -93,10 +104,12 @@ export function workflow<
        * Using the StepKey, retrieve the previous response for this step from
        * the cache
        */
-      let cached = await heapClient.readStep({
-        executionId,
-        stepKey,
-      });
+      let cached = await infrastructure(() =>
+        heapClient.readStep({
+          executionId,
+          stepKey,
+        })
+      );
 
       /**
        * Increment attempt counter. We'll save this after execution.
@@ -142,6 +155,19 @@ export function workflow<
           : null;
         iteratorResult = await workflowIterator.next(cachedResponse);
         stepResponse = iteratorResult.value;
+
+        /**
+         * A step that needs a runtime client yields a request. Make the call
+         * here, outside workflow code, and resume the step with its result.
+         * An infrastructure error rejects the delivery without resuming it.
+         */
+        while (stepResponse instanceof StepRuntimeCall) {
+          const callResult = await executeRuntimeCall(stepResponse, {
+            stores: storeClient,
+          });
+          iteratorResult = await workflowIterator.next(callResult);
+          stepResponse = iteratorResult.value;
+        }
       } else if (!(stepResponse instanceof WorkflowResult)) {
         throw new Error("Step runners must yield a CacheCheck object");
       }
@@ -179,13 +205,15 @@ export function workflow<
        * If this step attempt is not already cached, cache it
        */
       if (!cached) {
-        await heapClient.writeStep({
-          executionId,
-          stepKey,
-          stepAttempt,
-          stepDone: !needsRetry && !needsWake,
-          stepResponseJson: serializeStepResponse(stepResponse),
-        });
+        await infrastructure(() =>
+          heapClient.writeStep({
+            executionId,
+            stepKey,
+            stepAttempt,
+            stepDone: !needsRetry && !needsWake,
+            stepResponseJson: serializeStepResponse(stepResponse),
+          })
+        );
       }
 
       /**
@@ -211,7 +239,7 @@ export function workflow<
        */
       if (stepResponse instanceof StepError) {
         if (needsRetry) {
-          yield new StepDelay(Date.now() + stepResponse.retryInterval);
+          yield new StepDelay(clock() + stepResponse.retryInterval);
         } else {
           nextIteratorResult = await workflowIterator.throw(stepResponse.err);
           continue;
@@ -222,7 +250,7 @@ export function workflow<
        * If the delay has already elapsed, continue straight to next step
        */
       if (stepResponse instanceof StepDelay) {
-        if (stepResponse.resumeIn <= Date.now()) {
+        if (stepResponse.wakeAt <= clock()) {
           continue;
         }
       }
@@ -238,9 +266,11 @@ export function workflow<
     }
 
     /**
-     * If we arrive here, something has gone wrong internally
+     * We only arrive here after a workflow yields an invalid step
      */
-    throw new Error("Critical error");
+    throw new Error(
+      "Workflow yielded an invalid step. Steps must be yielded with yield* from a step runner."
+    );
   };
 }
 

@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- Executions now have a durable execution record (RFC 001). Removed `SqliteEventLoop`, `SqliteTaskQueue`, `SqliteTaskQueueClient`, `SqliteTimersClient`, `SqliteSchedulerClient`, `MemoryEventLoop`, `MemoryTaskQueue`, `MemoryTimers`, `MemorySchedulerClient`, and the core `SchedulerClient` and `EventProcessor` types. Construct a `SqliteRuntime` or `MemoryRuntime` and run an `ExecutionDispatcher` instead.
+- `WorkflowRunner` takes a runtime: `new WorkflowRunner(runtime, { router, logger })`. `run()` resolves with a `WorkflowRunOutcome` (`completed`, `suspended` or `failed`) and rejects only on infrastructure errors. An unregistered `workflowId` resolves as `failed` instead of throwing.
+- `WorkflowInvoker.execute(event)` is replaced by `deliver(event)`, which resolves with the delivery's outcome. `workflowEndEmitter` is deprecated. The worker IPC protocol now reports `outcome` and `error` messages.
+- `createLocalSdk(invoker)` is now `createLocalSdk(runtime, { invoker?, pollInterval? })`. `trigger` resolves once admission commits and no longer runs anything; a dispatcher must be running. `triggerAndWait` reads the execution record and rejects with the recorded error.
+- `createRoutes({ invoker, ... })` is now `createRoutes({ runtime, invoker?, ... })`. `POST /trigger` admits the execution and returns `409` when the execution ID is in use and `400` when the event cannot be stored without loss. `POST /events` returns `404` for an unknown execution.
+- Execution IDs are unique and never reused. Triggering with an ID already admitted throws `ExecutionAdmissionError` (`EXECUTION_ID_CONFLICT`). The HTTP SDK no longer generates IDs client-side; it reads the accepted ID from the trigger response.
+- Admission rejects `params` and `context` that do not round-trip through JSON exactly, such as `Date`s, class instances, `undefined` properties, `NaN`, and `bigint` (`INVALID_EXECUTION_EVENT`).
+- Infrastructure errors, such as the SQLite database throwing during a store step, no longer reach workflow `try/catch`. The delivery is not acknowledged and is redelivered after the redelivery timeout. Store validation and not-found errors, and errors thrown by updaters, selectors and claims, remain catchable.
+- Removed `StoreWaiter.event` and the SQLite `store_wake_outbox` table. `SqliteStoreClient` takes `{ db, executions? }` instead of a scheduler client.
+- `registerStoreClientConformance` factories return `{ runtime, createPeer?, restart?, dispose? }` instead of building a store client from a scheduler.
+- `MiddlewareEvent.executionId` is optional; it is absent when the runtime will choose the ID.
+- `StepDelay.resumeIn` and `WorkflowDelay.resumeIn` are renamed `wakeAt`. Delay and retry steps read their wake time from the runtime clock instead of `Date.now()`, and `WorkflowGeneratorParams` carries that `clock`.
+
+### Added
+
+- Added `Runtime`, `ExecutionClient` (`admit`, `get`, `requestWake`, `claimDue`, `acknowledge`), `ExecutionRecord`, `ExecutionStatus`, `ExecutionOutcome`, `WorkflowRunOutcome`, `ExecutionAdmissionError`, and `InfrastructureError` to `@yieldstar/core`.
+- Added `SqliteRuntime(db, { clock? })` and `MemoryRuntime({ clock? })`, each exposing `clock`, `executions`, `heap`, and `stores`.
+- Added `ExecutionDispatcher(runtime, { invoker, logger, pollInterval?, keepAlive? })` with `start`, `stop`, `tick`, and `drain`. It is the only component that delivers executions, and it returns a finished execution's recorded outcome without running workflow code.
+- Added `registerExecutionClientConformance` to `@yieldstar/store-conformance`, covering RFC 001's `ExecutionClient` tables for any runtime.
+- Added `waitForExecutionOutcome` and the storage-neutral execution state machine (`prepareExecutionAdmission`, `claimExecution`, `acknowledgeExecution`, and related helpers) for runtime adapter authors.
+- Added `StoreValidationError` and `StoreNotFoundError`.
+- Re-exported `ExecutionAdmissionError` and the execution record types from `yieldstar`.
+
+### Changed
+
+- A store commit makes each waiting execution due in the same transaction, so a durable commit always has durable wakes.
+- Store waiters persist until the step that registered them records its result, instead of being consumed by a wake.
+- Any number of wakes for one execution, from delays, retries and store commits, collapse into one delivery at the earliest due time.
+- `triggerAndWait` and `POST /events` settle from the execution record, so they settle even if the process that ran the execution restarted.
+
 ## 0.5.0 - 2026-07-21
 
 ### Breaking changes

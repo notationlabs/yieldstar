@@ -1,7 +1,8 @@
 process.on("message", (event) => {
   process.send({
-    status: "completed",
-    response: {
+    status: "outcome",
+    outcome: {
+      status: "completed",
       result:
         event.context instanceof Map &&
         event.context.get("requestId") === "request",

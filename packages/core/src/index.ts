@@ -1,7 +1,46 @@
 export type { HeapClient, HeapRecord } from "./base/heap";
 export type { WorkflowInvoker } from "./base/invoker";
-export type { EventProcessor } from "./base/runtime";
-export type { SchedulerClient } from "./base/scheduler";
+export type { RuntimeOptions } from "./base/runtime";
+export { Runtime } from "./base/runtime";
+export type {
+  ExecutionAcknowledgeResult,
+  ExecutionAdmissionErrorCode,
+  ExecutionAdmissionRequest,
+  ExecutionAdmissionResult,
+  ExecutionClient,
+  ExecutionDelivery,
+  ExecutionOutcome,
+  ExecutionRecord,
+  ExecutionStatus,
+  ExecutionWakeResult,
+  WorkflowRunOutcome,
+} from "./base/execution";
+export {
+  ExecutionAdmissionError,
+  InfrastructureError,
+  isTerminalExecutionStatus,
+} from "./base/execution";
+export type { ExecutionState } from "./lib/execution-state";
+export {
+  REDELIVERY_TIMEOUT,
+  ExecutionEventEncodingError,
+  acknowledgeExecution,
+  claimExecution,
+  createExecutionState,
+  decodeExecutionEvent,
+  decodeExecutionOutcome,
+  encodeExecutionEvent,
+  encodeExecutionOutcome,
+  executionIdConflict,
+  executionNotFound,
+  isExecutionClaimable,
+  nextClaimAt,
+  prepareExecutionAdmission,
+  requestExecutionWake,
+  toExecutionRecord,
+} from "./lib/execution-state";
+export { ExecutionDispatcher } from "./lib/execution-dispatcher";
+export { waitForExecutionOutcome } from "./lib/wait-for-outcome";
 export type { StandardSchemaV1 } from "@standard-schema/spec";
 export type {
   Draft,
@@ -26,6 +65,8 @@ export type {
 export {
   StoreClient,
   CasStoreClient,
+  StoreNotFoundError,
+  StoreValidationError,
   assertSynchronousClaim,
   assertSynchronousUpdater,
   cloneStoreState,

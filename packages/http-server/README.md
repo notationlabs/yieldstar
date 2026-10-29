@@ -2,7 +2,7 @@
 
 ## Features
 
-- Route handlers for triggering and monitoring workflows
+- Route handlers for admitting executions and reading their outcomes
 - Middleware for request/response/context processing
 
 Handlers use the standard `Request` and `Response` APIs. The routes object plugs into `Bun.serve({ routes })` or any router that accepts `Request` to `Response` handlers.
@@ -15,17 +15,23 @@ npm install @yieldstar/http-server
 
 ## Basic Usage
 
+The routes only write and read execution records. An `ExecutionDispatcher` running against the same runtime delivers the executions they admit.
+
 ```ts
+import { ExecutionDispatcher } from "@yieldstar/core";
 import { createRoutes } from "@yieldstar/http-server";
 import { pino } from "pino";
 
 const logger = pino();
 
+new ExecutionDispatcher(runtime, { invoker, logger }).start();
+
 const server = Bun.serve({
   port: 3000,
   routes: createRoutes({
-    invoker: invoker,
-    logger: logger,
+    runtime,
+    invoker,
+    logger,
     middleware: [middleware1, middleware2],
   }),
 });
@@ -43,7 +49,7 @@ Bun.serve({
     // mount workflow routes on /workflow
     ...createRoutes({
       basePath: "/workflow",
-      invoker,
+      runtime,
       logger,
     }),
   },
@@ -55,7 +61,7 @@ Bun.serve({
 Middleware can be passed to the server. Middleware enables:
 
 - reading the HTTP request
-- setting context (available to other middleware and the invoked workflow)
+- setting context (available to other middleware and the admitted workflow)
 - returning early HTTP responses
 - setting HTTP response headers
 
@@ -103,6 +109,7 @@ const server = Bun.serve({
   port: 8080,
   routes: createRoutes({
     logger,
+    runtime,
     invoker,
     middleware: [corsMiddleware, authMiddleware],
   }),
@@ -128,15 +135,15 @@ const myMiddleware = createMiddleware(async (req, event, next) => {
 
   // Advance the middleware chain until either:
   // A middleware function returns a response,
-  // or, the final handler invokes the workflow
+  // or, the final handler admits the execution
   const response = await next();
 
   // After next() is called, the context is frozen to prevent modifications
   // Any attempt to modify the context will throw an error:
   event.context.set("key", "value"); // Error: Cannot call set on a frozen map
 
-  // When passed to the workflow, the context is converted to a read-only version
-  // that prevents modifications in the workflow
+  // The context is admitted with the execution, and every delivery reads it
+  // back as a read-only map, so values must be plain JSON data
 
   // The response can still be updated before it is sent to the user
   response.headers.set("X-Handled-By", "SuperAceDev");
@@ -149,14 +156,20 @@ const myMiddleware = createMiddleware(async (req, event, next) => {
 
 ### `createRoutes(options)`
 
-Creates an HTTP server for YieldStar workflows.
+Creates the `POST /trigger` and `POST /events` route handlers.
 
 Options:
 
-- `invoker`: The workflow invoker
+- `runtime`: The runtime whose `executions` client the routes admit into and read from
+- `invoker`: Optional. Lets `/events` respond as soon as the dispatcher acknowledges a delivery
 - `logger`: A Pino logger instance
 - `middleware`: Optional array of middleware functions
 - `basePath`: Optional path to mount the routes on
+
+Responses:
+
+- `POST /trigger`: `202 { executionId }` once admission commits, `409 { code: "EXECUTION_ID_CONFLICT", message }` when the execution ID is already in use, `400 { code: "INVALID_EXECUTION_EVENT", message }` when `params` or `context` cannot round-trip through JSON
+- `POST /events`: blocks until the execution record is terminal; `200` with the result, `500` with the serialized recorded error, `404` for an unknown execution ID
 
 ### `createMiddleware(handler)`
 
@@ -165,7 +178,7 @@ Creates a middleware function.
 Handler parameters:
 
 - `req`: The request object
-- `event`: The middleware event with a context property (Map)
+- `event`: The middleware event with a context property (Map). `event.executionId` is `undefined` when the client lets the runtime choose one
 - `next`: Function to call the next middleware or handler
 - `logger`: The logger passed to createRoutes
 

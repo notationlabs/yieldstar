@@ -26,8 +26,9 @@ Note: `@yieldstar/test-utils` is an internal testing helper used by this reposit
 Run a workflow locally with persistence and timers using a subprocess worker and the SQLite runtime. The example uses the Bun connector; Node applications use `@yieldstar/sqlite-runtime/node` with otherwise identical runtime wiring.
 
 ```ts
-// router.ts
+// shared.ts
 import { workflow, createWorkflowRouter } from "yieldstar";
+import { SqliteRuntime, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
 
 export const simple = workflow(async function* (step, event, logger) {
   const n = yield* step.run(() => 1);
@@ -37,6 +38,8 @@ export const simple = workflow(async function* (step, event, logger) {
 
 export const router = createWorkflowRouter({ "simple-workflow": simple });
 export type Router = typeof router;
+
+export const runtime = new SqliteRuntime(createSqliteDb({ path: "./.db/local.sqlite" }));
 ```
 
 ```ts
@@ -44,21 +47,10 @@ export type Router = typeof router;
 import pino from "pino";
 import { WorkflowRunner } from "@yieldstar/core";
 import { createWorkflowWorker } from "@yieldstar/worker-invoker";
-import { SqliteHeapClient, SqliteTimersClient, SqliteTaskQueueClient, SqliteSchedulerClient, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
-import { router } from "./router";
+import { router, runtime } from "./shared";
 
 const logger = pino();
-const db = createSqliteDb({ path: "./.db/local.sqlite" });
-
-const runner = new WorkflowRunner({
-  router,
-  heapClient: new SqliteHeapClient(db),
-  schedulerClient: new SqliteSchedulerClient({
-    taskQueueClient: new SqliteTaskQueueClient(db),
-    timersClient: new SqliteTimersClient(db),
-  }),
-  logger,
-});
+const runner = new WorkflowRunner(runtime, { router, logger });
 
 createWorkflowWorker(runner, logger).listen();
 ```
@@ -66,21 +58,23 @@ createWorkflowWorker(runner, logger).listen();
 ```ts
 // app.ts
 import pino from "pino";
+import { ExecutionDispatcher } from "@yieldstar/core";
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
 import { createLocalSdk } from "yieldstar";
-import { SqliteEventLoop, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
+import { runtime, type Router } from "./shared";
 
 const logger = pino();
 const workerPath = new URL("./worker.ts", import.meta.url).href;
 const invoker = createWorkflowInvoker({ workerPath, logger });
 
-const db = createSqliteDb({ path: "./.db/local.sqlite" });
-const loop = new SqliteEventLoop(db);
-loop.start({ onNewEvent: invoker.execute, logger });
+// The dispatcher delivers due executions to workers; the SDK only admits them.
+const dispatcher = new ExecutionDispatcher(runtime, { invoker, logger });
+dispatcher.start();
 
-const sdk = createLocalSdk<import("./router").Router>(invoker);
+const sdk = createLocalSdk<Router>(runtime, { invoker });
 const result = await sdk.triggerAndWait({ workflowId: "simple-workflow" });
 console.log(result); // 2
+await dispatcher.stop();
 ```
 
 TypeScript worker paths require Node 22.6 or newer for built-in type stripping. Use compiled JavaScript workers on older Node versions.
@@ -89,12 +83,14 @@ TypeScript worker paths require Node 22.6 or newer for built-in type stripping. 
 
 ### Option A: Local Worker + SQLite (single process)
 
-Use a subprocess worker to execute steps and a SQLite-backed runtime for persistence, timers, and a task queue.
+Use a subprocess worker to execute steps and a SQLite-backed runtime for execution records, step results, and stores.
 
-1) Define workflows and a router:
+1) Define workflows, a router, and the runtime:
 
 ```ts
+// shared.ts
 import { workflow, createWorkflowRouter } from "yieldstar";
+import { SqliteRuntime, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
 
 export const dynamic = workflow<{ msg: string }, void>(async function* (step, event, logger) {
   const n = yield* step.run(() => Math.random());
@@ -103,78 +99,69 @@ export const dynamic = workflow<{ msg: string }, void>(async function* (step, ev
 });
 
 export const router = createWorkflowRouter({ "dynamic-workflow": dynamic });
+export type Router = typeof router;
+
+export const runtime = new SqliteRuntime(createSqliteDb({ path: "./.db/local.sqlite" }));
 ```
 
-2) Create worker and runtime wiring (worker thread):
+2) Create the worker (a forked subprocess):
 
 ```ts
 // worker.ts
 import pino from "pino";
 import { WorkflowRunner } from "@yieldstar/core";
 import { createWorkflowWorker } from "@yieldstar/worker-invoker";
-import { SqliteHeapClient, SqliteTimersClient, SqliteTaskQueueClient, SqliteSchedulerClient } from "@yieldstar/sqlite-runtime/bun";
-import { router } from "./router";
-import { createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
+import { router, runtime } from "./shared";
 
 const logger = pino();
-const db = createSqliteDb({ path: "./.db/local.sqlite" });
-
-const runner = new WorkflowRunner({
-  router,
-  heapClient: new SqliteHeapClient(db),
-  schedulerClient: new SqliteSchedulerClient({
-    taskQueueClient: new SqliteTaskQueueClient(db),
-    timersClient: new SqliteTimersClient(db),
-  }),
-  logger,
-});
+const runner = new WorkflowRunner(runtime, { router, logger });
 
 createWorkflowWorker(runner, logger).listen();
 ```
 
-3) Drive the worker from your app and call workflows locally:
+3) Run a dispatcher in your app and trigger workflows locally:
 
 ```ts
 // app.ts
 import pino from "pino";
+import { ExecutionDispatcher } from "@yieldstar/core";
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
 import { createLocalSdk } from "yieldstar";
-import { SqliteEventLoop, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
+import { runtime, type Router } from "./shared";
 
 const logger = pino();
 const workerPath = new URL("./worker.ts", import.meta.url).href;
 const invoker = createWorkflowInvoker({ workerPath, logger });
 
-const db = createSqliteDb({ path: "./.db/local.sqlite" });
-const eventLoop = new SqliteEventLoop(db);
-eventLoop.start({ onNewEvent: invoker.execute, logger });
+const dispatcher = new ExecutionDispatcher(runtime, { invoker, logger });
+dispatcher.start();
 
-const sdk = createLocalSdk<{ "dynamic-workflow": any }>(invoker);
+const sdk = createLocalSdk<Router>(runtime, { invoker });
 const res = await sdk.triggerAndWait({ workflowId: "dynamic-workflow", params: { msg: "hello" } });
 console.log(res);
+await dispatcher.stop();
 ```
 
 See a working reference in `examples/local-execution/`.
 
 ### Option B: HTTP Server (Bun)
 
-Expose routes to trigger and await workflow results. Use the HTTP SDK as a client.
+Expose routes to admit executions and await their outcomes. Use the HTTP SDK as a client. `/trigger` responds `202 { executionId }` once the execution is admitted, and `409` when the supplied `executionId` is already in use.
 
 Server:
 
 ```ts
 import pino from "pino";
+import { ExecutionDispatcher } from "@yieldstar/core";
 import { createRoutes, createMiddleware } from "@yieldstar/http-server";
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
-import { SqliteEventLoop, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
-import { router } from "./router";
+import { runtime } from "./shared";
 
 const logger = pino();
 const workerPath = new URL("./worker.ts", import.meta.url).href;
 const invoker = createWorkflowInvoker({ workerPath, logger });
 
-const db = createSqliteDb({ path: "./.db/http.sqlite" });
-new SqliteEventLoop(db).start({ onNewEvent: invoker.execute, logger });
+new ExecutionDispatcher(runtime, { invoker, logger }).start();
 
 const auth = createMiddleware(async (req, event, next) => {
   if (!req.headers.get("Authorization")) return new Response("Unauthorized", { status: 401 });
@@ -183,7 +170,7 @@ const auth = createMiddleware(async (req, event, next) => {
 
 Bun.serve({
   port: 8080,
-  routes: { "/status": new Response("OK"), ...createRoutes({ invoker, logger, middleware: [auth] }) },
+  routes: { "/status": new Response("OK"), ...createRoutes({ runtime, invoker, logger, middleware: [auth] }) },
 });
 ```
 
@@ -291,7 +278,7 @@ Top‑level exports from `yieldstar`:
 export { createLocalSdk } from "yieldstar";
 export { createHttpSdkFactory } from "yieldstar";
 export { createWorkflowRouter } from "yieldstar";
-export { RetryableError } from "yieldstar";
+export { RetryableError, ExecutionAdmissionError } from "yieldstar";
 export { createWorkflow, workflow } from "yieldstar";
 export type { WorkflowFn } from "yieldstar";
 ```
@@ -336,12 +323,15 @@ new RetryableError(message, { maxAttempts: number, retryInterval: number });
 
 ### Local SDK
 
-Create a client that triggers workflows using an in‑process `WorkflowInvoker`.
+Create a client that admits executions directly into a runtime. A running `ExecutionDispatcher` delivers them.
 
 ```ts
-const sdk = createLocalSdk<Router>(invoker);
+const sdk = createLocalSdk<Router>(runtime, { invoker?, pollInterval? });
+const { executionId } = await sdk.trigger({ workflowId, params?, context?, executionId? });
 await sdk.triggerAndWait({ workflowId, params? });
 ```
+
+`trigger` resolves once admission commits. `triggerAndWait` resolves with the result recorded on the execution record, or rejects with the recorded error. Both throw `ExecutionAdmissionError` when the `executionId` is already in use (`EXECUTION_ID_CONFLICT`) or `params`/`context` cannot round-trip through JSON (`INVALID_EXECUTION_EVENT`).
 
 ### HTTP SDK
 
@@ -394,7 +384,8 @@ See more examples in `test/*.test.ts`.
 
 - In loops, always add cache keys. Missing keys trigger loop detection.
 - `logger` is a Pino logger passed into workflows for observability.
-- HTTP middleware can read/set `event.context` before invoking your workflow.
+- HTTP middleware can read/set `event.context` before the execution is admitted.
+- Execution IDs are never reused. Triggering with an ID that was already admitted throws `ExecutionAdmissionError`.
 
 ## Contributing
 

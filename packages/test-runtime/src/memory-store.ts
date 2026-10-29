@@ -1,7 +1,7 @@
-import type { SchedulerClient } from "@yieldstar/core";
 import { v7 as uuidv7 } from "uuid";
 import {
   CasStoreClient,
+  StoreNotFoundError,
   cloneStoreState,
   storePathsIntersect,
   validateStoreState,
@@ -16,6 +16,7 @@ import {
   type StoreStepId,
   type StoreWaiter,
 } from "@yieldstar/core";
+import type { MemoryExecutionClient } from "./memory-execution";
 
 type StoreRecord = {
   state: unknown;
@@ -25,20 +26,21 @@ type StoreRecord = {
 
 export class MemoryStoreClient extends CasStoreClient {
   private stores = new Map<string, StoreRecord>();
+  // Waiters stay registered when woken; they are deleted when their step's
+  // result is recorded (deleteWaitersForStep) or their store is deleted.
   private waiters = new Map<string, StoreWaiter>();
-  private pendingWakes = new Set<string>();
   // Applied-steps ledger: (storeName, storeId, executionId, stepKey) ->
   // serialized committed result. Written in the same synchronous critical
   // section (within the write queue) as the state commit, so a retried
   // workflow step returns the recorded result instead of re-applying.
   private appliedSteps = new Map<string, string>();
-  private schedulerClient: SchedulerClient;
+  private executions: Pick<MemoryExecutionClient, "wakeNow">;
   // Serializes writes so concurrent commits cannot interleave.
   private writeLock: Promise<unknown> = Promise.resolve();
 
-  constructor(params: { schedulerClient: SchedulerClient }) {
+  constructor(params: { executions: Pick<MemoryExecutionClient, "wakeNow"> }) {
     super();
-    this.schedulerClient = params.schedulerClient;
+    this.executions = params.executions;
   }
 
   private enqueueWrite<R>(fn: () => Promise<R>): Promise<R> {
@@ -66,9 +68,7 @@ export class MemoryStoreClient extends CasStoreClient {
     }
 
     if (!params.initial) {
-      throw new Error(
-        `Store "${params.definition.name}:${params.id}" does not exist`
-      );
+      throw new StoreNotFoundError(params.definition.name, params.id);
     }
 
     const initialValue = params.initial;
@@ -105,9 +105,7 @@ export class MemoryStoreClient extends CasStoreClient {
     );
 
     if (!record) {
-      throw new Error(
-        `Store "${params.definition.name}:${params.id}" does not exist`
-      );
+      throw new StoreNotFoundError(params.definition.name, params.id);
     }
 
     return {
@@ -151,9 +149,7 @@ export class MemoryStoreClient extends CasStoreClient {
       const key = this.storeKey(mutation.definition.name, mutation.id);
       const record = this.stores.get(key);
       if (!record) {
-        throw new Error(
-          `Store "${mutation.definition.name}:${mutation.id}" does not exist`
-        );
+        throw new StoreNotFoundError(mutation.definition.name, mutation.id);
       }
       if (
         record.instanceId !== mutation.expected.instanceId ||
@@ -187,13 +183,14 @@ export class MemoryStoreClient extends CasStoreClient {
         );
       }
 
-      this.enqueueMatchingWakes({
+      // Wakes are requested in the same synchronous critical section as the
+      // commit, so a committed change is never left without its wakes.
+      this.wakeMatchingWaiters({
         storeName: mutation.definition.name,
         storeId: mutation.id,
         version,
         changedPaths: mutation.changedPaths,
       });
-      await this.drainPendingWakes();
       return { status: "committed" };
     });
   }
@@ -219,7 +216,6 @@ export class MemoryStoreClient extends CasStoreClient {
       for (const [key, waiter] of [...this.waiters.entries()]) {
         if (waiter.storeName === name && waiter.storeId === params.id) {
           this.waiters.delete(key);
-          this.pendingWakes.delete(key);
         }
       }
     });
@@ -274,7 +270,6 @@ export class MemoryStoreClient extends CasStoreClient {
       for (const [waiterKey, waiter] of [...this.waiters.entries()]) {
         if (waiter.instanceId === record.instanceId) {
           this.waiters.delete(waiterKey);
-          this.pendingWakes.delete(waiterKey);
         }
       }
       const result = { deleted: true as const };
@@ -304,21 +299,35 @@ export class MemoryStoreClient extends CasStoreClient {
         record.version > waiter.sinceVersion
       ) {
         this.waiters.set(key, cloneStoreState(waiter));
-        this.pendingWakes.add(key);
-        await this.drainPendingWakes();
+        this.executions.wakeNow(waiter.executionId);
         return;
       }
       this.waiters.set(key, cloneStoreState(waiter));
     });
   }
 
-  private enqueueMatchingWakes(params: {
+  /**
+   * Deletes the waiters a step registered. Called synchronously when the heap
+   * records the step's result, so the waiter goes with that write.
+   */
+  deleteWaitersForStep(params: { executionId: string; stepKey: string }) {
+    for (const [key, waiter] of [...this.waiters.entries()]) {
+      if (
+        waiter.executionId === params.executionId &&
+        waiter.stepKey === params.stepKey
+      ) {
+        this.waiters.delete(key);
+      }
+    }
+  }
+
+  private wakeMatchingWaiters(params: {
     storeName: string;
     storeId: string;
     version: number;
     changedPaths: readonly (readonly (string | number)[])[];
   }) {
-    for (const [key, waiter] of this.waiters) {
+    for (const waiter of this.waiters.values()) {
       if (waiter.storeName !== params.storeName) continue;
       if (waiter.storeId !== params.storeId) continue;
       if (waiter.sinceVersion >= params.version) continue;
@@ -326,27 +335,7 @@ export class MemoryStoreClient extends CasStoreClient {
         continue;
       }
 
-      this.pendingWakes.add(key);
-    }
-  }
-
-  private async drainPendingWakes() {
-    for (const key of [...this.pendingWakes]) {
-      const waiter = this.waiters.get(key);
-      if (!waiter) {
-        this.pendingWakes.delete(key);
-        continue;
-      }
-
-      try {
-        await this.schedulerClient.requestWakeUp(waiter.event);
-        this.pendingWakes.delete(key);
-        this.waiters.delete(key);
-      } catch (error) {
-        // Keep both entries so every later committed mutation retries this
-        // delivery, regardless of which store paths that mutation changed.
-        console.error("Failed to deliver pending store wake", error);
-      }
+      this.executions.wakeNow(waiter.executionId);
     }
   }
 

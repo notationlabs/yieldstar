@@ -44,19 +44,18 @@ Yieldstar is a monorepo of composable packages:
 | Package                         | Role                                                                                 |
 | ------------------------------- | ------------------------------------------------------------------------------------ |
 | `yieldstar`                     | Core SDK with `workflow`, `createWorkflowRouter`, `RetryableError`, and the local and HTTP SDKs |
-| `@yieldstar/core`               | Base types and the `WorkflowRunner` execution engine                                 |
-| `@yieldstar/sqlite-runtime`     | Driver-agnostic SQLite heap, store, scheduler, task queue, timers, and event loop     |
+| `@yieldstar/core`               | Base types, the `Runtime` contract, `WorkflowRunner`, and `ExecutionDispatcher`      |
+| `@yieldstar/sqlite-runtime`     | `SqliteRuntime`: driver-agnostic SQLite execution records, heap, and stores           |
 | `@yieldstar/worker-invoker`     | Subprocess invoker and worker process                                                |
 | `@yieldstar/http-server`        | Runtime-neutral HTTP routes and middleware using standard `Request` and `Response`    |
-| `@yieldstar/test-runtime`       | In-memory runtime components used by Yieldstar's test tooling                         |
+| `@yieldstar/test-runtime`       | `MemoryRuntime`, the in-memory runtime used by Yieldstar's test tooling               |
 | `@yieldstar/test-invoker`       | In-process invoker used by Yieldstar's test tooling                                   |
 | `@yieldstar/test-utils`         | Test SDK and schema helpers used internally by this repository                        |
 | `@yieldstar/store-conformance`  | Vitest qualification suite for third-party store connectors                          |
 
-The resident-process runtime splits into five subsystems.
+A runtime has three clients, and a dispatcher drives them:
 
-- A **heap** stores step results so they survive restarts. 
-- A **scheduler** tracks timers and wake-ups. 
-- A **task queue** orders pending work.
-- A **store** holds schema-validated shared state and workflow waiters.
-- An **event loop** polls the queue and dispatches executions.
+- The **execution client** keeps one durable record per execution: its event, its status and outcome, and when it is next due.
+- The **heap** stores step results so they survive restarts.
+- The **store** client holds schema-validated shared state and the waiters of suspended workflows.
+- The **dispatcher** (`ExecutionDispatcher`) claims due executions, hands each to an invoker, and records the outcome.

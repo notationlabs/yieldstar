@@ -27,7 +27,7 @@ yield *
 
 ## How retries work
 
-When a step throws a `RetryableError`, the runtime caches the error with `done: false`, marking the step as incomplete. It then schedules a wake-up after `retryInterval` milliseconds and terminates the worker process. On the next invocation, the runtime replays all cached steps until it reaches the incomplete one, clears the cached error, and re-executes the step function. This cycle repeats until the function either succeeds or exhausts `maxAttempts`.
+When a step throws a `RetryableError`, the runtime caches the error with `done: false`, marking the step as incomplete. The delivery ends as `suspended` with `wakeAt` set `retryInterval` milliseconds later, so the execution record becomes due again at that time, and the worker process terminates. On the next invocation, the runtime replays all cached steps until it reaches the incomplete one, clears the cached error, and re-executes the step function. This cycle repeats until the function either succeeds or exhausts `maxAttempts`.
 
 Once all attempts are spent, the runtime throws the error into the workflow generator. You can catch it with a standard `try/catch` and run compensating logic:
 
@@ -45,7 +45,7 @@ try {
 
 ## Non-retryable errors
 
-Not every failure warrants a retry. Any error that is not a `RetryableError` terminates the step immediately without scheduling a wake-up. The runtime stores the error and marks the workflow as done.
+Not every failure warrants a retry. Any error that is not a `RetryableError` completes the step immediately with that error, without suspending. The runtime stores the error and throws it into the workflow. If the workflow does not catch it, the execution record becomes `failed` with that error as its outcome.
 
 ```ts
 yield *

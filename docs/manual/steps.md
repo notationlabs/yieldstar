@@ -33,9 +33,9 @@ const data =
 
 ## `step.delay`
 
-`step.delay` pauses the workflow for a given number of milliseconds. When a workflow reaches a delay, the runtime persists the resume timestamp, terminates the current execution, and schedules a wake-up. 
+`step.delay` pauses the workflow for a given number of milliseconds. When a workflow reaches a delay, the runtime records the unfinished step and the delivery ends as `suspended` with `wakeAt` set to the time the delay elapses. The execution record becomes due at that time.
 
-Once the timer fires, the runtime re-invokes the workflow. All steps before the delay replay from cache, and execution continues from the next step.
+Once it is due, the dispatcher delivers the execution again. All steps before the delay replay from cache, and execution continues from the next step.
 
 ```ts
 yield * step.delay(30_000); // pause for 30 seconds
@@ -78,3 +78,30 @@ yield * step.poll("key", opts, predicate);
 ```
 
 If two steps in the same execution resolve to the same cache key, the runtime throws: `"Each step in a loop must have a unique cache key."`
+
+## Errors
+
+Errors fall into two groups, and only the first reaches workflow code.
+
+| Workflow errors (catchable)                                                   | Infrastructure errors (not catchable)                          |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Errors thrown by your step functions                                         | The heap or store database throws                              |
+| Errors thrown by your store updaters, selectors, claims and initial states    | A worker crashes or exits before reporting an outcome          |
+| `StoreValidationError` (a state failed its schema), `StoreNotFoundError`      |                                                                |
+
+Steps do not call runtime clients themselves. A store step yields a request, and the driver makes the call outside workflow code, then resumes the step with the result. If the call fails with an infrastructure error, the driver does not resume the step, so a `try/catch` around it never runs:
+
+```ts
+const order = yield* step.store(OrderStore, { id: event.params.orderId });
+
+try {
+  yield* order.update("mark-paid", (draft) => {
+    draft.status = "paid";
+  });
+} catch (err) {
+  // Runs for StoreValidationError or an error thrown by the updater.
+  // Does not run if SQLite throws: the delivery is abandoned instead.
+}
+```
+
+An infrastructure error is not an outcome. The delivery is not acknowledged, the execution record keeps its status, and the runtime delivers the execution again after its redelivery timeout (five minutes by default). Completed steps replay from the heap, so the retry resumes where the failed delivery stopped.

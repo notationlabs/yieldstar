@@ -1,7 +1,6 @@
 import { registerStoreClientConformance } from "@yieldstar/store-conformance";
-import type { SchedulerClient } from "@yieldstar/core";
-import { MemoryStoreClient } from "@yieldstar/test-runtime";
-import { SqliteStoreClient } from "@yieldstar/sqlite-runtime";
+import { MemoryRuntime } from "@yieldstar/test-runtime";
+import { SqliteRuntime } from "@yieldstar/sqlite-runtime";
 
 const isBun = "Bun" in globalThis;
 const { createSqliteDb } = isBun
@@ -10,22 +9,22 @@ const { createSqliteDb } = isBun
 
 registerStoreClientConformance({
   name: "memory",
-  create(schedulerClient) {
-    return { client: new MemoryStoreClient({ schedulerClient }) };
+  create() {
+    return { runtime: new MemoryRuntime() };
   },
 });
 
 registerStoreClientConformance({
   name: isBun ? "sqlite-bun" : "sqlite-node",
-  create(schedulerClient: SchedulerClient) {
+  create() {
     const db = createSqliteDb({ path: ":memory:", wal: false });
     return {
-      client: new SqliteStoreClient({ db, schedulerClient }),
-      createPeer(peerScheduler: SchedulerClient) {
-        return new SqliteStoreClient({ db, schedulerClient: peerScheduler });
+      runtime: new SqliteRuntime(db),
+      createPeer() {
+        return new SqliteRuntime(db);
       },
-      restart(restartScheduler: SchedulerClient) {
-        return new SqliteStoreClient({ db, schedulerClient: restartScheduler });
+      restart() {
+        return new SqliteRuntime(db);
       },
       dispose() {
         db.close();

@@ -1,6 +1,6 @@
 # Resident process: Bun with SQLite
 
-Use the Bun connector when the coordinator and forked workers run under Bun. It wraps `bun:sqlite` behind the shared synchronous `SqliteDriver` contract.
+Use the Bun connector when the application process and forked workers run under Bun. It wraps `bun:sqlite` behind the shared synchronous `SqliteDriver` contract.
 
 ## Install
 
@@ -8,66 +8,49 @@ Use the Bun connector when the coordinator and forked workers run under Bun. It 
 bun add yieldstar @yieldstar/core @yieldstar/sqlite-runtime @yieldstar/worker-invoker
 ```
 
-## Database and event loop
+## Runtime
 
-```ts
-import { SqliteEventLoop } from "@yieldstar/sqlite-runtime";
-import { createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
+```ts [shared.ts]
+import { SqliteRuntime, createSqliteDb } from "@yieldstar/sqlite-runtime/bun";
 
 export const db = createSqliteDb({ path: "./.db/local.sqlite" });
-export const eventLoop = new SqliteEventLoop(db);
+export const runtime = new SqliteRuntime(db);
 ```
 
 ## Worker
 
-```ts
+```ts [worker.ts]
 import pino from "pino";
 import { WorkflowRunner } from "@yieldstar/core";
-import {
-  SqliteHeapClient,
-  SqliteSchedulerClient,
-  SqliteStoreClient,
-  SqliteTaskQueueClient,
-  SqliteTimersClient,
-} from "@yieldstar/sqlite-runtime";
 import { createWorkflowWorker } from "@yieldstar/worker-invoker";
-import { db, router } from "./shared";
+import { router, runtime } from "./shared";
 
 const logger = pino();
-const taskQueueClient = new SqliteTaskQueueClient(db);
-const timersClient = new SqliteTimersClient(db);
-const schedulerClient = new SqliteSchedulerClient({
-  taskQueueClient,
-  timersClient,
-});
-const runner = new WorkflowRunner({
-  router,
-  heapClient: new SqliteHeapClient(db),
-  schedulerClient,
-  storeClient: new SqliteStoreClient({ db, schedulerClient }),
-  logger,
-});
+const runner = new WorkflowRunner(runtime, { router, logger });
 
 createWorkflowWorker(runner, logger).listen();
 ```
 
 ## Application
 
-```ts
+```ts [app.ts]
 import pino from "pino";
+import { ExecutionDispatcher } from "@yieldstar/core";
 import { createLocalSdk } from "yieldstar";
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
-import { eventLoop } from "./shared";
+import { runtime } from "./shared";
 import type { Router } from "./shared";
 
 const logger = pino();
 const workerPath = new URL("./worker.ts", import.meta.url).href;
 const invoker = createWorkflowInvoker({ workerPath, logger });
 
-eventLoop.start({ onNewEvent: invoker.execute, logger });
-const sdk = createLocalSdk<Router>(invoker);
+const dispatcher = new ExecutionDispatcher(runtime, { invoker, logger });
+dispatcher.start();
+
+const sdk = createLocalSdk<Router>(runtime, { invoker });
 const result = await sdk.triggerAndWait({ workflowId: "my-workflow" });
-eventLoop.stop();
+await dispatcher.stop();
 ```
 
 Run the application with `bun app.ts`. The child process inherits Bun as `process.execPath`, while the runtime and IPC APIs remain the same as the Node connector path.

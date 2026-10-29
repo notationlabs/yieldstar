@@ -45,7 +45,7 @@ Steps that have already completed return their cached result from the heap with 
 
 When the generator reaches a step that has not yet run, it executes the function, persists the result to the heap, and advances. 
 
-If the generator hits a `delay` or a retryable error, it will yield control back to the runtime, which schedules a wake-up and terminates the process.
+If the generator hits a `delay` or a retryable error, it yields control back to the runtime. The delivery ends as `suspended` with the time the paused step needs (`wakeAt`), the execution record becomes due at that time, and the process terminates.
 
 On the next invocation the same replay happens: cached steps resolve instantly, and the generator picks up where it left off. This means a workflow can span minutes, hours, or days while the process that runs it is ephemeral.
 
@@ -55,7 +55,7 @@ const w = workflow(async function* (step) {
   // Execution 2: replays from cache
   const a = yield* step.run(() => expensiveComputation());
 
-  // Execution 1: pauses here, schedules wake-up
+  // Execution 1: suspends here, due again in 5s
   // Execution 2: elapsed, continues
   yield* step.delay(5000);
 
@@ -65,6 +65,36 @@ const w = workflow(async function* (step) {
   return b;
 });
 ```
+
+## Execution records
+
+Each trigger creates one execution, and the runtime keeps one durable `ExecutionRecord` for it. Admission writes the record with the event (`workflowId`, `params`, `context`) once, and every delivery reads the event back from it.
+
+```ts
+interface ExecutionRecord {
+  executionId: string;
+  workflowId: string;
+  params: EventParams;
+  context: EventContext;
+  status: "admitted" | "suspended" | "completed" | "failed";
+  outcome?: { status: "completed"; result: unknown } | { status: "failed"; error: Error };
+  admittedAt: number;
+  updatedAt: number;
+}
+```
+
+| Status      | Meaning                                                              |
+| ----------- | -------------------------------------------------------------------- |
+| `admitted`  | No delivery has been acknowledged yet                                |
+| `suspended` | The latest delivery paused on a delay, retry or store wait           |
+| `completed` | The workflow returned. `outcome.result` holds the return value       |
+| `failed`    | Workflow code threw an uncaught error. `outcome.error` holds it      |
+
+`completed` and `failed` are terminal and permanent. A finished execution never runs workflow code again: a later delivery returns the recorded outcome.
+
+**Execution IDs are unique for the lifetime of the runtime.** A trigger may supply its own `executionId`, and the runtime reserves it unchanged; otherwise the runtime chooses one. Reusing an ID that was ever admitted, including one whose execution failed, is rejected with `EXECUTION_ID_CONFLICT`. This matters because the ID is how a replay finds its own recorded steps, so a reused ID would replay another execution's results.
+
+A record changes status only when a delivery is acknowledged with an outcome. If a delivery hits an infrastructure error (the database throws, the worker exits), the record keeps its status and the execution is delivered again after the runtime's redelivery timeout. Such errors never reach workflow code; see [Steps](./steps.md#errors).
 
 ## Registering workflows
 

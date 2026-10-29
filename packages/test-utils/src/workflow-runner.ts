@@ -6,29 +6,22 @@ import type {
 } from "@yieldstar/core";
 import type { Logger } from "pino";
 import pino from "pino";
-import { WorkflowRunner } from "@yieldstar/core";
+import { ExecutionDispatcher, WorkflowRunner } from "@yieldstar/core";
 import { createWorkflowInvoker } from "@yieldstar/test-invoker";
-import {
-  MemoryEventLoop,
-  MemorySchedulerClient,
-  MemoryHeapClient,
-  MemoryStoreClient,
-} from "@yieldstar/test-runtime";
+import { MemoryRuntime } from "@yieldstar/test-runtime";
 import { createLocalSdk } from "yieldstar";
 
-export function createTestSdkFactory(params?: { logger?: Logger }) {
+export function createTestSdkFactory(params?: {
+  logger?: Logger;
+  /** Passed to the memory runtime, e.g. a fixed clock. */
+  runtime?: ConstructorParameters<typeof MemoryRuntime>[0];
+}) {
   const logger = params?.logger ?? pino({ level: "error" });
 
   return <W extends WorkflowRouter>(workflowRouter: W) => {
-    const memoryEventLoop = new MemoryEventLoop(logger);
-    const schedulerClient = new MemorySchedulerClient(memoryEventLoop);
-    const storeClient = new MemoryStoreClient({ schedulerClient });
-    const heapClient = new MemoryHeapClient();
+    const runtime = new MemoryRuntime(params?.runtime);
 
-    const workflowRunner = new WorkflowRunner({
-      heapClient,
-      schedulerClient,
-      storeClient,
+    const workflowRunner = new WorkflowRunner(runtime, {
       router: workflowRouter,
       logger,
     });
@@ -38,19 +31,24 @@ export function createTestSdkFactory(params?: { logger?: Logger }) {
       logger,
     });
 
+    // The dispatcher polls an in-memory runtime, so it is cheap to leave
+    // running; it does not keep the test process alive.
+    const dispatcher = new ExecutionDispatcher(runtime, {
+      invoker,
+      logger,
+      pollInterval: 1,
+      keepAlive: false,
+    });
+
+    const sdk = createLocalSdk<W>(runtime, { invoker, pollInterval: 1 });
+
     return {
       async trigger<
         K extends keyof W & string,
         Params extends EventParamsOf<W[K]> = EventParamsOf<W[K]>
-      >(
-        event: TriggerEvent<K, Params>
-      ): Promise<void> {
-        const executionEvent = {
-          executionId: event.executionId ?? crypto.randomUUID(),
-          workflowId: event.workflowId,
-          params: event.params,
-        };
-        await invoker.execute(executionEvent);
+      >(event: TriggerEvent<K, Params>): Promise<{ executionId: string }> {
+        dispatcher.start();
+        return sdk.trigger(event as TriggerEvent<K, EventParamsOf<W[K]>>);
       },
       async triggerAndWait<
         K extends keyof W & string,
@@ -58,22 +56,14 @@ export function createTestSdkFactory(params?: { logger?: Logger }) {
       >(
         event: TriggerEvent<K, Params>
       ): Promise<WorkflowGeneratorReturnType<W[K]>> {
-        memoryEventLoop.start({ onNewEvent: invoker.execute });
-
-        const sdk = createLocalSdk<typeof workflowRouter>(invoker);
-        try {
-          const result = await sdk.triggerAndWait(event);
-          const outcome: unknown = result;
-          if (outcome instanceof Error) throw outcome;
-          return result;
-        } finally {
-          memoryEventLoop.stop();
-          memoryEventLoop.reset();
-        }
+        dispatcher.start();
+        return sdk.triggerAndWait(event as TriggerEvent<K, EventParamsOf<W[K]>>);
       },
-      store: storeClient.store.bind(storeClient),
-      storeClient,
-      heapClient,
+      store: runtime.stores.store.bind(runtime.stores),
+      runtime,
+      dispatcher,
+      storeClient: runtime.stores,
+      heapClient: runtime.heap,
     };
   };
 }
