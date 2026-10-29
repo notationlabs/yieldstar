@@ -144,7 +144,7 @@ type LeaseLost = { status: "lost" };
 
 | Method        | Contract                                                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admit`       | Creates the record as `admitted` and makes it due now, all-or-nothing. Reserves a supplied ID unchanged or chooses one. Rejects a used ID with `EXECUTION_ID_CONFLICT`, and an event that cannot round-trip with `INVALID_EXECUTION_EVENT` |
+| `admit`       | Creates the record as `admitted` and makes it due now, all-or-nothing. Reserves a supplied ID unchanged or chooses one. Rejects a used ID with `EXECUTION_ID_CONFLICT`, and `params` or `context` values that `durableValueCodec` cannot encode, or `context` keys that are not strings, with `INVALID_EXECUTION_EVENT` |
 | `start`       | Admits a target execution on behalf of the step named by `requestId`, idempotently by that ID. A new start admits the target due now, with the caller's `context` and `parent` set to `requestId`, and records the start request, all-or-nothing. A repeated request ID returns the first target's ID if its `workflowId` and canonical `params` match, and `START_REQUEST_MISMATCH` otherwise, whatever the target's status. Missing `params` and `{}` do not match. An empty `workflowId`, or `params` that are not a plain object or that `durableValueCodec` cannot encode, return `INVALID_START_PARAMETERS` and admit nothing |
 | `requestWake` | Carries wakes from outside a delivery, such as a store commit. Pending wakes merge into one due time: the earliest                                                       |
 | `claimDue`    | Leases up to `limit` executions that are due at or before the runtime clock and have no live lease, earliest due first. Each lease lasts `duration` ms and carries a token greater than every earlier token for that execution. An execution has at most one live lease at a time, across every client sharing the backend |
@@ -162,22 +162,47 @@ Runtime adapter authors can import the storage-neutral state machine that `Sqlit
 
 ## `durableValueCodec`
 
-Validates durable values and encodes them as canonical JSON. `ExecutionClient.start` uses it to validate `params` and to compare a repeated request with the recorded one.
+The one codec for every durable value (RFC 004). It validates values, encodes them as canonical JSON and decodes them back unchanged. Execution `params`, `context` and outcomes are stored with it, and `ExecutionClient.start` compares params by their canonical encoding.
 
 ```ts
-type DurableValue = null | boolean | number | string | DurableValue[] | DurableObject;
+type DurableValue =
+  | null | boolean | number | string | undefined | Error
+  | DurableValue[] | DurableObject;
 type DurableObject = { [key: string]: DurableValue };
 
 type DurableValueEncoding =
   | { status: "encoded"; canonical: string }
   | { status: "invalid"; message: string };
+type DurableDecoding =
+  | { status: "decoded"; value: DurableValue }
+  | { status: "invalid"; message: string };
 
-const durableValueCodec: { encode(value: unknown): DurableValueEncoding };
+const durableValueCodec: {
+  encode(value: unknown): DurableValueEncoding;
+  decode(canonical: string): DurableDecoding;
+};
+
+// Compile-time check for a recorded value; accepts interfaces.
+type Durable<T> = /* T, or never where T holds a Date, Map, Set, bigint or function */;
 ```
 
-`encode` accepts `null`, booleans, finite numbers, strings, arrays with no missing items, and plain objects (the default prototype or `null`) whose own properties are enumerable data properties with string keys. It rejects `undefined`, functions, symbols, bigints, `NaN` and infinities, class instances such as `Date` and `Map`, accessors, symbol or non-enumerable properties, missing array items and reference cycles, and returns a message naming the path of the first invalid value. It never throws for an invalid value.
+`encode` accepts `null`, booleans, finite numbers, strings, `undefined`, errors, arrays with no missing items, and plain objects (the default prototype or `null`) whose own properties are enumerable data properties with string keys. It rejects functions, symbols, bigints, `NaN` and infinities, class instances such as `Date` and `Map`, accessors, symbol or non-enumerable properties, missing array items and reference cycles, and returns a message naming the path of the first invalid value. Neither method throws for an invalid input.
 
-The canonical string sorts object keys and writes `-0` as `0`, so two values that differ only in key order encode to the same string.
+The canonical string sorts object keys and writes `-0` as `0`, so two values that differ only in key order encode to the same string. Values JSON cannot hold are tagged objects with a `$type` key:
+
+| Value | Encoding |
+| --- | --- |
+| `undefined` | `{"$type":"undefined"}` |
+| A plain object with its own `$type` key | `{"$type":"object","value":{...}}` |
+| An error | `{"$type":"error","name":...,"message":...,"stack"?,"code"?,"cause"?,"errors"?,"fields"?}` |
+
+So `{ a: undefined }` and `{}` stay distinct, and only a tagged value decodes as `undefined` or an error: an error-shaped plain object stays a plain object.
+
+An error keeps its `name`, `message`, a string `stack` and `code`, its own `cause` (encoded recursively), a non-enumerable `errors` array such as `AggregateError`'s, and its own enumerable properties whose values are durable, under `fields`. Properties that are not durable are left out rather than rejecting the error. `encodeThrownValue(value)` encodes a thrown value as thrown when it is durable, and as `Error(String(value))` otherwise.
+
+`decode` revives an error as the class registered under its `name` with `registerErrorClass(name, errorClass)`, setting its prototype and fields without calling the constructor, and as an `Error` with the same name, message, code, cause and fields when no class is registered. Registration is per process. `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`, `AggregateError`, `WorkflowStartError` and `WorkflowValueError` are registered by default.
+
+`WorkflowValueError` (`code: "INVALID_STEP_VALUE" | "STEP_SCHEMA_INVALID"`, `stepKey`) reports a value the codec or a step's schema rejects. A completed outcome whose result the codec rejects is recorded as `failed` with `INVALID_STEP_VALUE` and `stepKey` `WORKFLOW_RESULT_STEP_KEY` (`"$$workflow-result$$"`).
 
 ## `ExecutionDispatcher`
 

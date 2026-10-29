@@ -25,12 +25,12 @@ A `Runtime` bundles three clients: `executions` (`ExecutionClient`), `heap` (`He
 
 The `ExecutionClient` contract that wakes rely on:
 
-- Execution IDs MUST be unique across the runtime and MUST never be reused, whatever the delivery outcome. `admit` returns `EXECUTION_ID_CONFLICT` for an ID in use, and `INVALID_EXECUTION_EVENT` for `params` or `context` that cannot round-trip exactly; it MUST NOT store a lossy copy.
+- Execution IDs MUST be unique across the runtime and MUST never be reused, whatever the delivery outcome. `admit` returns `EXECUTION_ID_CONFLICT` for an ID in use, and `INVALID_EXECUTION_EVENT` for `params` or `context` values that `durableValueCodec` cannot encode, or `context` keys that are not strings; it MUST NOT store a lossy copy.
 - Admission MUST create the record as `admitted` and make it due immediately, all-or-nothing.
 - A wake names an execution and a due time; it carries no copy of the event. `requestWake` for an unknown execution returns `EXECUTION_NOT_FOUND` and creates nothing; for a terminal execution it returns `ignored`.
 - Wakes not covered by a lease MUST merge into one due time, the earliest requested. `claimDue` MUST return an execution at most once per result, however many wakes it has.
 - Acknowledgement clears the wakes the delivery covered. The next due time is the earlier of the outcome's `wakeAt` and any wake requested after the claim. An unacknowledged delivery's wakes stay pending.
-- `completed` and `failed` are immutable. A failed outcome's error MUST keep at least its `name` and `message`.
+- `completed` and `failed` are immutable. A failed outcome's error MUST keep its `name`, `message`, `code`, `cause` and durable fields, and revive as its registered class. A completed result that `durableValueCodec` cannot encode MUST be recorded as `failed` with `WorkflowValueError` (`INVALID_STEP_VALUE`). The state machine's outcome codec does all of this.
 - Records, pending wakes and leases MUST survive a restart.
 
 ### Leases
