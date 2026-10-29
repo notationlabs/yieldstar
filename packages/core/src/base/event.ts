@@ -38,9 +38,14 @@ export type WorkflowEvent<
   context: Context;
 };
 
+/**
+ * The event a trigger route passes through middleware before admission.
+ * `executionId` is absent when the caller lets the runtime choose one.
+ */
 export type MiddlewareEvent<
   Params extends EventParams = EventParams,
   Context extends MiddlewareEventContext = MiddlewareEventContext
-> = ExecutionEvent<Params> & {
+> = Omit<ExecutionEvent<Params>, "executionId" | "context"> & {
+  executionId?: string;
   context: Context;
 };

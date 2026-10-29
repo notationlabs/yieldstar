@@ -1,8 +1,16 @@
 import { spawnSync } from "node:child_process";
-import { once } from "node:events";
 import type { Logger } from "pino";
 import { expect, test } from "vitest";
+import {
+  WorkflowRunner,
+  type WorkflowEvent,
+  type WorkflowRunOutcome,
+} from "@yieldstar/core";
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
+import { createWorkflowInvoker as createTestInvoker } from "@yieldstar/test-invoker";
+import { MemoryRuntime } from "@yieldstar/test-runtime";
+// @ts-expect-error – plain .mjs fixture shared with the worker process
+import { parityRouter } from "./fixtures/worker-invoker/parity-workflows.mjs";
 
 const logger = { info() {}, error() {} } as unknown as Logger;
 const fixtures = new URL("./fixtures/worker-invoker/", import.meta.url);
@@ -12,129 +20,140 @@ const which = (runtime: "bun" | "node") => {
   return result.status === 0 ? result.stdout.trim() : undefined;
 };
 
-const executeAndWait = async ({
+const event = (overrides: Partial<WorkflowEvent> = {}): WorkflowEvent => ({
+  workflowId: "workflow",
+  executionId: "execution",
+  params: undefined,
+  context: new Map(),
+  ...overrides,
+});
+
+const deliver = ({
   fixture,
-  executionId,
-  context = new Map(),
   execPath,
   handshakeTimeout,
-}: {
+  ...overrides
+}: Partial<WorkflowEvent> & {
   fixture: string;
-  executionId: string;
-  context?: Map<unknown, unknown>;
   execPath?: string;
   handshakeTimeout?: number;
-}) => {
-  const invoker = createWorkflowInvoker({
+}) =>
+  createWorkflowInvoker({
     workerPath: new URL(fixture, fixtures).href,
     execPath,
     handshakeTimeout,
     logger,
-  });
-  const result = once(invoker.workflowEndEmitter, executionId);
+  }).deliver(event(overrides));
 
-  await invoker.execute({
-    workflowId: "workflow",
-    executionId,
-    params: undefined,
-    context,
-  });
+test("forks a worker, preserves its Map context and resolves with its outcome", { timeout: 2_000 }, async () => {
+  await expect(
+    deliver({
+      fixture: "success.mjs",
+      executionId: "worker-success",
+      context: new Map([["requestId", "request"]]),
+    })
+  ).resolves.toEqual({ status: "completed", result: true });
+});
 
-  return result;
-};
+test("resolves with a suspended outcome and its wakeAt", { timeout: 2_000 }, async () => {
+  await expect(
+    deliver({ fixture: "suspend.mjs", executionId: "worker-suspend" })
+  ).resolves.toEqual({ status: "suspended", wakeAt: 1234 });
+});
 
-test("forks a worker and preserves its Map context", { timeout: 2_000 }, async () => {
-  const result = await executeAndWait({
-    fixture: "success.mjs",
-    executionId: "worker-success",
-    context: new Map([["requestId", "request"]]),
-  });
-
-  expect(result).toEqual([true]);
+test("rejects when the worker reports an infrastructure error", { timeout: 2_000 }, async () => {
+  await expect(
+    deliver({ fixture: "infrastructure-error.mjs", executionId: "worker-infra" })
+  ).rejects.toThrow("database is locked");
 });
 
 test("rejects when the worker process cannot spawn", { timeout: 2_000 }, async () => {
-  const invoker = createWorkflowInvoker({
-    workerPath: new URL("success.mjs", fixtures).href,
-    execPath: "/missing/yieldstar-node",
-    logger,
-  });
-
   await expect(
-    invoker.execute({
-      workflowId: "workflow",
+    deliver({
+      fixture: "success.mjs",
       executionId: "worker-spawn-error",
-      params: undefined,
-      context: new Map(),
+      execPath: "/missing/yieldstar-node",
     })
   ).rejects.toMatchObject({ code: "ENOENT" });
 });
-
-test(
-  "emits nothing when a suspended workflow replies without a result",
-  { timeout: 2_000 },
-  async () => {
-    const executionId = "worker-suspend";
-    const invoker = createWorkflowInvoker({
-      workerPath: new URL("suspend.mjs", fixtures).href,
-      logger,
-    });
-    const emissions: unknown[] = [];
-    invoker.workflowEndEmitter.on(executionId, (result) => {
-      emissions.push(result);
-    });
-
-    await invoker.execute({
-      workflowId: "workflow",
-      executionId,
-      params: undefined,
-      context: new Map(),
-    });
-
-    // Wait for the killed child to exit so a spurious exit-handler emission would surface
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(emissions).toEqual([]);
-  }
-);
 
 const parentRuntime = "Bun" in globalThis ? "Bun" : "Node";
 const workerRuntime = parentRuntime === "Bun" ? "node" : "bun";
 const crossRuntimePath = which(workerRuntime);
 
 test.skipIf(!crossRuntimePath)(
-  `surfaces an error when forking a ${workerRuntime} worker under ${parentRuntime} (cross-runtime IPC unsupported)`,
+  `rejects when forking a ${workerRuntime} worker under ${parentRuntime} (cross-runtime IPC unsupported)`,
   { timeout: 2_000 },
   async () => {
-    const [error] = await executeAndWait({
-      fixture: "success.mjs",
-      executionId: `worker-cross-runtime-${workerRuntime}`,
-      context: new Map([["requestId", "request"]]),
-      execPath: crossRuntimePath!,
-      handshakeTimeout: 1_000,
-    });
-
-    expect(error).toBeInstanceOf(Error);
-    expect(error.message).toMatch(/exited before replying|IPC handshake/);
+    await expect(
+      deliver({
+        fixture: "success.mjs",
+        executionId: `worker-cross-runtime-${workerRuntime}`,
+        context: new Map([["requestId", "request"]]),
+        execPath: crossRuntimePath!,
+        handshakeTimeout: 1_000,
+      })
+    ).rejects.toThrow(/exited before replying|IPC handshake/);
   }
 );
 
-test("emits an error when the worker never completes the handshake", { timeout: 2_000 }, async () => {
-  const [error] = await executeAndWait({
-    fixture: "never-ready.mjs",
-    executionId: "worker-never-ready",
-    handshakeTimeout: 500,
-  });
-
-  expect(error).toBeInstanceOf(Error);
-  expect(error.message).toMatch(/did not complete the IPC handshake within 500ms/);
+test("rejects when the worker never completes the handshake", { timeout: 2_000 }, async () => {
+  await expect(
+    deliver({
+      fixture: "never-ready.mjs",
+      executionId: "worker-never-ready",
+      handshakeTimeout: 500,
+    })
+  ).rejects.toThrow(/did not complete the IPC handshake within 500ms/);
 });
 
-test("emits an error when the worker exits before replying", { timeout: 2_000 }, async () => {
-  const [error] = await executeAndWait({
-    fixture: "early-exit.mjs",
-    executionId: "worker-early-exit",
+test("rejects when the worker exits before replying", { timeout: 2_000 }, async () => {
+  await expect(
+    deliver({ fixture: "early-exit.mjs", executionId: "worker-early-exit" })
+  ).rejects.toThrow(/exited before replying \(code 17\)/);
+});
+
+test("worker and test invokers deliver the same outcomes", { timeout: 10_000 }, async () => {
+  const workerInvoker = createWorkflowInvoker({
+    workerPath: new URL("runner.mjs", fixtures).href,
+    logger,
+  });
+  const testInvoker = createTestInvoker({
+    runner: new WorkflowRunner(new MemoryRuntime(), { router: parityRouter, logger }),
+    logger,
   });
 
-  expect(error).toBeInstanceOf(Error);
-  expect(error.message).toMatch(/exited before replying \(code 17\)/);
+  const cases: WorkflowEvent[] = [
+    event({
+      workflowId: "completes",
+      executionId: "parity-completes",
+      params: { n: 21 },
+      context: new Map([["requestId", "request"]]),
+    }),
+    event({ workflowId: "fails", executionId: "parity-fails" }),
+    event({ workflowId: "suspends", executionId: "parity-suspends" }),
+    event({ workflowId: "unregistered", executionId: "parity-unregistered" }),
+  ];
+
+  for (const parityEvent of cases) {
+    const [fromWorker, fromTest] = await Promise.all([
+      workerInvoker.deliver(parityEvent),
+      testInvoker.deliver(parityEvent),
+    ]);
+    expect(normalize(fromWorker)).toEqual(normalize(fromTest));
+  }
 });
+
+/** Errors compare by name and message; delay wake times by their status. */
+function normalize(outcome: WorkflowRunOutcome) {
+  if (outcome.status === "failed") {
+    return {
+      status: outcome.status,
+      error: { name: outcome.error.name, message: outcome.error.message },
+    };
+  }
+  if (outcome.status === "suspended") {
+    return { status: outcome.status, hasWakeAt: typeof outcome.wakeAt === "number" };
+  }
+  return outcome;
+}

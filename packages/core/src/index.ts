@@ -40,6 +40,7 @@ export {
   toExecutionRecord,
 } from "./lib/execution-state";
 export { ExecutionDispatcher } from "./lib/execution-dispatcher";
+export { waitForExecutionOutcome } from "./lib/wait-for-outcome";
 export type { StandardSchemaV1 } from "@standard-schema/spec";
 export type {
   Draft,

@@ -2,6 +2,17 @@ import type { HeapRecord, HeapClient } from "@yieldstar/core";
 
 export class MemoryHeapClient implements HeapClient {
   cache: Record<string, HeapRecord[]> = {};
+  private onStepDone?: (step: { executionId: string; stepKey: string }) => void;
+
+  constructor(params?: {
+    /**
+     * Called synchronously when a step's result is recorded, so the runtime
+     * deletes the step's store waiters in the same write.
+     */
+    onStepDone?: (step: { executionId: string; stepKey: string }) => void;
+  }) {
+    this.onStepDone = params?.onStepDone;
+  }
 
   getKey(params: { executionId: string; stepKey: string }) {
     return `${params.executionId}:${params.stepKey}`;
@@ -32,5 +43,6 @@ export class MemoryHeapClient implements HeapClient {
     const attempts = this.cache[key];
     if (!attempts) this.cache[key] = [];
     this.cache[key].unshift(value);
+    if (stepDone) this.onStepDone?.(keyParams);
   }
 }

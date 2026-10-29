@@ -29,11 +29,3 @@ test("triggerAndWait rejects workflow errors", async () => {
     sdk.triggerAndWait({ workflowId: "workflow" })
   ).rejects.toThrow("Workflow error");
 });
-
-test.skip("errors should be thrown by trigger", async () => {
-  const workflow = createWorkflow(async function* (step) {
-    throw new Error("Step error");
-  });
-  const sdk = createSdk({ workflow });
-  expect(() => sdk.trigger({ workflowId: "workflow" })).toThrow();
-});

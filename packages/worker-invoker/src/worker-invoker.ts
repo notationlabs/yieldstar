@@ -1,10 +1,21 @@
 import type { Logger } from "pino";
-import type { MiddlewareEvent, WorkflowInvoker } from "@yieldstar/core";
+import type {
+  WorkflowEvent,
+  WorkflowInvoker,
+  WorkflowRunOutcome,
+} from "@yieldstar/core";
 import { EventEmitter } from "node:events";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { deserializeError } from "serialize-error";
+import type { WorkerMessage } from "./worker";
 
+/**
+ * Runs each delivery in a forked worker process. `deliver` resolves with the
+ * worker's outcome, and rejects when the delivery ends without one: a spawn
+ * error, a missing handshake, an infrastructure error in the worker, or an
+ * exit before replying.
+ */
 export function createWorkflowInvoker(params: {
   workerPath: string;
   execPath?: string;
@@ -15,106 +26,93 @@ export function createWorkflowInvoker(params: {
   const { logger, workerPath, execPath, handshakeTimeout = 5_000 } = params;
   return {
     workflowEndEmitter,
-    async execute(event: MiddlewareEvent) {
+    deliver(event: WorkflowEvent) {
       const { executionId } = event;
 
       const filePath = workerPath.startsWith("file:")
         ? fileURLToPath(workerPath)
         : workerPath;
 
-      const childProcess = fork(filePath, [], {
-        execPath,
-        serialization: "advanced",
-        stdio: ["inherit", "inherit", "inherit", "ipc"],
-      });
-      let spawned = false;
-      let settled = false;
+      return new Promise<WorkflowRunOutcome>((resolve, reject) => {
+        logger.info({ executionId }, "Starting child process");
 
-      const emitWorkflowError = (error: Error) => {
-        clearTimeout(handshakeTimer);
-        if (settled) return;
-        settled = true;
-        workflowEndEmitter.emit(executionId, error);
-        logger.error({ executionId, err: error }, error.message);
-      };
-
-      const spawn = new Promise<void>((resolve, reject) => {
-        childProcess.once("spawn", () => {
-          spawned = true;
-          resolve();
+        const childProcess = fork(filePath, [], {
+          execPath,
+          serialization: "advanced",
+          stdio: ["inherit", "inherit", "inherit", "ipc"],
         });
-        childProcess.on("error", (error) => {
-          if (!spawned) {
-            clearTimeout(handshakeTimer);
-            settled = true;
-            reject(error);
-            return;
-          }
-          emitWorkflowError(error);
-        });
-      });
+        let settled = false;
 
-      // The worker sends a "ready" message once it is listening. Until it
-      // arrives we hold the event back: a worker running a different runtime
-      // (or an incompatible IPC serialization) can never decode our frames,
-      // so a missing handshake turns a silent hang into a clear error.
-      let ready = false;
-      const handshakeTimer = setTimeout(() => {
-        emitWorkflowError(
-          new Error(
-            `Worker did not complete the IPC handshake within ${handshakeTimeout}ms. ` +
-              "Check that the worker calls listen() and that execPath runs the same runtime as the parent process."
-          )
-        );
-        childProcess.kill();
-      }, handshakeTimeout);
-
-      childProcess.on("exit", (code, signal) => {
-        clearTimeout(handshakeTimer);
-        if (settled) return;
-        const detail = signal ? `signal ${signal}` : `code ${code}`;
-        emitWorkflowError(
-          new Error(`Worker process exited before replying (${detail})`)
-        );
-      });
-
-      childProcess.on("message", (message: any) => {
-        if (settled) return;
-        if (message.status === "ready") {
-          if (ready) return;
-          ready = true;
+        const settle = (result: { outcome: WorkflowRunOutcome } | { error: Error }) => {
           clearTimeout(handshakeTimer);
-          childProcess.send(event, (error) => {
-            if (error) {
-              emitWorkflowError(error);
-              childProcess.kill();
-            }
+          if (settled) return;
+          settled = true;
+          if ("error" in result) {
+            logger.error({ executionId, err: result.error }, result.error.message);
+            reject(result.error);
+          } else {
+            resolve(result.outcome);
+          }
+          logger.info({ executionId }, "Terminating child process");
+          childProcess.kill();
+        };
+
+        childProcess.on("error", (error) => settle({ error }));
+
+        // The worker sends a "ready" message once it is listening. Until it
+        // arrives we hold the event back: a worker running a different runtime
+        // (or an incompatible IPC serialization) can never decode our frames,
+        // so a missing handshake turns a silent hang into a clear error.
+        let ready = false;
+        const handshakeTimer = setTimeout(() => {
+          settle({
+            error: new Error(
+              `Worker did not complete the IPC handshake within ${handshakeTimeout}ms. ` +
+                "Check that the worker calls listen() and that execPath runs the same runtime as the parent process."
+            ),
           });
-          return;
-        }
-        // A reply settles the child's outcome even when there is nothing to
-        // emit (a suspended workflow resumes later in a fresh child), so the
-        // exit handler must not report the deliberate kill below as an error.
-        settled = true;
-        switch (message.status) {
-          case "completed":
-            const response = message.response;
-            if (response) {
-              workflowEndEmitter.emit(executionId, response.result);
+        }, handshakeTimeout);
+
+        childProcess.on("exit", (code, signal) => {
+          if (settled) return;
+          const detail = signal ? `signal ${signal}` : `code ${code}`;
+          settle({
+            error: new Error(`Worker process exited before replying (${detail})`),
+          });
+        });
+
+        childProcess.on("message", (message: WorkerMessage) => {
+          if (settled) return;
+          switch (message.status) {
+            case "ready":
+              if (ready) return;
+              ready = true;
+              clearTimeout(handshakeTimer);
+              // Advanced serialization carries a Map but not a ReadonlyMap
+              // wrapper, so send the context as a plain Map.
+              childProcess.send(
+                { ...event, context: new Map(event.context) },
+                (error) => {
+                  if (error) settle({ error });
+                }
+              );
+              return;
+            case "outcome": {
+              const { outcome } = message;
+              settle({
+                outcome:
+                  outcome.status === "failed"
+                    ? { status: "failed", error: deserializeError(outcome.error) }
+                    : outcome,
+              });
+              return;
             }
-            break;
-          case "error":
-            const error = deserializeError(message.error);
-            workflowEndEmitter.emit(executionId, error);
-            logger.error({ executionId, err: error }, "Workflow errored");
-        }
-
-        logger.info({ executionId }, "Terminating child process");
-        childProcess.kill();
+            case "error":
+              settle({ error: deserializeError(message.error) });
+              return;
+          }
+        });
       });
-
-      logger.info({ executionId }, "Starting child process");
-      await spawn;
     },
   };
 }

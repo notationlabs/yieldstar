@@ -6,6 +6,7 @@ import type {
 } from "@yieldstar/core";
 import { EventEmitter } from "node:events";
 
+/** Runs deliveries in-process with the same `deliver` contract as the worker invoker. */
 export function createWorkflowInvoker(params: {
   logger: Logger;
   runner: WorkflowRunner<any>;
@@ -14,18 +15,10 @@ export function createWorkflowInvoker(params: {
   const { logger, runner } = params;
   return {
     workflowEndEmitter,
-    async execute(event: WorkflowEvent) {
+    async deliver(event: WorkflowEvent) {
       const { executionId } = event;
-      logger.info({ executionId }, "Starting workflow execution");
-      try {
-        const response = await runner.run(event, logger);
-        if (response) {
-          workflowEndEmitter.emit(executionId, response.result);
-        }
-      } catch (err: any) {
-        logger.error(err);
-        workflowEndEmitter.emit(executionId, err);
-      }
+      logger.info({ executionId }, "Starting workflow delivery");
+      return runner.run(event, logger);
     },
   };
 }

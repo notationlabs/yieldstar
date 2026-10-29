@@ -264,6 +264,9 @@ importers:
       '@yieldstar/store-conformance':
         specifier: workspace:*
         version: link:../packages/store-conformance
+      '@yieldstar/test-invoker':
+        specifier: workspace:*
+        version: link:../packages/test-invoker
       '@yieldstar/test-runtime':
         specifier: workspace:*
         version: link:../packages/test-runtime
