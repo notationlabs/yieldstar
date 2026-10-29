@@ -46,8 +46,8 @@ importers:
   docs:
     dependencies:
       '@notation/docs':
-        specifier: git+ssh://git@github.com/djgrant/docs.git#main&path:/packages/docs
-        version: git+ssh://git@github.com/djgrant/docs.git#d42a8a8a06c9f020f3496c0f2a4a16e12070146a&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)
+        specifier: github:djgrant/docs#main&path:/packages/docs
+        version: git+ssh://git@github.com/djgrant/docs.git#9b19b945c04aa81df20208c21e9cd975394a09a4&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)
       '@tanstack/react-router':
         specifier: 1.170.44
         version: 1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -967,8 +967,8 @@ packages:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
 
-  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#d42a8a8a06c9f020f3496c0f2a4a16e12070146a&path:/packages/docs':
-    resolution: {commit: d42a8a8a06c9f020f3496c0f2a4a16e12070146a, path: /packages/docs, repo: git@github.com:djgrant/docs.git, type: git}
+  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#9b19b945c04aa81df20208c21e9cd975394a09a4&path:/packages/docs':
+    resolution: {commit: 9b19b945c04aa81df20208c21e9cd975394a09a4, path: /packages/docs, repo: git@github.com:djgrant/docs.git, type: git}
     version: 0.1.0
     hasBin: true
     peerDependencies:
@@ -1848,6 +1848,10 @@ packages:
     resolution: {integrity: sha512-zGb87H3UBbpuI4yoh5UguB1XbU+2BDU3kflM7UfZ+Cy2hWo9lBtqjSVK20gmLY6ukYl040hAypGXMgud9vul8Q==}
     engines: {node: '>=20'}
 
+  '@shikijs/transformers@4.5.0':
+    resolution: {integrity: sha512-LM7twi043qCC3gRyGQfjoC2/sowzbEltWuruyRtT3RlBlk1hKzWk9ETnU7RcDBoVWQBmC8Mebnr7p28W7kPoaA==}
+    engines: {node: '>=20'}
+
   '@shikijs/types@4.5.0':
     resolution: {integrity: sha512-drtPrtD8N0DENyD2cyt6Ajy+IWsiCLgMxODwLTpvH1UsN6a9jf90tNTPjqwHvA+0Lzu9e0txk8DjfqH1p9UJRw==}
     engines: {node: '>=20'}
@@ -2556,6 +2560,11 @@ packages:
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
     engines: {node: '>=6.5'}
+
+  acorn@8.19.0:
+    resolution: {integrity: sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw==}
+    engines: {node: '>=0.4.0'}
+    hasBin: true
 
   ansi-escapes@4.3.2:
     resolution: {integrity: sha512-gKXj5ALrKWQLsYG9jlTRmR/xKluxHV+Z9QEwNIgCfM1/uwPMCuzVVnh5mwTd+OuBZcwSIMbqssNWRm1lE51QaQ==}
@@ -4715,7 +4724,7 @@ snapshots:
       '@tybys/wasm-util': 0.10.3
     optional: true
 
-  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#d42a8a8a06c9f020f3496c0f2a4a16e12070146a&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)':
+  '@notation/docs@git+ssh://git@github.com/djgrant/docs.git#9b19b945c04aa81df20208c21e9cd975394a09a4&path:/packages/docs(@tanstack/react-router@1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1))(@tanstack/react-start@1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2))(@types/node@22.18.0)(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)':
     dependencies:
       '@cloudflare/vite-plugin': 1.64.0(@types/node@22.18.0)(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(wrangler@4.151.0(@types/node@22.18.0))
       '@comark/react': 0.7.0(react@19.3.1)(shiki@4.5.0)
@@ -4724,12 +4733,14 @@ snapshots:
       '@radix-ui/react-tabs': 1.2.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@shikijs/langs': 4.5.0
       '@shikijs/themes': 4.5.0
+      '@shikijs/transformers': 4.5.0
       '@tailwindcss/typography': 0.5.20(tailwindcss@4.3.3)
       '@tailwindcss/vite': 4.3.3(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))
       '@tanstack/react-router': 1.170.44(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       '@tanstack/react-start': 1.169.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))(esbuild@0.28.2)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)(rolldown@1.1.5)(rollup@4.62.2)(supports-color@10.2.2)
       '@tanstack/virtual-file-routes': 1.162.0
       '@vitejs/plugin-react': 6.1.2(@voidzero-dev/vite-plus-core@1.2.0(@types/node@22.18.0)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.1)(typescript@7.0.2)(yaml@2.9.0))
+      acorn: 8.19.0
       cmdk: 1.1.1(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       comark: 0.7.0(shiki@4.5.0)
       esbuild: 0.28.2
@@ -5350,6 +5361,11 @@ snapshots:
 
   '@shikijs/themes@4.5.0':
     dependencies:
+      '@shikijs/types': 4.5.0
+
+  '@shikijs/transformers@4.5.0':
+    dependencies:
+      '@shikijs/core': 4.5.0
       '@shikijs/types': 4.5.0
 
   '@shikijs/types@4.5.0':
@@ -5983,6 +5999,8 @@ snapshots:
   abort-controller@3.0.0:
     dependencies:
       event-target-shim: 5.0.1
+
+  acorn@8.19.0: {}
 
   ansi-escapes@4.3.2:
     dependencies:
