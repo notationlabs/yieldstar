@@ -48,8 +48,8 @@ The `ExecutionClient` contract that wakes rely on:
 
 ### Redelivery delay
 
-- A delivery that ends by `release`, or by lease expiry followed by another claim, is unacknowledged and MUST add one to `unacknowledgedDeliveries`. Any acknowledgement MUST reset it to zero.
-- While `unacknowledgedDeliveries` is greater than zero, the execution MUST NOT be claimable until a non-zero redelivery delay has passed since the delivery ended. The delay MUST NOT decrease while `unacknowledgedDeliveries` grows. The bundled runtimes start at 1 second, double, and cap at 5 minutes (`redeliveryDelay`).
+- A delivery that ends by `release`, or by lease expiry followed by another claim, is unacknowledged and MUST add one to `unacknowledgedDeliveryCount`. Any acknowledgement MUST reset it to zero.
+- While `unacknowledgedDeliveryCount` is greater than zero, the execution MUST NOT be claimable until a non-zero redelivery delay has passed since the delivery ended. The delay MUST NOT decrease while `unacknowledgedDeliveryCount` grows. The bundled runtimes start at 1 second, double, and cap at 5 minutes (`redeliveryDelay`).
 
 ### Fencing
 

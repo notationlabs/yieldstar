@@ -34,7 +34,7 @@ export interface ExecutionRecord {
   admittedAt: number;
   updatedAt: number;
   /** Consecutive deliveries that ended without an acknowledgement. */
-  unacknowledgedDeliveries: number;
+  unacknowledgedDeliveryCount: number;
 }
 
 export type ExecutionAdmissionErrorCode =

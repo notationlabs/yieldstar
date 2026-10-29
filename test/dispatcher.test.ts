@@ -276,7 +276,7 @@ test("renews a lease so a delivery longer than one lease period completes with o
   expect(stats.delivered).toEqual(["long"]);
   expect(await runtime.executions.get("long")).toMatchObject({
     status: "completed",
-    unacknowledgedDeliveries: 0,
+    unacknowledgedDeliveryCount: 0,
   });
 });
 
@@ -322,7 +322,7 @@ test("releases the lease when a delivery replies retry, counting one unacknowled
   expect(release).toHaveBeenCalledTimes(1);
   expect(await runtime.executions.get("retry")).toMatchObject({
     status: "admitted",
-    unacknowledgedDeliveries: 1,
+    unacknowledgedDeliveryCount: 1,
   });
   // Released, not expired: claimable after the redelivery delay, well
   // before the lease would have expired.
@@ -360,7 +360,7 @@ test("waits a non-zero delay, never shorter than the last, before each redeliver
   for (let i = 1; i < delays.length; i++) {
     expect(delays[i]).toBeGreaterThanOrEqual(delays[i - 1]);
   }
-  expect((await runtime.executions.get("backoff"))?.unacknowledgedDeliveries).toBe(5);
+  expect((await runtime.executions.get("backoff"))?.unacknowledgedDeliveryCount).toBe(5);
 });
 
 test("counts both a retry reply and a later lease expiry", async () => {
@@ -388,7 +388,7 @@ test("counts both a retry reply and a later lease expiry", async () => {
   clock.now += DEFAULT_LEASE_DURATION;
   expect(await runtime.executions.get("both")).toMatchObject({
     status: "admitted",
-    unacknowledgedDeliveries: 2,
+    unacknowledgedDeliveryCount: 2,
   });
 });
 
@@ -407,7 +407,7 @@ test("resets the count when a delivery is acknowledged after several retries, so
   }
   expect(await runtime.executions.get("recovers")).toMatchObject({
     status: "suspended",
-    unacknowledgedDeliveries: 0,
+    unacknowledgedDeliveryCount: 0,
   });
 
   await runtime.executions.requestWake({ executionId: "recovers", wakeAt: clock.now });
@@ -441,7 +441,7 @@ test("leaves the lease to expire when the worker exits without replying, then de
   await dispatcher.drain();
   expect(deliver).toHaveBeenCalledTimes(2);
   // The expired lease counts as one unacknowledged delivery.
-  expect((await runtime.executions.get("exits"))?.unacknowledgedDeliveries).toBe(1);
+  expect((await runtime.executions.get("exits"))?.unacknowledgedDeliveryCount).toBe(1);
 });
 
 // Driver
@@ -481,7 +481,7 @@ test("ends a delivery as a retry when a step is already recorded with a differen
   });
   expect(await runtime.executions.get("conflict")).toMatchObject({
     status: "admitted",
-    unacknowledgedDeliveries: 1,
+    unacknowledgedDeliveryCount: 1,
   });
 
   clock.now += redeliveryDelay(1);

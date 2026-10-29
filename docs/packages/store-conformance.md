@@ -59,7 +59,7 @@ create() {
 
 ## Execution client suite
 
-`registerExecutionClientConformance` checks a runtime's `ExecutionClient` and fenced heap writes against RFC 001 and RFC 002: admission, wake merging, claims, acknowledgement and terminal outcomes; leases, renewal, release and the `running` status; the redelivery delay and `unacknowledgedDeliveries`; and fencing of heap writes, renewals, releases and acknowledgements against a stale holder. The suite passes a `clock` to `create`; build every runtime on it so the suite controls time, including lease expiry.
+`registerExecutionClientConformance` checks a runtime's `ExecutionClient` and fenced heap writes against RFC 001 and RFC 002: admission, wake merging, claims, acknowledgement and terminal outcomes; leases, renewal, release and the `running` status; the redelivery delay and `unacknowledgedDeliveryCount`; and fencing of heap writes, renewals, releases and acknowledgements against a stale holder. The suite passes a `clock` to `create`; build every runtime on it so the suite controls time, including lease expiry.
 
 The harness has two optional capabilities:
 

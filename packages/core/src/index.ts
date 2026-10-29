@@ -52,7 +52,7 @@ export {
   renewExecutionLease,
   requestExecutionWake,
   toExecutionRecord,
-  unacknowledgedDeliveriesAt,
+  unacknowledgedDeliveryCountAt,
 } from "./lib/execution-state";
 export type { DispatcherOptions } from "./lib/execution-dispatcher";
 export {

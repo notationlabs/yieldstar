@@ -271,7 +271,7 @@ test("an infrastructure error leaves the status unchanged and the execution is d
   await dispatcher.drain();
   // The rejection is a retry reply: the lease is released, unacknowledged.
   const record = await runtime.executions.get(executionId);
-  expect(record).toMatchObject({ status: "admitted", unacknowledgedDeliveries: 1 });
+  expect(record).toMatchObject({ status: "admitted", unacknowledgedDeliveryCount: 1 });
   expect(record?.outcome).toBeUndefined();
 
   // Not claimable again until the redelivery delay passes.

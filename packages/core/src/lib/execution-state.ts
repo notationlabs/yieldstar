@@ -53,9 +53,9 @@ export type ExecutionState = {
   /**
    * Consecutive leases that ended by release or by expiry and a later claim.
    * It does not include a held lease that has expired;
-   * `unacknowledgedDeliveriesAt` adds that one.
+   * `unacknowledgedDeliveryCountAt` adds that one.
    */
-  unacknowledgedDeliveries: number;
+  unacknowledgedDeliveryCount: number;
   /**
    * When a released execution may be claimed again. A held lease's delay is
    * measured from `leaseExpiresAt` instead.
@@ -75,9 +75,9 @@ export const REDELIVERY_DELAY_MAX = 300_000;
  * can be claimed again. Starts at `REDELIVERY_DELAY_BASE` and doubles with
  * each consecutive unacknowledged delivery, up to `REDELIVERY_DELAY_MAX`.
  */
-export function redeliveryDelay(unacknowledgedDeliveries: number): number {
-  if (unacknowledgedDeliveries <= 0) return 0;
-  const exponent = Math.min(unacknowledgedDeliveries - 1, 30);
+export function redeliveryDelay(unacknowledgedDeliveryCount: number): number {
+  if (unacknowledgedDeliveryCount <= 0) return 0;
+  const exponent = Math.min(unacknowledgedDeliveryCount - 1, 30);
   return Math.min(REDELIVERY_DELAY_BASE * 2 ** exponent, REDELIVERY_DELAY_MAX);
 }
 
@@ -197,7 +197,7 @@ export function createExecutionState(params: {
     claimedDueAt: null,
     leaseToken: 0,
     leaseExpiresAt: null,
-    unacknowledgedDeliveries: 0,
+    unacknowledgedDeliveryCount: 0,
     redeliverAt: null,
   };
 }
@@ -222,8 +222,8 @@ export function executionStatusAt(
  * Consecutive unacknowledged deliveries at `now`, counting a held lease that
  * has expired as ended.
  */
-export function unacknowledgedDeliveriesAt(state: ExecutionState, now: number) {
-  return state.unacknowledgedDeliveries + (hasExpiredLease(state, now) ? 1 : 0);
+export function unacknowledgedDeliveryCountAt(state: ExecutionState, now: number) {
+  return state.unacknowledgedDeliveryCount + (hasExpiredLease(state, now) ? 1 : 0);
 }
 
 export function toExecutionRecord(
@@ -242,7 +242,7 @@ export function toExecutionRecord(
       : {}),
     admittedAt: state.admittedAt,
     updatedAt: state.updatedAt,
-    unacknowledgedDeliveries: unacknowledgedDeliveriesAt(state, now),
+    unacknowledgedDeliveryCount: unacknowledgedDeliveryCountAt(state, now),
   };
 }
 
@@ -261,7 +261,7 @@ export function nextClaimAt(state: ExecutionState): number | null {
     if (due === null) return null;
     return Math.max(
       due,
-      state.leaseExpiresAt + redeliveryDelay(state.unacknowledgedDeliveries + 1)
+      state.leaseExpiresAt + redeliveryDelay(state.unacknowledgedDeliveryCount + 1)
     );
   }
   if (state.dueAt === null) return null;
@@ -318,8 +318,8 @@ export function claimExecution(
     state: {
       ...state,
       // Claiming over an expired lease ends it unacknowledged.
-      unacknowledgedDeliveries:
-        state.unacknowledgedDeliveries + (state.leaseExpiresAt !== null ? 1 : 0),
+      unacknowledgedDeliveryCount:
+        state.unacknowledgedDeliveryCount + (state.leaseExpiresAt !== null ? 1 : 0),
       // The lease covers the wakes due now, plus any an expired lease covered.
       claimedDueAt: earliest(state.dueAt, state.claimedDueAt),
       dueAt: null,
@@ -351,7 +351,7 @@ export function releaseExecutionLease(
   params: { lease: ExecutionLease; now: number }
 ): { state: ExecutionState; result: ExecutionReleaseResult } {
   if (!isLeaseCurrent(state, params.lease)) return { state, result: LOST };
-  const unacknowledgedDeliveries = state.unacknowledgedDeliveries + 1;
+  const unacknowledgedDeliveryCount = state.unacknowledgedDeliveryCount + 1;
   return {
     state: {
       ...state,
@@ -359,8 +359,8 @@ export function releaseExecutionLease(
       dueAt: earliest(state.dueAt, state.claimedDueAt),
       claimedDueAt: null,
       leaseExpiresAt: null,
-      unacknowledgedDeliveries,
-      redeliverAt: params.now + redeliveryDelay(unacknowledgedDeliveries),
+      unacknowledgedDeliveryCount,
+      redeliverAt: params.now + redeliveryDelay(unacknowledgedDeliveryCount),
     },
     result: { status: "released" },
   };
@@ -386,7 +386,7 @@ export function acknowledgeExecution(
   const ended = {
     claimedDueAt: null,
     leaseExpiresAt: null,
-    unacknowledgedDeliveries: 0,
+    unacknowledgedDeliveryCount: 0,
     redeliverAt: null,
     updatedAt: now,
   };

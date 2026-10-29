@@ -962,7 +962,7 @@ export function registerExecutionClientConformance({
         await claimOne(runtime, "running");
         expect(await runtime.executions.get("running")).toMatchObject({
           status: "running",
-          unacknowledgedDeliveries: 0,
+          unacknowledgedDeliveryCount: 0,
         });
       });
 
@@ -982,7 +982,7 @@ export function registerExecutionClientConformance({
         // the execution is delivered again, and the expiry counts.
         expect(await runtime.executions.get("expires")).toMatchObject({
           status: "running",
-          unacknowledgedDeliveries: 1,
+          unacknowledgedDeliveryCount: 1,
         });
       });
 
@@ -995,7 +995,7 @@ export function registerExecutionClientConformance({
         advance(LEASE);
         expect(await runtime.executions.get("never-acked")).toMatchObject({
           status: "admitted",
-          unacknowledgedDeliveries: 1,
+          unacknowledgedDeliveryCount: 1,
         });
       });
 
@@ -1010,7 +1010,7 @@ export function registerExecutionClientConformance({
         advance(LEASE);
         expect(await runtime.executions.get("was-suspended")).toMatchObject({
           status: "suspended",
-          unacknowledgedDeliveries: 1,
+          unacknowledgedDeliveryCount: 1,
         });
       });
 
@@ -1042,7 +1042,7 @@ export function registerExecutionClientConformance({
         ).toEqual({ status: "completed", result: "done" });
         expect(await runtime.executions.get("long")).toMatchObject({
           status: "completed",
-          unacknowledgedDeliveries: 0,
+          unacknowledgedDeliveryCount: 0,
         });
       });
 
@@ -1088,7 +1088,7 @@ export function registerExecutionClientConformance({
         });
         expect(await runtime.executions.get("expired-unclaimed")).toMatchObject({
           status: "running",
-          unacknowledgedDeliveries: 0,
+          unacknowledgedDeliveryCount: 0,
         });
         expect(await claim(runtime)).toEqual([]);
         expect(
@@ -1109,7 +1109,7 @@ export function registerExecutionClientConformance({
         });
         // Releasing acknowledges nothing: the status and outcome are unchanged.
         const released = await runtime.executions.get("released");
-        expect(released).toMatchObject({ status: "suspended", unacknowledgedDeliveries: 1 });
+        expect(released).toMatchObject({ status: "suspended", unacknowledgedDeliveryCount: 1 });
         expect(released!.outcome).toBeUndefined();
         expect(released!.updatedAt).toBe(before!.updatedAt);
         // The released lease is no longer current.
@@ -1182,7 +1182,7 @@ export function registerExecutionClientConformance({
         expect(await claim(runtime)).toEqual([]);
         expect(await runtime.executions.get("not-due")).toMatchObject({
           status: "suspended",
-          unacknowledgedDeliveries: 0,
+          unacknowledgedDeliveryCount: 0,
         });
       });
 
@@ -1239,7 +1239,7 @@ export function registerExecutionClientConformance({
         for (let attempt = 1; attempt <= 6; attempt++) {
           await runtime.executions.release({ lease });
           expect(await runtime.executions.get("retrying")).toMatchObject({
-            unacknowledgedDeliveries: attempt,
+            unacknowledgedDeliveryCount: attempt,
           });
           const releasedAt = clock.now;
           let next: ExecutionLease[];
@@ -1263,7 +1263,7 @@ export function registerExecutionClientConformance({
         await claimOne(runtime, "both");
         advance(LEASE);
         expect(await runtime.executions.get("both")).toMatchObject({
-          unacknowledgedDeliveries: 2,
+          unacknowledgedDeliveryCount: 2,
         });
         // The expired lease's redelivery waits the second delay after expiry.
         advance(redeliveryDelay(2) - 1);
@@ -1271,7 +1271,7 @@ export function registerExecutionClientConformance({
         advance(1);
         await claimOne(runtime, "both");
         expect(await runtime.executions.get("both")).toMatchObject({
-          unacknowledgedDeliveries: 2,
+          unacknowledgedDeliveryCount: 2,
         });
       });
 
@@ -1287,13 +1287,13 @@ export function registerExecutionClientConformance({
           advance(redeliveryDelay(i));
         }
         expect(await runtime.executions.get("recovers")).toMatchObject({
-          unacknowledgedDeliveries: 3,
+          unacknowledgedDeliveryCount: 3,
         });
         const lease = await claimOne(runtime, "recovers");
         await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
         expect(await runtime.executions.get("recovers")).toMatchObject({
           status: "suspended",
-          unacknowledgedDeliveries: 0,
+          unacknowledgedDeliveryCount: 0,
         });
         await runtime.executions.requestWake({ executionId: "recovers", wakeAt: clock.now });
         await claimOne(runtime, "recovers");
@@ -1554,7 +1554,7 @@ export function registerExecutionClientConformance({
         expect(await claim(runtime)).toEqual([]);
         expect(await runtime.executions.get("stale-wake")).toMatchObject({
           status: "suspended",
-          unacknowledgedDeliveries: 0,
+          unacknowledgedDeliveryCount: 0,
         });
 
         // Against a terminal execution, a stale wake is ignored.

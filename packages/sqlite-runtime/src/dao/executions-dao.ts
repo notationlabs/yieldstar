@@ -15,7 +15,7 @@ class ExecutionRow {
   claimed_due_at!: number | null;
   lease_token!: number;
   lease_expires_at!: number | null;
-  unacknowledged_deliveries!: number;
+  unacknowledged_delivery_count!: number;
   redeliver_at!: number | null;
   next_claim_at!: number | null;
 }
@@ -52,7 +52,7 @@ export class ExecutionsDao {
         claimed_due_at INTEGER,
         lease_token INTEGER NOT NULL DEFAULT 0,
         lease_expires_at INTEGER,
-        unacknowledged_deliveries INTEGER NOT NULL DEFAULT 0,
+        unacknowledged_delivery_count INTEGER NOT NULL DEFAULT 0,
         redeliver_at INTEGER,
         next_claim_at INTEGER
       );
@@ -93,12 +93,12 @@ export class ExecutionsDao {
         `INSERT INTO executions (
            execution_id, workflow_id, params, context, status, outcome,
            admitted_at, updated_at, due_at, claimed_due_at, lease_token,
-           lease_expires_at, unacknowledged_deliveries, redeliver_at,
+           lease_expires_at, unacknowledged_delivery_count, redeliver_at,
            next_claim_at
          ) VALUES (
            $executionId, $workflowId, $params, $context, $status, $outcome,
            $admittedAt, $updatedAt, $dueAt, $claimedDueAt, $leaseToken,
-           $leaseExpiresAt, $unacknowledgedDeliveries, $redeliverAt,
+           $leaseExpiresAt, $unacknowledgedDeliveryCount, $redeliverAt,
            $nextClaimAt
          )
          ON CONFLICT(execution_id) DO NOTHING`
@@ -122,7 +122,7 @@ export class ExecutionsDao {
            claimed_due_at = $claimedDueAt,
            lease_token = $leaseToken,
            lease_expires_at = $leaseExpiresAt,
-           unacknowledged_deliveries = $unacknowledgedDeliveries,
+           unacknowledged_delivery_count = $unacknowledgedDeliveryCount,
            redeliver_at = $redeliverAt,
            next_claim_at = $nextClaimAt
          WHERE execution_id = $executionId`
@@ -145,7 +145,7 @@ function toState(row: ExecutionRow): ExecutionState {
     claimedDueAt: toNumberOrNull(row.claimed_due_at),
     leaseToken: Number(row.lease_token),
     leaseExpiresAt: toNumberOrNull(row.lease_expires_at),
-    unacknowledgedDeliveries: Number(row.unacknowledged_deliveries),
+    unacknowledgedDeliveryCount: Number(row.unacknowledged_delivery_count),
     redeliverAt: toNumberOrNull(row.redeliver_at),
   };
 }
@@ -164,7 +164,7 @@ function toBindings(state: ExecutionState) {
     $claimedDueAt: state.claimedDueAt,
     $leaseToken: state.leaseToken,
     $leaseExpiresAt: state.leaseExpiresAt,
-    $unacknowledgedDeliveries: state.unacknowledgedDeliveries,
+    $unacknowledgedDeliveryCount: state.unacknowledgedDeliveryCount,
     $redeliverAt: state.redeliverAt,
     $nextClaimAt: nextClaimAt(state),
   };
