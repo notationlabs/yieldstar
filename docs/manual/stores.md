@@ -27,6 +27,22 @@ const ConversationStore = defineStore(
 
 The runtime validates state against the schema when a store is created, and again on every update before it commits. So a bad write fails upfront, rather than leaving invalid state behind.
 
+### Durable state
+
+After the schema accepts a state, the runtime checks that the schema's output is a durable value (see [Step values](./steps.md#step-values)). A state that holds a `Date`, a `Map` or a class instance makes its store step throw `WorkflowValueError` with the code `INVALID_STEP_VALUE`, and the store is left unchanged: no new version, no wakes. The same applies to `initial`, which then creates no store, and to the value a `take` selects, which then claims nothing.
+
+```ts
+try {
+  yield* store.update("touch", (draft) => {
+    draft.updatedAt = new Date(); // ← not durable
+  });
+} catch (err) {
+  // WorkflowValueError: INVALID_STEP_VALUE, stepKey "touch". The store's version is unchanged.
+}
+```
+
+Store state may hold `undefined` properties, which keep their keys, and errors, which keep their registered class.
+
 ## Creating and opening a store
 
 `step.store` returns a handle. If the store does not exist yet, the runtime creates it from `initial`; if it does, the existing store is returned and `initial` is ignored.

@@ -34,7 +34,7 @@ const exec = await sdk.trigger({
 });
 ```
 
-When the server rejects the admission, `trigger` throws an `ExecutionAdmissionError` with the server's `code`: `EXECUTION_ID_CONFLICT` for a `409` (the supplied `executionId` is already in use) or `INVALID_EXECUTION_EVENT` for a `400` (the event cannot round-trip through JSON; see [Local SDK](./sdk-local.md#trigger-event-shape)). Any other non-2xx response throws the response's `statusText`.
+When the server rejects the admission, `trigger` throws an `ExecutionAdmissionError` with the server's `code`: `EXECUTION_ID_CONFLICT` for a `409` (the supplied `executionId` is already in use) or `INVALID_EXECUTION_EVENT` for a `400` (the event is not a durable value; see [Local SDK](./sdk-local.md#trigger-event-shape)). `trigger` throws `INVALID_EXECUTION_EVENT` without sending a request when its own params or context are not durable. Any other non-2xx response throws the response's `statusText`.
 
 ## `exec.ack()`
 
@@ -52,7 +52,7 @@ Posts to `/events` with the `executionId` and blocks until the execution record 
 const result = await exec.waitForResult();
 ```
 
-If the record is `failed`, `waitForResult` deserializes the recorded error and re-throws it with the original stack trace preserved.
+The SDK sends the event and reads the response with the durable value codec, so `undefined` properties keep their keys and errors keep their shape across HTTP. If the record is `failed`, `waitForResult` throws the recorded error as its registered class, with its original `stack`, `code` and `cause`.
 
 ## Trigger event shape
 

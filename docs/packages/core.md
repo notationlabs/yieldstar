@@ -200,7 +200,7 @@ So `{ a: undefined }` and `{}` stay distinct, and only a tagged value decodes as
 
 An error keeps its `name`, `message`, a string `stack` and `code`, its own `cause` (encoded recursively), a non-enumerable `errors` array such as `AggregateError`'s, and its own enumerable properties whose values are durable, under `fields`. Properties that are not durable are left out rather than rejecting the error. `encodeThrownValue(value)` encodes a thrown value as thrown when it is durable, and as `Error(String(value))` otherwise.
 
-`decode` revives an error as the class registered under its `name` with `registerErrorClass(name, errorClass)`, setting its prototype and fields without calling the constructor, and as an `Error` with the same name, message, code, cause and fields when no class is registered. Registration is per process. `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`, `AggregateError`, `WorkflowStartError` and `WorkflowValueError` are registered by default.
+`decode` revives an error as the class registered under its `name` with `registerErrorClass(name, errorClass)`, setting its prototype and fields without calling the constructor, and as an `Error` with the same name, message, code, cause and fields when no class is registered. Registration is per process. `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`, `AggregateError`, `WorkflowStartError`, `WorkflowValueError`, `StoreValidationError` and `StoreNotFoundError` are registered by default, and `yieldstar` registers `RetryableError`.
 
 `WorkflowValueError` (`code: "INVALID_STEP_VALUE" | "STEP_SCHEMA_INVALID"`, `stepKey`) reports a value the codec or a step's schema rejects. A completed outcome whose result the codec rejects is recorded as `failed` with `INVALID_STEP_VALUE` and `stepKey` `WORKFLOW_RESULT_STEP_KEY` (`"$$workflow-result$$"`).
 
@@ -328,7 +328,7 @@ An implementation must uphold these contracts:
 - `registerWaiter` compares the store's current instance and version with the waiter; if either has moved on, it wakes the waiter immediately rather than leaving it to sleep through a write that already happened.
 - A commit that satisfies a waiter requests a wake for the waiter's `executionId`. Once the commit is durable, that wake is durable too. A waiter carries no copy of the workflow event.
 - A waiter stays registered until the heap write that records its step's result deletes it.
-- Schema failures throw `StoreValidationError` and a missing store throws `StoreNotFoundError`. Workflow code can catch these two; any other error a client throws is treated as an infrastructure error and abandons the delivery.
+- Schema failures throw `StoreValidationError` and a missing store throws `StoreNotFoundError`. A state, initial state or take selection that is not a durable value throws `WorkflowValueError` (`INVALID_STEP_VALUE`) before anything commits; `validateStoreState` makes this check after the schema. Workflow code can catch these three; any other error a client throws is treated as an infrastructure error and abandons the delivery.
 
 ## `CasStoreClient` (abstract class)
 

@@ -62,7 +62,7 @@ const result = await sdk.triggerAndWait({
 });
 ```
 
-The promise settles from the execution record, not from an in-memory event, so it settles even if the worker that ran the execution restarted. If the record is `failed`, the promise rejects with the recorded error. The record keeps at least the error's `name` and `message` (plus `stack` and a string `code`), not its class.
+The promise settles from the execution record, not from an in-memory event, so it settles even if the worker that ran the execution restarted. If the record is `failed`, the promise rejects with the recorded error. The error keeps its `name`, `message`, `stack`, a string `code`, its `cause` and its durable fields, and it is revived as its class when that class is registered with `registerErrorClass` (see [Errors in step records](./steps.md#errors-in-step-records)).
 
 ## Trigger event shape
 
@@ -73,4 +73,4 @@ The promise settles from the execution record, not from an in-memory event, so i
 | `executionId` | `string`              | No                       | Custom execution ID. The runtime chooses one if omitted      |
 | `context`     | `Record<string, any>` | No                       | Becomes the read-only `event.context` map                    |
 
-Every delivery reads `params` and `context` back from the record exactly as they were admitted. Admission therefore rejects values that JSON would change: `Date`s, class instances, `undefined` properties, `NaN` and `Infinity`, `-0`, `bigint`, sparse arrays and circular references. Pass plain JSON data, such as an ISO string instead of a `Date`.
+Every delivery reads `params` and `context` back from the record exactly as they were admitted, so both must be durable values (see [Step values](./steps.md#step-values)). Admission rejects `Date`s, class instances, `NaN` and `Infinity`, `bigint`, sparse arrays and circular references with `INVALID_EXECUTION_EVENT`. `undefined` properties and errors are accepted and read back unchanged. Pass an ISO string instead of a `Date`.

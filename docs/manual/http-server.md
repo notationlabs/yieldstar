@@ -52,7 +52,9 @@ const result = await exec.waitForResult();
 | Endpoint        | Body                                                 | Responses                                                                                                                         |
 | --------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /trigger` | `{ workflowId, params?, context?, executionId? }`    | `202 { executionId }` once admission commits; `409 { code: "EXECUTION_ID_CONFLICT" }`; `400 { code: "INVALID_EXECUTION_EVENT" }` |
-| `POST /events`  | `{ executionId }`                                    | Blocks until the record is terminal. `200` with the result, `500` with the serialized recorded error, `404` for an unknown ID      |
+| `POST /events`  | `{ executionId }`                                    | Blocks until the record is terminal. `200` with the encoded result, `500` with the encoded recorded error, `404` for an unknown ID |
+
+Both routes read and write bodies with the durable value codec. Plain JSON is a valid encoding, so any HTTP client can call `/trigger`, while the HTTP SDK can also send `undefined` values and errors, which the codec writes as objects tagged with a `$type` key. A plain object with its own `$type` key must be sent wrapped as `{ "$type": "object", "value": ... }`.
 
 `/trigger` responds `202` before any workflow code runs. When the body omits `executionId`, the runtime chooses one and the response carries it.
 
@@ -83,4 +85,4 @@ createRoutes({ runtime, logger, middleware: [auth] });
 
 Each middleware receives four arguments: `req` (the incoming `Request`), `event` (a `MiddlewareEvent` whose `context` map is mutable at this stage, and whose `executionId` is `undefined` when the client lets the runtime choose one), `next` (a function that forwards to the next middleware or the final handler), and `logger`.
 
-Once every middleware has run, the context map is frozen and admitted with the event. Every delivery reads it back from the execution record as a read-only `Map` available through `event.context`, so context values must be plain JSON data.
+Once every middleware has run, the context map is frozen and admitted with the event. Every delivery reads it back from the execution record as a read-only `Map` available through `event.context`, so context values must be durable values (see [Step values](./steps.md#step-values)).

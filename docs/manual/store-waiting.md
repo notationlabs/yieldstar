@@ -35,7 +35,7 @@ Two more rules follow from waking the execution rather than queueing a copy of i
 - **Waiters persist until their step finishes.** The runtime deletes a waiter in the same write that records its step's result, not when the wake fires. If the delivery that a wake starts crashes before the step finishes, the waiter is still registered, so a later matching write still wakes the execution.
 - **Many wakes collapse into one delivery.** Wakes are state on the execution record, so ten writes that satisfy the same waiter before the dispatcher claims it produce one delivery, not ten. A store wake and a pending `step.delay` for the same execution also merge, and the execution is delivered at the earlier time.
 
-Selectors must be synchronous and pure: no network, no timers, no mutation (the proxy throws if you try). The selected value is persisted as the step result, so it must be serialisable.
+Selectors must be synchronous and pure: no network, no timers, no mutation (the proxy throws if you try). The selected value is recorded as the step result, so it must be a durable value (see [Step values](./steps.md#step-values)); otherwise the step throws `WorkflowValueError` (`INVALID_STEP_VALUE`).
 
 ## `store.take`
 
