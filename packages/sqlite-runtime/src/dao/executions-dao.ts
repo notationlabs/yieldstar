@@ -1,4 +1,4 @@
-import type { ExecutionState, ExecutionStatus } from "@yieldstar/core";
+import type { ExecutionState } from "@yieldstar/core";
 import { nextClaimAt } from "@yieldstar/core";
 import type { SqliteDriver } from "../sqlite-driver";
 
@@ -7,14 +7,16 @@ class ExecutionRow {
   workflow_id!: string;
   params!: string;
   context!: string;
-  status!: ExecutionStatus;
+  status!: ExecutionState["status"];
   outcome!: string | null;
   admitted_at!: number;
   updated_at!: number;
   due_at!: number | null;
-  claim_token!: string | null;
   claimed_due_at!: number | null;
-  claim_expires_at!: number | null;
+  lease_token!: number;
+  lease_expires_at!: number | null;
+  unacknowledged_deliveries!: number;
+  redeliver_at!: number | null;
   next_claim_at!: number | null;
 }
 
@@ -47,9 +49,11 @@ export class ExecutionsDao {
         admitted_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         due_at INTEGER,
-        claim_token TEXT,
         claimed_due_at INTEGER,
-        claim_expires_at INTEGER,
+        lease_token INTEGER NOT NULL DEFAULT 0,
+        lease_expires_at INTEGER,
+        unacknowledged_deliveries INTEGER NOT NULL DEFAULT 0,
+        redeliver_at INTEGER,
         next_claim_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_executions_next_claim_at
@@ -66,15 +70,19 @@ export class ExecutionsDao {
     return row ? toState(row) : undefined;
   }
 
-  // `now` is a millisecond Unix timestamp from the runtime clock
-  getClaimableIds(now: number) {
+  /**
+   * Up to `limit` claimable execution IDs, earliest due first. `now` is a
+   * millisecond Unix timestamp from the runtime clock.
+   */
+  getClaimableIds(now: number, limit: number) {
     return this.db
       .query<ExecutionIdRow>(
         `SELECT execution_id FROM executions
          WHERE next_claim_at IS NOT NULL AND next_claim_at <= $now
-         ORDER BY next_claim_at, execution_id`
+         ORDER BY next_claim_at, execution_id
+         LIMIT $limit`
       )
-      .all({ $now: now })
+      .all({ $now: now, $limit: limit })
       .map((row) => row.execution_id);
   }
 
@@ -84,12 +92,14 @@ export class ExecutionsDao {
       .query(
         `INSERT INTO executions (
            execution_id, workflow_id, params, context, status, outcome,
-           admitted_at, updated_at, due_at, claim_token, claimed_due_at,
-           claim_expires_at, next_claim_at
+           admitted_at, updated_at, due_at, claimed_due_at, lease_token,
+           lease_expires_at, unacknowledged_deliveries, redeliver_at,
+           next_claim_at
          ) VALUES (
            $executionId, $workflowId, $params, $context, $status, $outcome,
-           $admittedAt, $updatedAt, $dueAt, $claimToken, $claimedDueAt,
-           $claimExpiresAt, $nextClaimAt
+           $admittedAt, $updatedAt, $dueAt, $claimedDueAt, $leaseToken,
+           $leaseExpiresAt, $unacknowledgedDeliveries, $redeliverAt,
+           $nextClaimAt
          )
          ON CONFLICT(execution_id) DO NOTHING`
       )
@@ -109,9 +119,11 @@ export class ExecutionsDao {
            admitted_at = $admittedAt,
            updated_at = $updatedAt,
            due_at = $dueAt,
-           claim_token = $claimToken,
            claimed_due_at = $claimedDueAt,
-           claim_expires_at = $claimExpiresAt,
+           lease_token = $leaseToken,
+           lease_expires_at = $leaseExpiresAt,
+           unacknowledged_deliveries = $unacknowledgedDeliveries,
+           redeliver_at = $redeliverAt,
            next_claim_at = $nextClaimAt
          WHERE execution_id = $executionId`
       )
@@ -130,9 +142,11 @@ function toState(row: ExecutionRow): ExecutionState {
     admittedAt: Number(row.admitted_at),
     updatedAt: Number(row.updated_at),
     dueAt: toNumberOrNull(row.due_at),
-    claimToken: row.claim_token,
     claimedDueAt: toNumberOrNull(row.claimed_due_at),
-    claimExpiresAt: toNumberOrNull(row.claim_expires_at),
+    leaseToken: Number(row.lease_token),
+    leaseExpiresAt: toNumberOrNull(row.lease_expires_at),
+    unacknowledgedDeliveries: Number(row.unacknowledged_deliveries),
+    redeliverAt: toNumberOrNull(row.redeliver_at),
   };
 }
 
@@ -147,9 +161,11 @@ function toBindings(state: ExecutionState) {
     $admittedAt: state.admittedAt,
     $updatedAt: state.updatedAt,
     $dueAt: state.dueAt,
-    $claimToken: state.claimToken,
     $claimedDueAt: state.claimedDueAt,
-    $claimExpiresAt: state.claimExpiresAt,
+    $leaseToken: state.leaseToken,
+    $leaseExpiresAt: state.leaseExpiresAt,
+    $unacknowledgedDeliveries: state.unacknowledgedDeliveries,
+    $redeliverAt: state.redeliverAt,
     $nextClaimAt: nextClaimAt(state),
   };
 }

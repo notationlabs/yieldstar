@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import type { StandardSchemaV1 } from "yieldstar";
 import { testSchema } from "@yieldstar/test-utils";
+import { DEFAULT_LEASE_DURATION, waitForExecutionOutcome } from "@yieldstar/core";
 import { createSdk } from "./sdk";
 import { defineStore, workflow } from "yieldstar";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -867,22 +868,33 @@ test("deleteFrom replay returns its committed result without deleting a new inst
     initial: { messages: [], status: "idle" },
   });
 
-  // These earlier workflow steps were durably recorded before the deletion.
-  await sdk.heapClient.writeStep({
+  // These earlier workflow steps were durably recorded before the deletion,
+  // by a delivery that held the execution's lease.
+  await sdk.runtime.executions.admit({
+    workflowId: "workflow",
     executionId,
+    params: undefined,
+    context: new Map(),
+  });
+  const [lease] = await sdk.runtime.executions.claimDue({
+    limit: 1,
+    duration: DEFAULT_LEASE_DURATION,
+  });
+  await sdk.heapClient.writeStep({
+    lease,
     stepKey: `store:${ConversationStore.name}:${storeId}`,
     stepAttempt: 0,
-    stepDone: true,
+    done: true,
     stepResponseJson: JSON.stringify({
       type: "step-result",
       result: { storeName: ConversationStore.name, storeId },
     }),
   });
   await sdk.heapClient.writeStep({
-    executionId,
+    lease,
     stepKey: "delete-snapshot",
     stepAttempt: 0,
-    stepDone: true,
+    done: true,
     stepResponseJson: JSON.stringify({
       type: "step-result",
       result: snapshot,
@@ -904,11 +916,16 @@ test("deleteFrom replay returns its committed result without deleting a new inst
   });
   expect(recreated.instanceId).not.toBe(snapshot.instanceId);
 
-  const replayed = await sdk.triggerAndWait({
-    workflowId: "workflow",
-    executionId,
+  // End that delivery before it records the deletion; the next one replays.
+  await sdk.runtime.executions.acknowledge({
+    lease,
+    outcome: { status: "suspended", wakeAt: sdk.runtime.clock() },
   });
-  expect(replayed).toEqual({ deleted: true });
+  sdk.dispatcher.start();
+  const replayed = await waitForExecutionOutcome(sdk.runtime.executions, executionId, {
+    pollInterval: 1,
+  });
+  expect(replayed).toEqual({ status: "completed", result: { deleted: true } });
   expect(await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: storeId,

@@ -57,6 +57,21 @@ export class StepResponsesDao {
     return result;
   }
 
+  getStepResponse(executionId: string, stepKey: string, stepAttempt: number) {
+    return this.db
+      .query<StepReponseRow>(
+        `SELECT * FROM step_responses
+         WHERE execution_id = $executionId
+         AND step_key = $stepKey
+         AND step_attempt = $stepAttempt`
+      )
+      .get({
+        $executionId: executionId,
+        $stepKey: stepKey,
+        $stepAttempt: stepAttempt,
+      });
+  }
+
   insertStepResponse(
     executionId: string,
     stepKey: string,

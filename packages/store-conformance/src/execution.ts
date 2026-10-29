@@ -1,6 +1,8 @@
 import {
+  DEFAULT_LEASE_DURATION,
   defineStore,
-  REDELIVERY_TIMEOUT,
+  redeliveryDelay,
+  type ExecutionLease,
   type Runtime,
   type StandardSchemaV1,
   type StoreWaiter,
@@ -8,9 +10,10 @@ import {
 import { describe, expect, test } from "vitest";
 
 /**
- * Runtime-adapter conformance for `ExecutionClient` (RFC 001). Time comes from
- * the clock the suite passes to `create`, so due times and redelivery
- * timeouts are deterministic. Construct the runtime with that clock.
+ * Runtime-adapter conformance for `ExecutionClient` and fenced heap writes
+ * (RFC 001 and RFC 002). Time comes from the clock the suite passes to
+ * `create`, so due times, lease expiry and redelivery delays are
+ * deterministic. Construct the runtime with that clock.
  */
 
 export type ExecutionConformanceHarnessOptions = {
@@ -20,6 +23,11 @@ export type ExecutionConformanceHarnessOptions = {
 /** A clean runtime under test, built on the suite's clock. */
 export type ExecutionConformanceHarness = {
   runtime: Runtime;
+  /**
+   * Creates another runtime sharing the same backend, as another process
+   * would. Cases that need one fall back to `runtime` when it is absent.
+   */
+  createPeer?(): Runtime | Promise<Runtime>;
   /** Opens the same durable backend in a new runtime, as after a restart. */
   restart?(): Runtime | Promise<Runtime>;
   dispose?(): void | Promise<void>;
@@ -33,6 +41,16 @@ export type ExecutionConformanceOptions = {
 };
 
 const START = 1_000_000;
+
+/** The lease duration the suite claims with. */
+const LEASE = DEFAULT_LEASE_DURATION;
+
+/**
+ * How long after a claim an unrenewed, unacknowledged lease leaves its
+ * execution claimable again: the lease expires, then the first redelivery
+ * delay passes.
+ */
+const REDELIVER_AFTER = LEASE + redeliveryDelay(1);
 
 type TestContext = {
   runtime: Runtime;
@@ -130,43 +148,48 @@ export function registerExecutionClientConformance({
     return executionId;
   }
 
+  /** Claims every due execution with the suite's lease duration. */
+  function claim(runtime: Runtime, limit = 100) {
+    return runtime.executions.claimDue({ limit, duration: LEASE });
+  }
+
   async function claimOne(runtime: Runtime, executionId: string) {
-    const deliveries = await runtime.executions.claimDue();
-    expect(deliveries.map((d) => d.executionId)).toEqual([executionId]);
-    return deliveries[0];
+    const leases = await claim(runtime);
+    expect(leases.map((d) => d.executionId)).toEqual([executionId]);
+    return leases[0];
   }
 
   async function claimedIds(runtime: Runtime) {
-    return (await runtime.executions.claimDue()).map((d) => d.executionId).sort();
+    return (await claim(runtime)).map((d) => d.executionId).sort();
   }
 
   /** Claims every due execution and acknowledges each as suspended. */
   async function drain(runtime: Runtime) {
-    const deliveries = await runtime.executions.claimDue();
-    for (const delivery of deliveries) {
-      await runtime.executions.acknowledge({ delivery, outcome: { status: "suspended" } });
+    const leases = await claim(runtime);
+    for (const lease of leases) {
+      await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
     }
-    return deliveries.map((d) => d.executionId).sort();
+    return leases.map((d) => d.executionId).sort();
   }
 
   /** Admits an execution and acknowledges its admission delivery as suspended. */
   async function admitSuspended(runtime: Runtime, executionId: string) {
     await admit(runtime, executionId);
-    const delivery = await claimOne(runtime, executionId);
+    const lease = await claimOne(runtime, executionId);
     expect(
-      await runtime.executions.acknowledge({ delivery, outcome: { status: "suspended" } })
+      await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } })
     ).toEqual({ status: "suspended" });
     return executionId;
   }
 
   async function admitCompleted(runtime: Runtime, executionId: string, result: unknown) {
     await admit(runtime, executionId);
-    const delivery = await claimOne(runtime, executionId);
+    const lease = await claimOne(runtime, executionId);
     await runtime.executions.acknowledge({
-      delivery,
+      lease,
       outcome: { status: "completed", result },
     });
-    return delivery;
+    return lease;
   }
 
   function waiter(executionId: string, instanceId: string, sinceVersion: number): StoreWaiter {
@@ -243,9 +266,9 @@ export function registerExecutionClientConformance({
 
       it("keeps the ID reserved after a delivery fails", async ({ runtime, advance }) => {
         await admit(runtime, "fails");
-        const delivery = await claimOne(runtime, "fails");
+        const lease = await claimOne(runtime, "fails");
         await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "failed", error: new Error("boom") },
         });
         expect(
@@ -260,7 +283,7 @@ export function registerExecutionClientConformance({
         // An unacknowledged delivery (an infrastructure failure) keeps it too.
         await admit(runtime, "crashes");
         await claimOne(runtime, "crashes");
-        advance(REDELIVERY_TIMEOUT);
+        advance(REDELIVER_AFTER);
         expect(
           await runtime.executions.admit({
             executionId: "crashes",
@@ -352,8 +375,9 @@ export function registerExecutionClientConformance({
         expect(bare!.context.size).toBe(0);
       });
 
-      it("hands out deliveries that name the execution, not a copy of its event", async ({
+      it("hands out leases that name the execution, not a copy of its event", async ({
         runtime,
+        clock,
       }) => {
         await runtime.executions.admit({
           executionId: "delivery",
@@ -361,13 +385,14 @@ export function registerExecutionClientConformance({
           params: { orderId: 42 },
           context: new Map([["tenant", "acme"]]),
         });
-        const [delivery] = await runtime.executions.claimDue();
-        expect(Object.keys(delivery).sort()).toEqual(["executionId", "token"]);
-        expect(delivery.executionId).toBe("delivery");
-        expect(typeof delivery.token).toBe("string");
+        const [lease] = await claim(runtime);
+        expect(Object.keys(lease).sort()).toEqual(["executionId", "expiresAt", "token"]);
+        expect(lease.executionId).toBe("delivery");
+        expect(typeof lease.token).toBe("number");
+        expect(lease.expiresAt).toBe(clock.now + LEASE);
 
         // The worker reads the event from the record.
-        const record = await runtime.executions.get(delivery.executionId);
+        const record = await runtime.executions.get(lease.executionId);
         expect(record).toMatchObject({
           workflowId: "charge-order",
           params: { orderId: 42 },
@@ -406,7 +431,7 @@ export function registerExecutionClientConformance({
             code: "INVALID_EXECUTION_EVENT",
           });
           expect(await runtime.executions.get("invalid")).toBeUndefined();
-          expect(await runtime.executions.claimDue()).toEqual([]);
+          expect(await claim(runtime)).toEqual([]);
           // The ID was not reserved.
           await admit(runtime, "invalid");
         });
@@ -453,7 +478,7 @@ export function registerExecutionClientConformance({
         await runtime.executions.requestWake({ executionId: "earliest", wakeAt: clock.now + 100 });
         await runtime.executions.requestWake({ executionId: "earliest", wakeAt: clock.now + 300 });
         advance(99);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         expect(await claimedIds(runtime)).toEqual(["earliest"]);
       });
@@ -464,24 +489,24 @@ export function registerExecutionClientConformance({
         advance,
       }) => {
         await admit(runtime, "during");
-        const delivery = await claimOne(runtime, "during");
+        const lease = await claimOne(runtime, "during");
         await runtime.executions.requestWake({ executionId: "during", wakeAt: clock.now + 50 });
-        await runtime.executions.acknowledge({ delivery, outcome: { status: "suspended" } });
+        await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
         advance(49);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         expect(await claimedIds(runtime)).toEqual(["during"]);
       });
 
       it("makes a suspended delivery due at its wakeAt", async ({ runtime, clock, advance }) => {
         await admit(runtime, "delay");
-        const delivery = await claimOne(runtime, "delay");
+        const lease = await claimOne(runtime, "delay");
         await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "suspended", wakeAt: clock.now + 500 },
         });
         advance(499);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         expect(await claimedIds(runtime)).toEqual(["delay"]);
       });
@@ -492,14 +517,14 @@ export function registerExecutionClientConformance({
         advance,
       }) => {
         await admit(runtime, "race");
-        const delivery = await claimOne(runtime, "race");
+        const lease = await claimOne(runtime, "race");
         await runtime.executions.requestWake({ executionId: "race", wakeAt: clock.now + 100 });
         await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "suspended", wakeAt: clock.now + 500 },
         });
         advance(99);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         expect(await claimedIds(runtime)).toEqual(["race"]);
       });
@@ -509,8 +534,8 @@ export function registerExecutionClientConformance({
         advance,
       }) => {
         await admitSuspended(runtime, "idle");
-        advance(REDELIVERY_TIMEOUT * 10);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
         expect(await runtime.executions.get("idle")).toMatchObject({ status: "suspended" });
       });
 
@@ -522,20 +547,20 @@ export function registerExecutionClientConformance({
         await admit(runtime, "paused");
         const first = await claimOne(runtime, "paused");
         await runtime.executions.acknowledge({
-          delivery: first,
+          lease: first,
           outcome: { status: "suspended", wakeAt: clock.now + 100 },
         });
         advance(100);
         const second = await claimOne(runtime, "paused");
         // The worker crashes: no acknowledgement.
-        advance(REDELIVERY_TIMEOUT - 1);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        advance(REDELIVER_AFTER - 1);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         const third = await claimOne(runtime, "paused");
-        expect(third.token).not.toBe(second.token);
+        expect(third.token).toBeGreaterThan(second.token);
         expect(
           await runtime.executions.acknowledge({
-            delivery: third,
+            lease: third,
             outcome: { status: "completed", result: "done" },
           })
         ).toEqual({ status: "completed", result: "done" });
@@ -548,12 +573,12 @@ export function registerExecutionClientConformance({
       }) => {
         await admitSuspended(runtime, "past-due");
         await runtime.executions.requestWake({ executionId: "past-due", wakeAt: clock.now - 500 });
-        const delivery = await claimOne(runtime, "past-due");
+        const lease = await claimOne(runtime, "past-due");
         await runtime.executions.requestWake({ executionId: "past-due", wakeAt: clock.now + 300 });
-        await runtime.executions.acknowledge({ delivery, outcome: { status: "suspended" } });
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
+        expect(await claim(runtime)).toEqual([]);
         advance(299);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         expect(await claimedIds(runtime)).toEqual(["past-due"]);
       });
@@ -569,22 +594,22 @@ export function registerExecutionClientConformance({
         expect(result).toMatchObject({ status: "rejected", code: "EXECUTION_NOT_FOUND" });
         expect(result.status === "rejected" && typeof result.message).toBe("string");
         expect(await runtime.executions.get("ghost")).toBeUndefined();
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         await admit(runtime, "ghost");
       });
 
-      it("does not return a claimed delivery again before the redelivery timeout", async ({
+      it("does not return a leased execution again before its lease expires", async ({
         runtime,
         clock,
         advance,
       }) => {
         await admit(runtime, "claimed");
         await claimOne(runtime, "claimed");
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         // New wakes do not bypass the claim either.
         await runtime.executions.requestWake({ executionId: "claimed", wakeAt: clock.now });
-        advance(REDELIVERY_TIMEOUT - 1);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        advance(REDELIVER_AFTER - 1);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         expect(await claimedIds(runtime)).toEqual(["claimed"]);
       });
@@ -595,24 +620,24 @@ export function registerExecutionClientConformance({
       }) => {
         await admit(runtime, "lost");
         const first = await claimOne(runtime, "lost");
-        advance(REDELIVERY_TIMEOUT);
-        const second = await claimOne(runtime, "lost");
-        expect(second.token).not.toBe(first.token);
+        advance(REDELIVER_AFTER);
         expect(await runtime.executions.get("lost")).toMatchObject({ status: "admitted" });
+        const second = await claimOne(runtime, "lost");
+        expect(second.token).toBeGreaterThan(first.token);
         await runtime.executions.acknowledge({
-          delivery: second,
+          lease: second,
           outcome: { status: "suspended" },
         });
-        advance(REDELIVERY_TIMEOUT * 10);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
       });
 
       it("ignores a wake for a terminal execution", async ({ runtime, clock, advance }) => {
         await admitCompleted(runtime, "done", 1);
         await admit(runtime, "failed");
-        const delivery = await claimOne(runtime, "failed");
+        const lease = await claimOne(runtime, "failed");
         await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "failed", error: new Error("boom") },
         });
         for (const executionId of ["done", "failed"]) {
@@ -620,8 +645,8 @@ export function registerExecutionClientConformance({
             await runtime.executions.requestWake({ executionId, wakeAt: clock.now })
           ).toEqual({ status: "ignored" });
         }
-        advance(REDELIVERY_TIMEOUT * 10);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
       });
 
       it("clears pending wakes when an execution reaches a terminal status", async ({
@@ -630,14 +655,14 @@ export function registerExecutionClientConformance({
         advance,
       }) => {
         await admit(runtime, "finishing");
-        const delivery = await claimOne(runtime, "finishing");
+        const lease = await claimOne(runtime, "finishing");
         await runtime.executions.requestWake({ executionId: "finishing", wakeAt: clock.now });
         await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "completed", result: null },
         });
-        advance(REDELIVERY_TIMEOUT * 10);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
       });
 
       it("returns each due execution at most once per claim", async ({ runtime, clock }) => {
@@ -645,7 +670,7 @@ export function registerExecutionClientConformance({
         await runtime.executions.requestWake({ executionId: "b", wakeAt: clock.now - 1 });
         await runtime.executions.requestWake({ executionId: "b", wakeAt: clock.now });
         expect(await claimedIds(runtime)).toEqual(["a", "b", "c"]);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
       });
     });
 
@@ -662,13 +687,14 @@ export function registerExecutionClientConformance({
         await runtime.stores.registerWaiter(
           waiter("consumer", snapshot.instanceId, snapshot.version)
         );
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         await appendMessage(runtime, "consumer", "m1");
         expect(await claimedIds(runtime)).toEqual(["consumer"]);
       });
 
       it("deletes a waiter with the write that records its step's result", async ({
         runtime,
+        clock,
       }) => {
         await admitSuspended(runtime, "recorded");
         const snapshot = await runtime.stores.getOrCreateStore({
@@ -680,27 +706,33 @@ export function registerExecutionClientConformance({
         await runtime.stores.registerWaiter(registered);
 
         // An unfinished attempt does not delete the waiter.
+        await runtime.executions.requestWake({ executionId: "recorded", wakeAt: clock.now });
+        const waiting = await claimOne(runtime, "recorded");
         await runtime.heap.writeStep({
-          executionId: "recorded",
+          lease: waiting,
           stepKey: registered.stepKey,
           stepAttempt: 1,
-          stepDone: false,
+          done: false,
           stepResponseJson: JSON.stringify({ waiting: true }),
         });
+        await runtime.executions.acknowledge({
+          lease: waiting,
+          outcome: { status: "suspended" },
+        });
         await appendMessage(runtime, "recorded", "m1");
-        const delivery = await claimOne(runtime, "recorded");
+        const lease = await claimOne(runtime, "recorded");
 
         // The step records its result: the waiter goes with it.
         await runtime.heap.writeStep({
-          executionId: "recorded",
+          lease,
           stepKey: registered.stepKey,
           stepAttempt: 2,
-          stepDone: true,
+          done: true,
           stepResponseJson: JSON.stringify({ id: "m1" }),
         });
-        await runtime.executions.acknowledge({ delivery, outcome: { status: "suspended" } });
+        await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
         await appendMessage(runtime, "recorded", "m2");
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
       });
     });
 
@@ -717,10 +749,10 @@ export function registerExecutionClientConformance({
           admittedAt: 5_000,
           updatedAt: 5_000,
         });
-        const delivery = await claimOne(runtime, "clocked");
+        const lease = await claimOne(runtime, "clocked");
         advance(7);
         await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "suspended", wakeAt: Date.now() },
         });
         expect(await runtime.executions.get("clocked")).toMatchObject({
@@ -728,15 +760,15 @@ export function registerExecutionClientConformance({
           updatedAt: 5_007,
         });
         // A wall-clock wake time is in the far future for this runtime.
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         await runtime.executions.requestWake({ executionId: "clocked", wakeAt: 5_100 });
         advance(92);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         await claimOne(runtime, "clocked");
-        // The redelivery timeout is measured on the same clock.
-        advance(REDELIVERY_TIMEOUT - 1);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        // Lease expiry and the redelivery delay are measured on the same clock.
+        advance(REDELIVER_AFTER - 1);
+        expect(await claim(runtime)).toEqual([]);
         advance(1);
         await claimOne(runtime, "clocked");
       });
@@ -749,11 +781,11 @@ export function registerExecutionClientConformance({
         clock,
       }) => {
         await admit(runtime, "suspends");
-        const delivery = await claimOne(runtime, "suspends");
+        const lease = await claimOne(runtime, "suspends");
         advance(5);
         expect(
           await runtime.executions.acknowledge({
-            delivery,
+            lease,
             outcome: { status: "suspended", wakeAt: clock.now + 1_000 },
           })
         ).toEqual({ status: "suspended" });
@@ -769,10 +801,10 @@ export function registerExecutionClientConformance({
       it("records a completed acknowledgement and its result", async ({ runtime }) => {
         const result = { receipt: "r-1", amount: 12.5, lines: [{ sku: "a" }] };
         await admit(runtime, "completes");
-        const delivery = await claimOne(runtime, "completes");
+        const lease = await claimOne(runtime, "completes");
         expect(
           await runtime.executions.acknowledge({
-            delivery,
+            lease,
             outcome: { status: "completed", result },
           })
         ).toEqual({ status: "completed", result });
@@ -791,9 +823,9 @@ export function registerExecutionClientConformance({
         runtime,
       }) => {
         await admit(runtime, "fails");
-        const delivery = await claimOne(runtime, "fails");
+        const lease = await claimOne(runtime, "fails");
         const acknowledged = await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "failed", error: new PaymentDeclinedError("card declined") },
         });
         expect(acknowledged.status).toBe("failed");
@@ -812,82 +844,54 @@ export function registerExecutionClientConformance({
         expect([error.name, error.message]).toEqual(["PaymentDeclinedError", "card declined"]);
       });
 
-      it("keeps the first terminal outcome when a later one differs", async ({ runtime }) => {
-        const delivery = await admitCompleted(runtime, "first-wins", "first");
-        const recorded = await runtime.executions.get("first-wins");
-        expect(
-          await runtime.executions.acknowledge({
-            delivery,
-            outcome: { status: "failed", error: new Error("second") },
-          })
-        ).toEqual({ status: "completed", result: "first" });
-        expect(
-          await runtime.executions.acknowledge({
-            delivery,
-            outcome: { status: "completed", result: "second" },
-          })
-        ).toEqual({ status: "completed", result: "first" });
-        expect(await runtime.executions.get("first-wins")).toEqual(recorded);
-
-        await admit(runtime, "failed-first");
-        const failing = await claimOne(runtime, "failed-first");
-        await runtime.executions.acknowledge({
-          delivery: failing,
-          outcome: { status: "failed", error: new TypeError("original") },
-        });
-        const late = await runtime.executions.acknowledge({
-          delivery: failing,
-          outcome: { status: "completed", result: "late" },
-        });
-        expect(late.status).toBe("failed");
-        expect((late as { error: Error }).error).toMatchObject({
-          name: "TypeError",
-          message: "original",
-        });
-      });
-
-      it("keeps a terminal record when a suspended acknowledgement arrives after it", async ({
+      it("keeps the first terminal outcome: a later acknowledgement under the ended lease is lost", async ({
         runtime,
         clock,
         advance,
       }) => {
-        const delivery = await admitCompleted(runtime, "terminal", { ok: true });
-        const recorded = await runtime.executions.get("terminal");
+        const lease = await admitCompleted(runtime, "first-wins", "first");
+        const recorded = await runtime.executions.get("first-wins");
         advance(10);
-        expect(
-          await runtime.executions.acknowledge({
-            delivery,
-            outcome: { status: "suspended", wakeAt: clock.now },
-          })
-        ).toEqual({ status: "completed", result: { ok: true } });
-        expect(await runtime.executions.get("terminal")).toEqual(recorded);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        for (const outcome of [
+          { status: "failed", error: new Error("second") },
+          { status: "completed", result: "second" },
+          { status: "suspended", wakeAt: clock.now },
+        ] as const) {
+          expect(await runtime.executions.acknowledge({ lease, outcome })).toEqual({
+            status: "lost",
+          });
+        }
+        expect(await runtime.executions.get("first-wins")).toEqual(recorded);
+        // A terminal execution is never handed out again.
+        advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
       });
 
-      it("returns the recorded outcome to a duplicate delivery of a terminal execution", async ({
+      it("keeps a terminal outcome when a stale lease acknowledges after a reclaim", async ({
         runtime,
         advance,
       }) => {
         await admit(runtime, "duplicate");
         const slow = await claimOne(runtime, "duplicate");
-        advance(REDELIVERY_TIMEOUT);
+        advance(REDELIVER_AFTER);
         const redelivered = await claimOne(runtime, "duplicate");
         expect(
           await runtime.executions.acknowledge({
-            delivery: redelivered,
+            lease: redelivered,
             outcome: { status: "completed", result: "fast" },
           })
         ).toEqual({ status: "completed", result: "fast" });
-        // The slow delivery reports late and gets the recorded outcome back.
+        const recorded = await runtime.executions.get("duplicate");
+        // The slow delivery reports late and is fenced off.
         expect(
           await runtime.executions.acknowledge({
-            delivery: slow,
+            lease: slow,
             outcome: { status: "completed", result: "slow" },
           })
-        ).toEqual({ status: "completed", result: "fast" });
-        // A terminal execution is never handed out again.
-        advance(REDELIVERY_TIMEOUT * 10);
-        expect(await runtime.executions.claimDue()).toEqual([]);
+        ).toEqual({ status: "lost" });
+        expect(await runtime.executions.get("duplicate")).toEqual(recorded);
+        advance(REDELIVER_AFTER * 10);
+        expect(await claim(runtime)).toEqual([]);
       });
 
       it("leaves the status unchanged after an infrastructure error and redelivers", async ({
@@ -900,7 +904,7 @@ export function registerExecutionClientConformance({
         await runtime.executions.requestWake({ executionId: "infra", wakeAt: clock.now });
         await claimOne(runtime, "infra");
         // deliver() rejected: the dispatcher does not acknowledge.
-        advance(REDELIVERY_TIMEOUT);
+        advance(REDELIVER_AFTER);
         expect(await runtime.executions.get("infra")).toMatchObject({
           status: "suspended",
           updatedAt: before!.updatedAt,
@@ -915,7 +919,7 @@ export function registerExecutionClientConformance({
         await admit(runtime, "delayed");
         const delayed = await claimOne(runtime, "delayed");
         await runtime.executions.acknowledge({
-          delivery: delayed,
+          lease: delayed,
           outcome: { status: "suspended", wakeAt: clock.now + 500 },
         });
 
@@ -955,14 +959,14 @@ export function registerExecutionClientConformance({
           [...(await restarted.executions.get("admitted"))!.context.entries()]
         ).toEqual([["tenant", "acme"]]);
 
-        // Restarting does not lose a claim: the in-flight delivery still waits
-        // for its redelivery timeout.
+        // Restarting does not lose a lease: the in-flight delivery's execution
+        // is claimable only once its lease expires and the delay passes.
         expect(await drain(restarted)).toEqual(["admitted"]);
         advance(200);
         expect(await drain(restarted)).toEqual(["woken"]);
         advance(300);
         expect(await drain(restarted)).toEqual(["delayed"]);
-        advance(REDELIVERY_TIMEOUT - 500 - 1);
+        advance(REDELIVER_AFTER - 500 - 1);
         expect(await drain(restarted)).toEqual([]);
         advance(1);
         expect(await drain(restarted)).toEqual(["in-flight"]);

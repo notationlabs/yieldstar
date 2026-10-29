@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type {
+  ExecutionLease,
   WorkflowEvent,
   WorkflowInvoker,
   WorkflowRunOutcome,
@@ -8,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { deserializeError } from "serialize-error";
-import type { WorkerMessage } from "./worker";
+import type { WorkerDelivery, WorkerMessage } from "./worker";
 
 /**
  * Runs each delivery in a forked worker process. `deliver` resolves with the
@@ -26,7 +27,7 @@ export function createWorkflowInvoker(params: {
   const { logger, workerPath, execPath, handshakeTimeout = 5_000 } = params;
   return {
     workflowEndEmitter,
-    deliver(event: WorkflowEvent) {
+    deliver(event: WorkflowEvent, lease: ExecutionLease) {
       const { executionId } = event;
 
       const filePath = workerPath.startsWith("file:")
@@ -90,8 +91,12 @@ export function createWorkflowInvoker(params: {
               clearTimeout(handshakeTimer);
               // Advanced serialization carries a Map but not a ReadonlyMap
               // wrapper, so send the context as a plain Map.
+              const delivery: WorkerDelivery = {
+                event: { ...event, context: new Map(event.context) },
+                lease,
+              };
               childProcess.send(
-                { ...event, context: new Map(event.context) },
+                delivery,
                 (error) => {
                   if (error) settle({ error });
                 }

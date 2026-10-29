@@ -8,21 +8,28 @@ export type {
   ExecutionAdmissionRequest,
   ExecutionAdmissionResult,
   ExecutionClient,
-  ExecutionDelivery,
+  ExecutionLease,
   ExecutionOutcome,
   ExecutionRecord,
+  ExecutionReleaseResult,
+  ExecutionRenewResult,
   ExecutionStatus,
   ExecutionWakeResult,
+  LeaseLost,
   WorkflowRunOutcome,
 } from "./base/execution";
 export {
   ExecutionAdmissionError,
   InfrastructureError,
+  LeaseLostError,
+  isLeaseLost,
   isTerminalExecutionStatus,
 } from "./base/execution";
 export type { ExecutionState } from "./lib/execution-state";
 export {
-  REDELIVERY_TIMEOUT,
+  DEFAULT_LEASE_DURATION,
+  REDELIVERY_DELAY_BASE,
+  REDELIVERY_DELAY_MAX,
   ExecutionEventEncodingError,
   acknowledgeExecution,
   claimExecution,
@@ -33,11 +40,17 @@ export {
   encodeExecutionOutcome,
   executionIdConflict,
   executionNotFound,
+  executionStatusAt,
   isExecutionClaimable,
+  isLeaseCurrent,
   nextClaimAt,
   prepareExecutionAdmission,
+  redeliveryDelay,
+  releaseExecutionLease,
+  renewExecutionLease,
   requestExecutionWake,
   toExecutionRecord,
+  unacknowledgedDeliveriesAt,
 } from "./lib/execution-state";
 export { ExecutionDispatcher } from "./lib/execution-dispatcher";
 export { waitForExecutionOutcome } from "./lib/wait-for-outcome";

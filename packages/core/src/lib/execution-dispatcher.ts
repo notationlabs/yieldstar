@@ -3,15 +3,20 @@ import type { WorkflowInvoker } from "../base/invoker";
 import type { Runtime } from "../base/runtime";
 import type {
   ExecutionAcknowledgeResult,
-  ExecutionDelivery,
+  ExecutionLease,
 } from "../base/execution";
 import { isTerminalExecutionStatus } from "../base/execution";
+import { DEFAULT_LEASE_DURATION } from "./execution-state";
+
+/** Executions leased per claim. */
+const CLAIM_LIMIT = 10;
 
 /**
  * The only component that delivers executions. It claims due executions,
  * reads each event from its record, hands it to the invoker, and acknowledges
- * the outcome. A delivery that rejects is not acknowledged: its wakes stay
- * pending and the runtime redelivers it after its redelivery timeout.
+ * the outcome under the delivery's lease. A delivery that rejects is not
+ * acknowledged: its wakes stay pending and the runtime redelivers it once the
+ * lease expires and the redelivery delay passes.
  */
 export class ExecutionDispatcher {
   private runtime: Runtime;
@@ -60,14 +65,17 @@ export class ExecutionDispatcher {
    * number of deliveries claimed; it does not wait for them to finish.
    */
   async tick(): Promise<number> {
-    const deliveries = await this.runtime.executions.claimDue();
-    for (const delivery of deliveries) {
-      const task = this.dispatch(delivery).finally(() => {
+    const leases = await this.runtime.executions.claimDue({
+      limit: CLAIM_LIMIT,
+      duration: DEFAULT_LEASE_DURATION,
+    });
+    for (const lease of leases) {
+      const task = this.dispatch(lease).finally(() => {
         this.inFlight.delete(task);
       });
       this.inFlight.add(task);
     }
-    return deliveries.length;
+    return leases.length;
   }
 
   /** Waits for every delivery started so far to settle. */
@@ -90,8 +98,8 @@ export class ExecutionDispatcher {
     if (!this.keepAlive) this.timer.unref?.();
   }
 
-  private async dispatch(delivery: ExecutionDelivery) {
-    const { executionId } = delivery;
+  private async dispatch(lease: ExecutionLease) {
+    const { executionId } = lease;
     const { executions } = this.runtime;
 
     try {
@@ -102,23 +110,24 @@ export class ExecutionDispatcher {
       }
 
       // A finished execution never runs again: return its recorded outcome.
+      // Reaching a terminal status ends the lease, so no lease is current
+      // here and there is nothing to acknowledge.
       if (isTerminalExecutionStatus(record.status)) {
-        const result = await executions.acknowledge({
-          delivery,
-          outcome: record.outcome!,
-        });
-        this.emit(executionId, result);
+        this.emit(executionId, record.outcome!);
         return;
       }
 
       let outcome;
       try {
-        outcome = await this.invoker.deliver({
-          workflowId: record.workflowId,
-          executionId,
-          params: record.params,
-          context: record.context,
-        });
+        outcome = await this.invoker.deliver(
+          {
+            workflowId: record.workflowId,
+            executionId,
+            params: record.params,
+            context: record.context,
+          },
+          lease
+        );
       } catch (err) {
         this.logger.error(
           { executionId, err },
@@ -127,7 +136,14 @@ export class ExecutionDispatcher {
         return;
       }
 
-      const result = await executions.acknowledge({ delivery, outcome });
+      const result = await executions.acknowledge({ lease, outcome });
+      if (result.status === "lost") {
+        this.logger.warn(
+          { executionId, token: lease.token },
+          "Lease was lost before the outcome was acknowledged"
+        );
+        return;
+      }
       this.emit(executionId, result);
     } catch (err) {
       this.logger.error({ executionId, err }, "Failed to dispatch execution");

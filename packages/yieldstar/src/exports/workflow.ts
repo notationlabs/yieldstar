@@ -27,6 +27,9 @@ import {
   StepInvalid,
   StepStoreWait,
   WorkflowResult,
+  InfrastructureError,
+  LeaseLostError,
+  isLeaseLost,
 } from "@yieldstar/core";
 
 export type WorkflowFn<
@@ -53,6 +56,7 @@ export function workflow<
    */
   return async function* workflowGenerator({
     event,
+    lease,
     heapClient,
     storeClient,
     clock,
@@ -205,15 +209,21 @@ export function workflow<
        * If this step attempt is not already cached, cache it
        */
       if (!cached) {
-        await infrastructure(() =>
+        const written = await infrastructure(() =>
           heapClient.writeStep({
-            executionId,
+            lease,
             stepKey,
             stepAttempt,
-            stepDone: !needsRetry && !needsWake,
+            done: !needsRetry && !needsWake,
             stepResponseJson: serializeStepResponse(stepResponse),
           })
         );
+        // Another claim has taken over: stop without an outcome.
+        // TODO(RFC 002 phase 2): end the delivery as a retry when `written`
+        // holds a different value from the one this delivery wrote.
+        if (isLeaseLost(written)) {
+          throw new InfrastructureError(new LeaseLostError(executionId));
+        }
       }
 
       /**

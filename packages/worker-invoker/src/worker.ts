@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type {
   EventContext,
+  ExecutionLease,
   WorkflowEvent,
   WorkflowRunOutcome,
   WorkflowRunner,
@@ -21,6 +22,12 @@ export type WorkerMessage =
   | { status: "outcome"; outcome: SerializedOutcome }
   | { status: "error"; error: unknown };
 
+/** The message a parent sends its worker: one delivery and its lease. */
+export type WorkerDelivery = {
+  event: Omit<WorkflowEvent, "context"> & { context: Map<any, any> };
+  lease: ExecutionLease;
+};
+
 export type SerializedOutcome =
   | Exclude<WorkflowRunOutcome, { status: "failed" }>
   | { status: "failed"; error: unknown };
@@ -34,14 +41,14 @@ export function createWorkflowWorker(
     listen() {
       process.on(
         "message",
-        async (event: Omit<WorkflowEvent, "context"> & { context: Map<any, any> }) => {
+        async ({ event, lease }: WorkerDelivery) => {
           const workflowEvent: WorkflowEvent = {
             ...event,
             context: new ReadOnlyMap(event.context),
           };
           context = workflowEvent.context;
           try {
-            const outcome = await workflowRunner.run(workflowEvent, logger);
+            const outcome = await workflowRunner.run(workflowEvent, lease, logger);
             send({
               status: "outcome",
               outcome:

@@ -1,6 +1,6 @@
 import type { EventEmitter } from "node:events";
 import type { WorkflowEvent } from "./event";
-import type { WorkflowRunOutcome } from "./execution";
+import type { ExecutionLease, WorkflowRunOutcome } from "./execution";
 
 export type WorkflowInvoker = {
   /**
@@ -12,7 +12,8 @@ export type WorkflowInvoker = {
   /**
    * Runs one delivery of an execution and resolves with its outcome. Rejects,
    * without an outcome, when the delivery hits an infrastructure error or the
-   * worker exits before replying.
+   * worker exits before replying. Every fenced write the delivery makes
+   * carries `lease`.
    */
-  deliver(event: WorkflowEvent): Promise<WorkflowRunOutcome>;
+  deliver(event: WorkflowEvent, lease: ExecutionLease): Promise<WorkflowRunOutcome>;
 };

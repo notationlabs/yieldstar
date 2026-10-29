@@ -1,20 +1,25 @@
 import {
-  REDELIVERY_TIMEOUT,
   acknowledgeExecution,
   claimExecution,
   createExecutionState,
   executionIdConflict,
   executionNotFound,
   isExecutionClaimable,
+  isLeaseCurrent,
+  nextClaimAt,
   prepareExecutionAdmission,
+  releaseExecutionLease,
+  renewExecutionLease,
   requestExecutionWake,
   toExecutionRecord,
   type ExecutionAcknowledgeResult,
   type ExecutionAdmissionRequest,
   type ExecutionAdmissionResult,
   type ExecutionClient,
-  type ExecutionDelivery,
+  type ExecutionLease,
   type ExecutionRecord,
+  type ExecutionReleaseResult,
+  type ExecutionRenewResult,
   type ExecutionState,
   type ExecutionWakeResult,
   type WorkflowRunOutcome,
@@ -62,7 +67,7 @@ export class MemoryExecutionClient implements ExecutionClient {
 
   async get(executionId: string): Promise<ExecutionRecord | undefined> {
     const state = this.executions.get(executionId);
-    return state ? toExecutionRecord(state) : undefined;
+    return state ? toExecutionRecord(state, this.clock()) : undefined;
   }
 
   async requestWake(request: {
@@ -90,40 +95,79 @@ export class MemoryExecutionClient implements ExecutionClient {
     if (next) this.executions.set(executionId, next);
   }
 
-  async claimDue(): Promise<ExecutionDelivery[]> {
+  /**
+   * Synchronously checks that `lease` is current, for fenced writes that must
+   * check the token in the same critical section as their own write (heap
+   * step records).
+   */
+  isLeaseCurrent(lease: ExecutionLease): boolean {
+    const state = this.executions.get(lease.executionId);
+    return state !== undefined && isLeaseCurrent(state, lease);
+  }
+
+  async claimDue(request: {
+    limit: number;
+    duration: number;
+  }): Promise<ExecutionLease[]> {
     const now = this.clock();
-    const deliveries: ExecutionDelivery[] = [];
-    for (const [executionId, state] of this.executions) {
-      if (!isExecutionClaimable(state, now)) continue;
-      const token = crypto.randomUUID();
-      this.executions.set(
-        executionId,
-        claimExecution(state, {
-          now,
-          token,
-          redeliveryTimeout: REDELIVERY_TIMEOUT,
-        })
-      );
-      deliveries.push({ executionId, token });
-    }
-    return deliveries;
+    const claimable = [...this.executions.values()]
+      .filter((state) => isExecutionClaimable(state, now))
+      .map((state) => ({ state, at: nextClaimAt(state)! }))
+      // Earliest due first.
+      .sort(
+        (a, b) =>
+          a.at - b.at ||
+          (a.state.executionId < b.state.executionId ? -1 : 1)
+      )
+      .slice(0, Math.max(0, request.limit));
+
+    return claimable.map(({ state }) => {
+      const claimed = claimExecution(state, { now, duration: request.duration });
+      this.executions.set(state.executionId, claimed.state);
+      return claimed.lease;
+    });
+  }
+
+  async renew(request: {
+    lease: ExecutionLease;
+    duration: number;
+  }): Promise<ExecutionRenewResult> {
+    const state = this.executions.get(request.lease.executionId);
+    if (!state) return { status: "lost" };
+    const renewed = renewExecutionLease(state, {
+      lease: request.lease,
+      duration: request.duration,
+      now: this.clock(),
+    });
+    this.executions.set(state.executionId, renewed.state);
+    return renewed.result;
+  }
+
+  async release(request: {
+    lease: ExecutionLease;
+  }): Promise<ExecutionReleaseResult> {
+    const state = this.executions.get(request.lease.executionId);
+    if (!state) return { status: "lost" };
+    const released = releaseExecutionLease(state, {
+      lease: request.lease,
+      now: this.clock(),
+    });
+    this.executions.set(state.executionId, released.state);
+    return released.result;
   }
 
   async acknowledge(request: {
-    delivery: ExecutionDelivery;
+    lease: ExecutionLease;
     outcome: WorkflowRunOutcome;
   }): Promise<ExecutionAcknowledgeResult> {
-    const { executionId } = request.delivery;
-    const state = this.executions.get(executionId);
-    if (!state) {
-      throw new Error(`Execution "${executionId}" does not exist`);
-    }
+    const state = this.executions.get(request.lease.executionId);
+    if (!state) return { status: "lost" };
     const { state: next, result } = acknowledgeExecution(state, {
-      delivery: request.delivery,
+      lease: request.lease,
       outcome: request.outcome,
       now: this.clock(),
     });
-    this.executions.set(executionId, next);
+    this.executions.set(state.executionId, next);
     return result;
   }
 }

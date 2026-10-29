@@ -3,6 +3,7 @@ import type {
   WorkflowGenerator,
   WorkflowEvent,
   EventParams,
+  ExecutionLease,
   WorkflowRunOutcome,
 } from "..";
 import {
@@ -28,11 +29,13 @@ export class WorkflowRunner<
   }
 
   /**
-   * Runs one delivery and resolves with its outcome. Rejects only with an
-   * infrastructure error, which must not be acknowledged as an outcome.
+   * Runs one delivery under `lease` and resolves with its outcome. Rejects
+   * only with an infrastructure error, which must not be acknowledged as an
+   * outcome; a lost lease is one.
    */
   run = async (
     event: WorkflowEvent,
+    lease: ExecutionLease,
     logger: Logger = this.logger
   ): Promise<WorkflowRunOutcome> => {
     const workflow = this.router[event.workflowId];
@@ -46,7 +49,7 @@ export class WorkflowRunner<
 
     let response: WorkflowResult<unknown> | StepDelay | StepStoreWait;
     try {
-      response = await this.runWorkflows({ workflow, logger, event });
+      response = await this.runWorkflows({ workflow, logger, event, lease });
     } catch (err) {
       if (InfrastructureError.is(err)) throw err;
       return { status: "failed", error: toError(err) };
@@ -69,12 +72,14 @@ export class WorkflowRunner<
   >(params: {
     workflow: WorkflowGenerator<Params, Result, Context>;
     event: WorkflowEvent<Params, Context>;
+    lease: ExecutionLease;
     logger: Logger;
   }): Promise<WorkflowResult<Result> | StepDelay | StepStoreWait> {
-    const { workflow, event, logger } = params;
+    const { workflow, event, lease, logger } = params;
 
     const workflowIterator = workflow({
       event,
+      lease,
       heapClient: this.runtime.heap,
       storeClient: this.runtime.stores,
       clock: this.runtime.clock,

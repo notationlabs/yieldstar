@@ -2,9 +2,11 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { Logger } from "pino";
 import {
   ExecutionDispatcher,
+  DEFAULT_LEASE_DURATION,
   InfrastructureError,
-  REDELIVERY_TIMEOUT,
   WorkflowRunner,
+  redeliveryDelay,
+  type ExecutionLease,
   type WorkflowRouter,
 } from "@yieldstar/core";
 import { createRoutes } from "@yieldstar/http-server";
@@ -37,7 +39,33 @@ function setup<W extends WorkflowRouter>(
   });
   const sdk = createLocalSdk<W>(runtime, { invoker, pollInterval: 1 });
   dispatchers.push(dispatcher);
-  return { runtime, runner, invoker, dispatcher, sdk };
+
+  // Direct deliveries need a lease, as the dispatcher's would. One lease per
+  // execution is held across this test's direct deliveries.
+  const leases = new Map<string, ExecutionLease>();
+  async function deliver(workflowId: string, executionId = workflowId) {
+    let lease = leases.get(executionId);
+    if (!lease) {
+      if (!(await runtime.executions.get(executionId))) {
+        await runtime.executions.admit({
+          workflowId,
+          executionId,
+          params: undefined,
+          context: new Map(),
+        });
+      }
+      const claimed = await runtime.executions.claimDue({
+        limit: 1_000,
+        duration: DEFAULT_LEASE_DURATION,
+      });
+      lease = claimed.find((l) => l.executionId === executionId);
+      if (!lease) throw new Error(`could not lease "${executionId}"`);
+      leases.set(executionId, lease);
+    }
+    return invoker.deliver(event(workflowId, executionId), lease);
+  }
+
+  return { runtime, runner, invoker, dispatcher, sdk, deliver };
 }
 
 const dispatchers: ExecutionDispatcher[] = [];
@@ -58,26 +86,26 @@ const event = (workflowId: string, executionId = workflowId) => ({
 // Runner
 
 test("deliver resolves with completed and the result when the workflow returns", async () => {
-  const { invoker } = setup({
+  const { deliver } = setup({
     returns: workflow(async function* (step) {
       return yield* step.run("one", () => 1);
     }),
   });
 
-  await expect(invoker.deliver(event("returns"))).resolves.toEqual({
+  await expect(deliver("returns")).resolves.toEqual({
     status: "completed",
     result: 1,
   });
 });
 
 test("deliver resolves with failed when the workflow throws outside a step", async () => {
-  const { invoker } = setup({
+  const { deliver } = setup({
     throws: workflow(async function* () {
       throw new RangeError("outside a step");
     }),
   });
 
-  const outcome = await invoker.deliver(event("throws"));
+  const outcome = await deliver("throws");
   expect(outcome.status).toBe("failed");
   expect(outcome.status === "failed" && outcome.error).toMatchObject({
     name: "RangeError",
@@ -86,7 +114,7 @@ test("deliver resolves with failed when the workflow throws outside a step", asy
 });
 
 test("deliver rejects when an infrastructure operation fails, and nothing is recorded", async () => {
-  const { runtime, invoker, sdk } = setup({
+  const { runtime, deliver, sdk } = setup({
     run: workflow(async function* (step) {
       return yield* step.run("one", () => 1);
     }),
@@ -94,14 +122,17 @@ test("deliver rejects when an infrastructure operation fails, and nothing is rec
   vi.spyOn(runtime.heap, "writeStep").mockRejectedValue(new Error("disk full"));
 
   const { executionId } = await sdk.trigger({ workflowId: "run" });
-  await expect(invoker.deliver(event("run", executionId))).rejects.toBeInstanceOf(
+  await expect(deliver("run", executionId)).rejects.toBeInstanceOf(
     InfrastructureError
   );
-  expect((await runtime.executions.get(executionId))?.status).toBe("admitted");
+  // Nothing was acknowledged: the lease is still held, and there is no outcome.
+  const record = await runtime.executions.get(executionId);
+  expect(record?.status).toBe("running");
+  expect(record?.outcome).toBeUndefined();
 });
 
 test("a delay records its step and suspends with the delay's wakeAt", async () => {
-  const { runtime, invoker } = setup(
+  const { runtime, deliver } = setup(
     {
       waits: workflow(async function* (step) {
         yield* step.delay("wait", 60_000);
@@ -110,7 +141,7 @@ test("a delay records its step and suspends with the delay's wakeAt", async () =
     { clock: () => 1_000 }
   );
 
-  await expect(invoker.deliver(event("waits"))).resolves.toEqual({
+  await expect(deliver("waits")).resolves.toEqual({
     status: "suspended",
     wakeAt: 61_000,
   });
@@ -121,7 +152,7 @@ test("a delay records its step and suspends with the delay's wakeAt", async () =
 
 test("delay and retry wake times read the runtime clock", async () => {
   let now = 1_000;
-  const { invoker } = setup(
+  const { deliver } = setup(
     {
       waits: workflow(async function* (step) {
         yield* step.delay("wait", 60_000);
@@ -138,18 +169,18 @@ test("delay and retry wake times read the runtime clock", async () => {
 
   // A replay before the recorded wakeAt stays suspended, whatever Date.now says.
   now = 60_999;
-  await invoker.deliver(event("waits"));
-  await expect(invoker.deliver(event("waits"))).resolves.toEqual({
+  await deliver("waits");
+  await expect(deliver("waits")).resolves.toEqual({
     status: "suspended",
     wakeAt: 120_999,
   });
   now = 120_999;
-  await expect(invoker.deliver(event("waits"))).resolves.toEqual({
+  await expect(deliver("waits")).resolves.toEqual({
     status: "completed",
     result: "woke",
   });
 
-  await expect(invoker.deliver(event("retries"))).resolves.toEqual({
+  await expect(deliver("retries")).resolves.toEqual({
     status: "suspended",
     wakeAt: 125_999,
   });
@@ -160,7 +191,7 @@ test("delay and retry wake times read the runtime clock", async () => {
 test("a runtime call failing inside try/catch does not run the catch and is not acknowledged", async () => {
   const Counter = defineStore("delivery-counter", testSchema<{ n: number }>());
   let caught = false;
-  const { runtime, invoker, sdk } = setup({
+  const { runtime, deliver, sdk } = setup({
     guarded: workflow(async function* (step) {
       const counter = yield* step.store(Counter, { initial: { n: 0 } });
       try {
@@ -178,11 +209,13 @@ test("a runtime call failing inside try/catch does not run the catch and is not 
   );
 
   const { executionId } = await sdk.trigger({ workflowId: "guarded" });
-  await expect(
-    invoker.deliver(event("guarded", executionId))
-  ).rejects.toThrow("database is locked");
+  await expect(deliver("guarded", executionId)).rejects.toThrow(
+    "database is locked"
+  );
   expect(caught).toBe(false);
-  expect((await runtime.executions.get(executionId))?.status).toBe("admitted");
+  const record = await runtime.executions.get(executionId);
+  expect(record?.status).toBe("running");
+  expect(record?.outcome).toBeUndefined();
 });
 
 test("store errors caused by workflow code still reach its catch", async () => {
@@ -233,13 +266,16 @@ test("an infrastructure error leaves the status unchanged and the execution is d
   const { executionId } = await sdk.trigger({ workflowId: "flaky" });
   await dispatcher.tick();
   await dispatcher.drain();
-  expect((await runtime.executions.get(executionId))?.status).toBe("admitted");
+  const record = await runtime.executions.get(executionId);
+  expect(record?.status).toBe("running");
+  expect(record?.outcome).toBeUndefined();
 
-  // Not claimable again until the redelivery timeout passes.
-  now += REDELIVERY_TIMEOUT - 1;
+  // Not claimable again until the lease expires and the redelivery delay passes.
+  now += DEFAULT_LEASE_DURATION + redeliveryDelay(1) - 1;
   await dispatcher.tick();
   await dispatcher.drain();
   expect(runs).toBe(1);
+  expect((await runtime.executions.get(executionId))?.status).toBe("admitted");
 
   // Once it passes, the uncovered wake is delivered again.
   now += 1;
@@ -267,7 +303,7 @@ test("a terminal execution delivered again returns its outcome without running w
 
   // Simulate a stale claim reaching the dispatcher after the outcome.
   vi.spyOn(runtime.executions, "claimDue").mockResolvedValueOnce([
-    { executionId: "once", token: "stale" },
+    { executionId: "once", token: 0, expiresAt: 0 },
   ]);
   const emitted = new Promise((resolve) =>
     invoker.workflowEndEmitter.once("once", resolve)

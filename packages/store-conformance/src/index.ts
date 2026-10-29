@@ -1,4 +1,5 @@
 import {
+  DEFAULT_LEASE_DURATION,
   defineStore,
   type Runtime,
   type StandardSchemaV1,
@@ -106,11 +107,15 @@ async function admitWaiting(runtime: Runtime, ...executionIds: string[]) {
  * returns their sorted IDs. Each ID appears at most once per claim.
  */
 async function drainWakes(runtime: Runtime): Promise<string[]> {
-  const deliveries = await runtime.executions.claimDue();
-  for (const delivery of deliveries) {
-    await runtime.executions.acknowledge({ delivery, outcome: { status: "suspended" } });
+  const leases = await claimAll(runtime);
+  for (const lease of leases) {
+    await runtime.executions.acknowledge({ lease, outcome: { status: "suspended" } });
   }
-  return deliveries.map((delivery) => delivery.executionId).sort();
+  return leases.map((lease) => lease.executionId).sort();
+}
+
+function claimAll(runtime: Runtime) {
+  return runtime.executions.claimDue({ limit: 1_000, duration: DEFAULT_LEASE_DURATION });
 }
 
 /**
@@ -135,15 +140,30 @@ async function expectNotWoken(runtime: Runtime) {
   expect(await drainWakes(runtime)).toEqual([]);
 }
 
-/** Records a step's result, which deletes that step's waiter. */
+/**
+ * Records a step's result, which deletes that step's waiter. Heap writes are
+ * fenced, so this wakes and leases the execution first. Call it only when
+ * nothing else is due.
+ */
 async function recordStep(runtime: Runtime, executionId: string, stepKey = STEP_KEY) {
-  await runtime.heap.writeStep({
-    executionId,
+  await runtime.executions.requestWake({ executionId, wakeAt: runtime.clock() });
+  const leases = await claimAll(runtime);
+  const lease = leases.find((lease) => lease.executionId === executionId);
+  if (!lease) throw new Error(`could not lease "${executionId}" to record a step`);
+  const written = await runtime.heap.writeStep({
+    lease,
     stepKey,
     stepAttempt: 1,
-    stepDone: true,
+    done: true,
     stepResponseJson: JSON.stringify({ done: true }),
   });
+  expect(written).toMatchObject({ meta: { done: true } });
+  for (const claimed of leases) {
+    await runtime.executions.acknowledge({
+      lease: claimed,
+      outcome: { status: "suspended" },
+    });
+  }
 }
 
 /** Registers the normative YieldStar store connector qualification suite. */
@@ -761,9 +781,9 @@ export function registerStoreClientConformance({
           params: undefined,
           context: new Map(),
         });
-        const [delivery] = await runtime.executions.claimDue();
+        const [lease] = await claimAll(runtime);
         await runtime.executions.acknowledge({
-          delivery,
+          lease,
           outcome: { status: "completed", result: "done" },
         });
         const initial = await runtime.stores.getOrCreateStore({
