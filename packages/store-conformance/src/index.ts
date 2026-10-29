@@ -1,26 +1,29 @@
 import {
   defineStore,
-  type SchedulerClient,
+  type Runtime,
   type StandardSchemaV1,
-  type StoreClient,
   type StorePath,
   type StoreWaiter,
-  type WorkflowEvent,
 } from "@yieldstar/core";
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 
+/**
+ * A clean runtime under test. Store wakes are observed through its
+ * `ExecutionClient`: a commit that satisfies a waiter makes the waiter's
+ * execution due, so `runtime.executions.claimDue()` returns it.
+ */
 export type StoreConformanceHarness = {
-  client: StoreClient;
-  /** Creates another client connected to the same backend. */
-  createPeer?(schedulerClient: SchedulerClient): StoreClient | Promise<StoreClient>;
+  runtime: Runtime;
+  /** Creates another runtime connected to the same backend. */
+  createPeer?(): Runtime | Promise<Runtime>;
   /** Simulates opening the same durable backend in a new process. */
-  restart?(schedulerClient: SchedulerClient): StoreClient | Promise<StoreClient>;
+  restart?(): Runtime | Promise<Runtime>;
   dispose?(): void | Promise<void>;
 };
 
-export type StoreConformanceFactory = (
-  schedulerClient: SchedulerClient
-) => StoreConformanceHarness | Promise<StoreConformanceHarness>;
+export type StoreConformanceFactory = () =>
+  | StoreConformanceHarness
+  | Promise<StoreConformanceHarness>;
 
 export type StoreConformanceOptions = {
   name: string;
@@ -36,14 +39,8 @@ type TakeState = {
   messages: { id: string; claimedBy?: string }[];
 };
 
-const event: WorkflowEvent = {
-  workflowId: "workflow",
-  executionId: "execution",
-  params: undefined,
-  context: new Map(),
-};
-
-const noopScheduler: SchedulerClient = { async requestWakeUp() {} };
+const WORKFLOW_ID = "workflow";
+const STEP_KEY = "wait";
 
 function schema<T>(): StandardSchemaV1<unknown, T> {
   return {
@@ -62,13 +59,13 @@ function waiter(
   storeId: string,
   instanceId: string,
   sinceVersion: number,
-  readPaths: StorePath[] = [["messages"]]
+  readPaths: StorePath[] = [["messages"]],
+  executionId = "execution"
 ): StoreWaiter {
   return {
-    workflowId: event.workflowId,
-    executionId: event.executionId,
-    stepKey: "wait",
-    event,
+    workflowId: WORKFLOW_ID,
+    executionId,
+    stepKey: STEP_KEY,
     storeName,
     storeId,
     instanceId,
@@ -77,18 +74,69 @@ function waiter(
   };
 }
 
-async function eventually(assertion: () => void | Promise<void>) {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try {
-      await assertion();
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 10));
+/**
+ * Admits executions and acknowledges their admission deliveries as suspended,
+ * so they are waiting and nothing is due.
+ */
+async function admitWaiting(runtime: Runtime, ...executionIds: string[]) {
+  for (const executionId of executionIds) {
+    const admitted = await runtime.executions.admit({
+      executionId,
+      workflowId: WORKFLOW_ID,
+      params: undefined,
+      context: new Map(),
+    });
+    if (admitted.status !== "accepted") {
+      throw new Error(`admission of "${executionId}" was rejected: ${admitted.message}`);
     }
   }
-  throw lastError;
+  const woken = await drainWakes(runtime);
+  expect(woken).toEqual([...new Set(executionIds)].sort());
+}
+
+/**
+ * Claims every due execution, acknowledges each delivery as suspended, and
+ * returns their sorted IDs. Each ID appears at most once per claim.
+ */
+async function drainWakes(runtime: Runtime): Promise<string[]> {
+  const deliveries = await runtime.executions.claimDue();
+  for (const delivery of deliveries) {
+    await runtime.executions.acknowledge({ delivery, outcome: { status: "suspended" } });
+  }
+  return deliveries.map((delivery) => delivery.executionId).sort();
+}
+
+/**
+ * Waits until exactly `expected` executions have been woken. A runtime may
+ * apply commit wakes through an outbox, so they are applied eventually; each
+ * execution must still be delivered once.
+ */
+async function expectWoken(runtime: Runtime, expected: string[]) {
+  const woken: string[] = [];
+  const want = [...expected].sort();
+  for (let attempt = 0; attempt < 100; attempt++) {
+    woken.push(...(await drainWakes(runtime)));
+    if (woken.length >= want.length) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(woken.sort()).toEqual(want);
+}
+
+/** Asserts that nothing is due, allowing an outbox a moment to apply. */
+async function expectNotWoken(runtime: Runtime) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(await drainWakes(runtime)).toEqual([]);
+}
+
+/** Records a step's result, which deletes that step's waiter. */
+async function recordStep(runtime: Runtime, executionId: string, stepKey = STEP_KEY) {
+  await runtime.heap.writeStep({
+    executionId,
+    stepKey,
+    stepAttempt: 1,
+    stepDone: true,
+    stepResponseJson: JSON.stringify({ done: true }),
+  });
 }
 
 /** Registers the normative YieldStar store connector qualification suite. */
@@ -101,20 +149,20 @@ export function registerStoreClientConformance({
 
   describe(`${name} store connector conformance`, () => {
     test("creates, reads, lists, deletes, and recreates logical stores", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       const OtherStore = defineStore(`${name}-other-conformance`, schema<State>());
       try {
-        const first = await harness.client.getOrCreateStore({
+        const first = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "b",
           initial: { messages: [] },
         });
-        const second = await harness.client.getOrCreateStore({
+        const second = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "a",
           initial: { messages: [] },
         });
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: OtherStore,
           id: "a",
           initial: { messages: [] },
@@ -122,34 +170,34 @@ export function registerStoreClientConformance({
 
         expect(first.instanceId).toMatch(/^[0-9a-f-]+$/);
         expect(second.instanceId).not.toBe(first.instanceId);
-        expect(await harness.client.listStores(Store)).toEqual(["a", "b"]);
-        await harness.client.deleteStore({ definition: Store, id: "b" });
-        expect(await harness.client.listStores(Store)).toEqual(["a"]);
+        expect(await harness.runtime.stores.listStores(Store)).toEqual(["a", "b"]);
+        await harness.runtime.stores.deleteStore({ definition: Store, id: "b" });
+        expect(await harness.runtime.stores.listStores(Store)).toEqual(["a"]);
         await expect(
-          harness.client.getStore({ definition: Store, id: "b" })
+          harness.runtime.stores.getStore({ definition: Store, id: "b" })
         ).rejects.toThrow(/does not exist/);
-        const recreated = await harness.client.getOrCreateStore({
+        const recreated = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "b",
           initial: { messages: [] },
         });
         expect(recreated.instanceId).not.toBe(first.instanceId);
-        await harness.client.deleteStore({ definition: Store, id: "missing" });
+        await harness.runtime.stores.deleteStore({ definition: Store, id: "missing" });
       } finally {
         await harness.dispose?.();
       }
     });
 
     test("rejects asynchronous updaters and claims without committing", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       try {
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: TakeStore,
           id: "sync-callbacks",
           initial: { messages: [{ id: "one" }] },
         });
         await expect(
-          harness.client.updateStore({
+          harness.runtime.stores.updateStore({
             definition: TakeStore,
             id: "sync-callbacks",
             updater: (async (draft: TakeState) => {
@@ -158,7 +206,7 @@ export function registerStoreClientConformance({
           })
         ).rejects.toThrow(/synchronous/);
         await expect(
-          harness.client.takeFromStore({
+          harness.runtime.stores.takeFromStore({
             definition: TakeStore,
             id: "sync-callbacks",
             selector: (state) => state.messages[0],
@@ -168,7 +216,7 @@ export function registerStoreClientConformance({
           })
         ).rejects.toThrow(/synchronous/);
         expect(
-          await harness.client.getStore({ definition: TakeStore, id: "sync-callbacks" })
+          await harness.runtime.stores.getStore({ definition: TakeStore, id: "sync-callbacks" })
         ).toMatchObject({ state: { messages: [{ id: "one" }] }, version: 0 });
       } finally {
         await harness.dispose?.();
@@ -196,10 +244,10 @@ export function registerStoreClientConformance({
         },
       };
       const RaceStore = defineStore(`${name}-cas-race-conformance`, raceSchema);
-      const harness = await create(noopScheduler);
+      const harness = await create();
       let updaterRuns = 0;
       try {
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: RaceStore,
           id: "race",
           initial: { messages: [] },
@@ -208,7 +256,7 @@ export function registerStoreClientConformance({
         validations = 0;
         const results = await Promise.all(
           ["a", "b"].map((id) =>
-            harness.client.updateStore({
+            harness.runtime.stores.updateStore({
               definition: RaceStore,
               id: "race",
               updater(draft) {
@@ -220,7 +268,7 @@ export function registerStoreClientConformance({
         );
         expect(updaterRuns).toBe(3);
         expect(results.map((result) => result.version).sort()).toEqual([1, 2]);
-        const final = await harness.client.getStore({ definition: RaceStore, id: "race" });
+        const final = await harness.runtime.stores.getStore({ definition: RaceStore, id: "race" });
         expect(final).toMatchObject({ state: { messages: ["a", "b"] }, version: 2 });
       } finally {
         await harness.dispose?.();
@@ -228,17 +276,17 @@ export function registerStoreClientConformance({
     });
 
     test("makes a step receipt and mutation exactly-once under concurrent replay", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       let updaterRuns = 0;
       try {
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "receipt-race",
           initial: { messages: [] },
         });
         const results = await Promise.all(
           ["a", "b"].map((id) =>
-            harness.client.updateStore({
+            harness.runtime.stores.updateStore({
               definition: Store,
               id: "receipt-race",
               stepId: { executionId: "producer", stepKey: "append" },
@@ -253,11 +301,11 @@ export function registerStoreClientConformance({
         expect(updaterRuns).toBeGreaterThanOrEqual(1);
         expect(updaterRuns).toBeLessThanOrEqual(2);
         expect(
-          await harness.client.getStore({ definition: Store, id: "receipt-race" })
+          await harness.runtime.stores.getStore({ definition: Store, id: "receipt-race" })
         ).toMatchObject({ state: { messages: [{ id: results[0].state.messages[0].id }] }, version: 1 });
         let replayRuns = 0;
         expect(
-          await harness.client.updateStore({
+          await harness.runtime.stores.updateStore({
             definition: Store,
             id: "receipt-race",
             stepId: { executionId: "producer", stepKey: "append" },
@@ -268,14 +316,14 @@ export function registerStoreClientConformance({
         ).toEqual(results[0]);
         expect(replayRuns).toBe(0);
 
-        await harness.client.deleteStore({ definition: Store, id: "receipt-race" });
-        const recreated = await harness.client.getOrCreateStore({
+        await harness.runtime.stores.deleteStore({ definition: Store, id: "receipt-race" });
+        const recreated = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "receipt-race",
           initial: { messages: [] },
         });
         expect(
-          await harness.client.updateStore({
+          await harness.runtime.stores.updateStore({
             definition: Store,
             id: "receipt-race",
             stepId: { executionId: "producer", stepKey: "append" },
@@ -283,22 +331,22 @@ export function registerStoreClientConformance({
           })
         ).toEqual(results[0]);
         expect(replayRuns).toBe(0);
-        expect(await harness.client.getStore({ definition: Store, id: "receipt-race" })).toEqual(recreated);
+        expect(await harness.runtime.stores.getStore({ definition: Store, id: "receipt-race" })).toEqual(recreated);
       } finally {
         await harness.dispose?.();
       }
     });
 
     test("scopes receipts by execution and step key", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       try {
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "receipt-scope",
           initial: { messages: [] },
         });
         for (const [executionId, stepKey] of [["one", "a"], ["one", "b"], ["two", "a"]]) {
-          await harness.client.updateStore({
+          await harness.runtime.stores.updateStore({
             definition: Store,
             id: "receipt-scope",
             stepId: { executionId, stepKey },
@@ -308,7 +356,7 @@ export function registerStoreClientConformance({
           });
         }
         expect(
-          await harness.client.getStore({ definition: Store, id: "receipt-scope" })
+          await harness.runtime.stores.getStore({ definition: Store, id: "receipt-scope" })
         ).toMatchObject({
           state: { messages: [{ id: "one:a" }, { id: "one:b" }, { id: "two:a" }] },
           version: 3,
@@ -319,16 +367,16 @@ export function registerStoreClientConformance({
     });
 
     test("applies calls without step ids independently and returns detached state", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       try {
-        const initial = await harness.client.getOrCreateStore({
+        const initial = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "external-update",
           initial: { messages: [] },
         });
         initial.state.messages.push({ id: "caller-only" });
         for (const id of ["one", "two"]) {
-          const result = await harness.client.updateStore({
+          const result = await harness.runtime.stores.updateStore({
             definition: Store,
             id: "external-update",
             updater(draft) { draft.messages.push({ id }); },
@@ -336,7 +384,7 @@ export function registerStoreClientConformance({
           result.state.messages.push({ id: "result-only" });
         }
         expect(
-          await harness.client.getStore({ definition: Store, id: "external-update" })
+          await harness.runtime.stores.getStore({ definition: Store, id: "external-update" })
         ).toMatchObject({ state: { messages: [{ id: "one" }, { id: "two" }] }, version: 2 });
       } finally {
         await harness.dispose?.();
@@ -344,14 +392,14 @@ export function registerStoreClientConformance({
     });
 
     test("committed state contains no tracking proxies", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       try {
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "plain-state",
           initial: { messages: [{ id: "one" }] },
         });
-        await harness.client.updateStore({
+        await harness.runtime.stores.updateStore({
           definition: Store,
           id: "plain-state",
           updater(draft) {
@@ -359,7 +407,7 @@ export function registerStoreClientConformance({
             (draft as Record<string, unknown>).wrapped = { inner: draft.messages };
           },
         });
-        const snapshot = await harness.client.getStore({ definition: Store, id: "plain-state" });
+        const snapshot = await harness.runtime.stores.getStore({ definition: Store, id: "plain-state" });
         expect(() => structuredClone(snapshot.state)).not.toThrow();
         expect((snapshot.state as unknown as Record<string, unknown>).lastMessage).toEqual({ id: "one" });
         expect((snapshot.state as unknown as Record<string, unknown>).wrapped).toEqual({
@@ -379,7 +427,7 @@ export function registerStoreClientConformance({
         `${name}-bounded-update-conformance`,
         schema<PerformanceState>()
       );
-      const harness = await create(noopScheduler);
+      const harness = await create();
       const size = 1000;
       const large = Object.fromEntries(
         Array.from({ length: size }, (_, index) => [`key-${index}`, index])
@@ -395,13 +443,13 @@ export function registerStoreClientConformance({
         return { value, reads: () => reads };
       };
       try {
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: PerformanceStore,
           id: "mutating",
           initial: { changed: 0, large: {} },
         });
         const mutating = instrument();
-        await harness.client.updateStore({
+        await harness.runtime.stores.updateStore({
           definition: PerformanceStore,
           id: "mutating",
           updater(draft) {
@@ -410,13 +458,13 @@ export function registerStoreClientConformance({
           },
         });
 
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: PerformanceStore,
           id: "replacement",
           initial: { changed: 0, large: {} },
         });
         const replacement = instrument();
-        await harness.client.updateStore({
+        await harness.runtime.stores.updateStore({
           definition: PerformanceStore,
           id: "replacement",
           updater: () => ({ changed: 1, large: replacement.value }),
@@ -429,16 +477,16 @@ export function registerStoreClientConformance({
     });
 
     test("conditional updates conflict and replay ledger-first", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       let updaterRuns = 0;
       try {
-        const snapshot = await harness.client.getOrCreateStore({
+        const snapshot = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "conditional",
           initial: { messages: [] },
         });
         const stepId = { executionId: "execution", stepKey: "conditional" };
-        const committed = await harness.client.updateStoreFrom({
+        const committed = await harness.runtime.stores.updateStoreFrom({
           definition: Store,
           id: "conditional",
           snapshot,
@@ -448,7 +496,7 @@ export function registerStoreClientConformance({
             draft.messages.push({ id: "first" });
           },
         });
-        await harness.client.updateStore({
+        await harness.runtime.stores.updateStore({
           definition: Store,
           id: "conditional",
           updater(draft) {
@@ -456,7 +504,7 @@ export function registerStoreClientConformance({
           },
         });
         expect(
-          await harness.client.updateStoreFrom({
+          await harness.runtime.stores.updateStoreFrom({
             definition: Store,
             id: "conditional",
             snapshot: { ...snapshot, instanceId: "" },
@@ -468,7 +516,7 @@ export function registerStoreClientConformance({
         ).toEqual(committed);
         expect(updaterRuns).toBe(1);
         expect(
-          await harness.client.updateStoreFrom({
+          await harness.runtime.stores.updateStoreFrom({
             definition: Store,
             id: "conditional",
             snapshot,
@@ -479,7 +527,7 @@ export function registerStoreClientConformance({
         ).toMatchObject({ updated: false, expectedVersion: 0, actualVersion: 2 });
         expect(updaterRuns).toBe(1);
         await expect(
-          harness.client.updateStoreFrom({
+          harness.runtime.stores.updateStoreFrom({
             definition: Store,
             id: "conditional",
             snapshot: { ...snapshot, instanceId: "" },
@@ -492,17 +540,17 @@ export function registerStoreClientConformance({
     });
 
     test("claims distinct values and records only matched takes", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       let selectorRuns = 0;
       let claimRuns = 0;
       try {
-        await harness.client.getOrCreateStore({
+        await harness.runtime.stores.getOrCreateStore({
           definition: TakeStore,
           id: "take",
           initial: { messages: [{ id: "one" }, { id: "two" }] },
         });
         const take = (worker: string, stepKey: string) =>
-          harness.client.takeFromStore({
+          harness.runtime.stores.takeFromStore({
             definition: TakeStore,
             id: "take",
             stepId: { executionId: "execution", stepKey },
@@ -525,10 +573,10 @@ export function registerStoreClientConformance({
         expect(selectorRuns).toBe(selectorRunsAfterCommit);
         expect(claimRuns).toBe(claimRunsAfterCommit);
         expect(
-          await harness.client.getStore({ definition: TakeStore, id: "take" })
+          await harness.runtime.stores.getStore({ definition: TakeStore, id: "take" })
         ).toMatchObject({ version: 2 });
 
-        const miss = await harness.client.takeFromStore({
+        const miss = await harness.runtime.stores.takeFromStore({
           definition: TakeStore,
           id: "take",
           stepId: { executionId: "execution", stepKey: "later" },
@@ -538,7 +586,7 @@ export function registerStoreClientConformance({
         if (miss.matched) throw new Error("take must not match");
         expect(miss.version).toBe(2);
         expect(miss.readPaths).toContainEqual(["messages"]);
-        await harness.client.updateStore({
+        await harness.runtime.stores.updateStore({
           definition: TakeStore,
           id: "take",
           updater(draft) {
@@ -546,7 +594,7 @@ export function registerStoreClientConformance({
           },
         });
         expect(
-          await harness.client.takeFromStore({
+          await harness.runtime.stores.takeFromStore({
             definition: TakeStore,
             id: "take",
             stepId: { executionId: "execution", stepKey: "later" },
@@ -562,14 +610,14 @@ export function registerStoreClientConformance({
     });
 
     test("protects recreated stores during conditional deletion and replays the receipt", async () => {
-      const harness = await create(noopScheduler);
+      const harness = await create();
       try {
-        const original = await harness.client.getOrCreateStore({
+        const original = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "delete",
           initial: { messages: [] },
         });
-        await harness.client.updateStore({
+        await harness.runtime.stores.updateStore({
           definition: Store,
           id: "delete",
           updater(draft) {
@@ -577,123 +625,252 @@ export function registerStoreClientConformance({
           },
         });
         expect(
-          await harness.client.deleteStoreFrom({ definition: Store, id: "delete", snapshot: original })
+          await harness.runtime.stores.deleteStoreFrom({ definition: Store, id: "delete", snapshot: original })
         ).toMatchObject({ deleted: false, reason: "conflict" });
-        const current = await harness.client.getStore({ definition: Store, id: "delete" });
+        const current = await harness.runtime.stores.getStore({ definition: Store, id: "delete" });
         const stepId = { executionId: "execution", stepKey: "delete" };
         expect(
-          await harness.client.deleteStoreFrom({ definition: Store, id: "delete", snapshot: current, stepId })
+          await harness.runtime.stores.deleteStoreFrom({ definition: Store, id: "delete", snapshot: current, stepId })
         ).toEqual({ deleted: true });
-        const recreated = await harness.client.getOrCreateStore({
+        const recreated = await harness.runtime.stores.getOrCreateStore({
           definition: Store,
           id: "delete",
           initial: { messages: [] },
         });
         expect(recreated.instanceId).not.toBe(original.instanceId);
         expect(
-          await harness.client.deleteStoreFrom({ definition: Store, id: "delete", snapshot: current, stepId })
+          await harness.runtime.stores.deleteStoreFrom({ definition: Store, id: "delete", snapshot: current, stepId })
         ).toEqual({ deleted: true });
-        expect(await harness.client.getStore({ definition: Store, id: "delete" })).toEqual(recreated);
+        expect(await harness.runtime.stores.getStore({ definition: Store, id: "delete" })).toEqual(recreated);
+      } finally {
+        await harness.dispose?.();
+      }
+    });
+    test("wakes an intersecting waiter's execution and keeps the waiter until its step is recorded", async () => {
+      const harness = await create();
+      const { runtime } = harness;
+      try {
+        await admitWaiting(runtime, "execution");
+        const initial = await runtime.stores.getOrCreateStore({
+          definition: Store,
+          id: "selective-wake",
+          initial: { messages: [] },
+        });
+        await runtime.stores.registerWaiter(
+          waiter(Store.name, "selective-wake", initial.instanceId, initial.version)
+        );
+        await expectNotWoken(runtime);
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "selective-wake",
+          updater(draft) { draft.unrelated = 1; },
+        });
+        await expectNotWoken(runtime);
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "selective-wake",
+          updater(draft) { draft.messages.push({ id: "ready" }); },
+        });
+        await expectWoken(runtime, ["execution"]);
+
+        // The wake did not consume the waiter: its step has not recorded a result.
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "selective-wake",
+          updater(draft) { draft.messages.push({ id: "again" }); },
+        });
+        await expectWoken(runtime, ["execution"]);
+
+        // Recording another step's result leaves the waiter in place.
+        await recordStep(runtime, "execution", "some-other-step");
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "selective-wake",
+          updater(draft) { draft.messages.push({ id: "third" }); },
+        });
+        await expectWoken(runtime, ["execution"]);
+
+        // Recording the waiter's own step deletes it.
+        await recordStep(runtime, "execution");
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "selective-wake",
+          updater(draft) { draft.messages.push({ id: "after-step" }); },
+        });
+        await expectNotWoken(runtime);
       } finally {
         await harness.dispose?.();
       }
     });
 
-    test("conditional deletion purges waiters and pending wakes", async () => {
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      let attempts = 0;
-      const harness = await create({
-        async requestWakeUp() {
-          attempts++;
-          throw new Error("scheduler unavailable");
-        },
-      });
+    test("collapses the wakes of many commits and waiters into one due execution", async () => {
+      const harness = await create();
+      const { runtime } = harness;
       try {
-        const initial = await harness.client.getOrCreateStore({
+        await admitWaiting(runtime, "collapsed", "bystander");
+        for (const id of ["collapse-a", "collapse-b"]) {
+          const snapshot = await runtime.stores.getOrCreateStore({
+            definition: Store,
+            id,
+            initial: { messages: [] },
+          });
+          await runtime.stores.registerWaiter({
+            ...waiter(Store.name, id, snapshot.instanceId, snapshot.version),
+            executionId: "collapsed",
+            stepKey: `wait-${id}`,
+          });
+        }
+        const shared = await runtime.stores.getOrCreateStore({
+          definition: Store,
+          id: "collapse-shared",
+          initial: { messages: [] },
+        });
+        for (const executionId of ["collapsed", "bystander"]) {
+          await runtime.stores.registerWaiter(
+            waiter(Store.name, "collapse-shared", shared.instanceId, shared.version, [["messages"]], executionId)
+          );
+        }
+        for (const id of ["collapse-a", "collapse-b", "collapse-a", "collapse-shared"]) {
+          await runtime.stores.updateStore({
+            definition: Store,
+            id,
+            updater(draft) { draft.messages.push({ id: "ready" }); },
+          });
+        }
+        await expectWoken(runtime, ["bystander", "collapsed"]);
+        await expectNotWoken(runtime);
+      } finally {
+        await harness.dispose?.();
+      }
+    });
+
+    test("ignores wakes for executions without a record or with a terminal outcome", async () => {
+      const harness = await create();
+      const { runtime } = harness;
+      try {
+        await runtime.executions.admit({
+          executionId: "finished",
+          workflowId: WORKFLOW_ID,
+          params: undefined,
+          context: new Map(),
+        });
+        const [delivery] = await runtime.executions.claimDue();
+        await runtime.executions.acknowledge({
+          delivery,
+          outcome: { status: "completed", result: "done" },
+        });
+        const initial = await runtime.stores.getOrCreateStore({
+          definition: Store,
+          id: "orphan-wake",
+          initial: { messages: [] },
+        });
+        for (const executionId of ["unknown", "finished"]) {
+          await runtime.stores.registerWaiter(
+            waiter(Store.name, "orphan-wake", initial.instanceId, initial.version, [["messages"]], executionId)
+          );
+        }
+        const committed = await runtime.stores.updateStore({
+          definition: Store,
+          id: "orphan-wake",
+          updater(draft) { draft.messages.push({ id: "ready" }); },
+        });
+        expect(committed.version).toBe(1);
+        await expectNotWoken(runtime);
+        expect(await runtime.executions.get("unknown")).toBeUndefined();
+        expect(await runtime.executions.get("finished")).toMatchObject({
+          status: "completed",
+          outcome: { status: "completed", result: "done" },
+        });
+      } finally {
+        await harness.dispose?.();
+      }
+    });
+
+    test("deleteStore purges the store's waiters", async () => {
+      const harness = await create();
+      const { runtime } = harness;
+      try {
+        await admitWaiting(runtime, "execution");
+        const original = await runtime.stores.getOrCreateStore({
+          definition: Store,
+          id: "deleted-waiters",
+          initial: { messages: [] },
+        });
+        await runtime.stores.registerWaiter(
+          waiter(Store.name, "deleted-waiters", original.instanceId, original.version)
+        );
+        await runtime.stores.deleteStore({ definition: Store, id: "deleted-waiters" });
+        const recreated = await runtime.stores.getOrCreateStore({
+          definition: Store,
+          id: "deleted-waiters",
+          initial: { messages: [] },
+        });
+        expect(recreated.instanceId).not.toBe(original.instanceId);
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "deleted-waiters",
+          updater(draft) { draft.messages.push({ id: "new-instance" }); },
+        });
+        await expectNotWoken(runtime);
+
+        // A waiter registered on the new instance is woken by it.
+        const current = await runtime.stores.getStore({ definition: Store, id: "deleted-waiters" });
+        await runtime.stores.registerWaiter(
+          waiter(Store.name, "deleted-waiters", current.instanceId, current.version)
+        );
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "deleted-waiters",
+          updater(draft) { draft.messages.push({ id: "again" }); },
+        });
+        await expectWoken(runtime, ["execution"]);
+      } finally {
+        await harness.dispose?.();
+      }
+    });
+
+    test("conditional deletion purges the store's waiters", async () => {
+      const harness = await create();
+      const { runtime } = harness;
+      try {
+        await admitWaiting(runtime, "execution");
+        const initial = await runtime.stores.getOrCreateStore({
           definition: Store,
           id: "conditional-delete-wake",
           initial: { messages: [] },
         });
-        const originalWaiter = waiter(
-          Store.name,
-          "conditional-delete-wake",
-          initial.instanceId,
-          initial.version
+        await runtime.stores.registerWaiter(
+          waiter(Store.name, "conditional-delete-wake", initial.instanceId, initial.version)
         );
-        await harness.client.registerWaiter(originalWaiter);
-        await harness.client.updateStore({
+        await runtime.stores.updateStore({
           definition: Store,
           id: "conditional-delete-wake",
           updater(draft) { draft.messages.push({ id: "old" }); },
         });
-        expect(attempts).toBe(1);
-        const current = await harness.client.getStore({
+        // A wake requested before deletion stays requested.
+        await expectWoken(runtime, ["execution"]);
+        const current = await runtime.stores.getStore({
           definition: Store,
           id: "conditional-delete-wake",
         });
         expect(
-          await harness.client.deleteStoreFrom({
+          await runtime.stores.deleteStoreFrom({
             definition: Store,
             id: "conditional-delete-wake",
             snapshot: current,
           })
         ).toEqual({ deleted: true });
-        const recreated = await harness.client.getOrCreateStore({
+        await runtime.stores.getOrCreateStore({
           definition: Store,
           id: "conditional-delete-wake",
           initial: { messages: [] },
         });
-        await harness.client.registerWaiter({
-          ...originalWaiter,
-          instanceId: recreated.instanceId,
-          sinceVersion: recreated.version,
-        });
-        await harness.client.updateStore({
+        await runtime.stores.updateStore({
           definition: Store,
           id: "conditional-delete-wake",
-          updater(draft) { draft.unrelated = 1; },
+          updater(draft) { draft.messages.push({ id: "new" }); },
         });
-        expect(attempts).toBe(1);
-      } finally {
-        await harness.dispose?.();
-        errorSpy.mockRestore();
-      }
-    });
-
-    test("wakes intersecting waiters and consumes successful delivery", async () => {
-      const events: WorkflowEvent[] = [];
-      const harness = await create({ async requestWakeUp(wakeEvent) { events.push(wakeEvent); } });
-      try {
-        const initial = await harness.client.getOrCreateStore({
-          definition: Store,
-          id: "selective-wake",
-          initial: { messages: [] },
-        });
-        await harness.client.registerWaiter(waiter(Store.name, "selective-wake", initial.instanceId, 0));
-        await harness.client.updateStore({
-          definition: Store,
-          id: "selective-wake",
-          updater(draft) {
-            draft.unrelated = 1;
-          },
-        });
-        expect(events).toEqual([]);
-        await harness.client.updateStore({
-          definition: Store,
-          id: "selective-wake",
-          updater(draft) {
-            draft.messages.push({ id: "ready" });
-          },
-        });
-        await eventually(() => expect(events).toEqual([event]));
-        await harness.client.updateStore({
-          definition: Store,
-          id: "selective-wake",
-          updater(draft) {
-            draft.messages.push({ id: "again" });
-          },
-        });
-        expect(events).toEqual([event]);
+        await expectNotWoken(runtime);
       } finally {
         await harness.dispose?.();
       }
@@ -702,34 +879,34 @@ export function registerStoreClientConformance({
     test("wakes for replacement, take-claim, and shifted-array paths", async () => {
       type QueueState = { messages: { id: string; claimedBy?: string }[] };
       const QueueStore = defineStore(`${name}-wake-paths-conformance`, schema<QueueState>());
-      const events: WorkflowEvent[] = [];
-      const harness = await create({ async requestWakeUp(wakeEvent) { events.push(wakeEvent); } });
+      const harness = await create();
+      const { runtime } = harness;
       try {
-        const replacement = await harness.client.getOrCreateStore({
+        await admitWaiting(runtime, "replacement", "claim", "splice");
+        const replacement = await runtime.stores.getOrCreateStore({
           definition: QueueStore,
           id: "replacement",
           initial: { messages: [] },
         });
-        await harness.client.registerWaiter(
-          waiter(QueueStore.name, "replacement", replacement.instanceId, replacement.version)
+        await runtime.stores.registerWaiter(
+          waiter(QueueStore.name, "replacement", replacement.instanceId, replacement.version, [["messages"]], "replacement")
         );
-        await harness.client.updateStore({
+        await runtime.stores.updateStore({
           definition: QueueStore,
           id: "replacement",
           updater: () => ({ messages: [{ id: "ready" }] }),
         });
-        await eventually(() => expect(events).toEqual([event]));
-        events.length = 0;
+        await expectWoken(runtime, ["replacement"]);
 
-        const claim = await harness.client.getOrCreateStore({
+        const claim = await runtime.stores.getOrCreateStore({
           definition: QueueStore,
           id: "claim",
           initial: { messages: [{ id: "one" }] },
         });
-        await harness.client.registerWaiter(
-          waiter(QueueStore.name, "claim", claim.instanceId, claim.version, [["messages", 0, "claimedBy"]])
+        await runtime.stores.registerWaiter(
+          waiter(QueueStore.name, "claim", claim.instanceId, claim.version, [["messages", 0, "claimedBy"]], "claim")
         );
-        const claimed = await harness.client.takeFromStore({
+        const claimed = await runtime.stores.takeFromStore({
           definition: QueueStore,
           id: "claim",
           selector: (state) => state.messages[0],
@@ -737,350 +914,234 @@ export function registerStoreClientConformance({
         });
         if (!claimed.matched) throw new Error("take must match");
         expect(claimed.selected).toEqual({ id: "one", claimedBy: "worker" });
-        await eventually(() => expect(events).toEqual([event]));
-        events.length = 0;
+        await expectWoken(runtime, ["claim"]);
 
-        const splice = await harness.client.getOrCreateStore({
+        const splice = await runtime.stores.getOrCreateStore({
           definition: QueueStore,
           id: "splice",
           initial: { messages: [{ id: "one" }, { id: "two" }] },
         });
-        await harness.client.registerWaiter(
-          waiter(QueueStore.name, "splice", splice.instanceId, splice.version, [["messages", 0, "id"]])
+        await runtime.stores.registerWaiter(
+          waiter(QueueStore.name, "splice", splice.instanceId, splice.version, [["messages", 0, "id"]], "splice")
         );
-        await harness.client.takeFromStore({
+        await runtime.stores.takeFromStore({
           definition: QueueStore,
           id: "splice",
           selector: (state) => state.messages[0],
           claim: (draft) => { draft.messages.splice(0, 1); },
         });
-        await eventually(() => expect(events).toEqual([event]));
+        await expectWoken(runtime, ["splice"]);
         expect(
-          await harness.client.getStore({ definition: QueueStore, id: "splice" })
+          await runtime.stores.getStore({ definition: QueueStore, id: "splice" })
         ).toMatchObject({ state: { messages: [{ id: "two" }] }, version: 1 });
       } finally {
         await harness.dispose?.();
       }
     });
 
-    test("immediately wakes a stale registration and does not retain it", async () => {
-      const events: WorkflowEvent[] = [];
-      const harness = await create({ async requestWakeUp(wakeEvent) { events.push(wakeEvent); } });
+    test("immediately wakes a stale registration", async () => {
+      const harness = await create();
+      const { runtime } = harness;
       try {
-        const initial = await harness.client.getOrCreateStore({
+        await admitWaiting(runtime, "behind", "replaced", "missing");
+        const initial = await runtime.stores.getOrCreateStore({
           definition: Store,
           id: "stale-registration",
           initial: { messages: [] },
         });
-        await harness.client.updateStore({
+        await runtime.stores.updateStore({
           definition: Store,
           id: "stale-registration",
           updater(draft) { draft.messages.push({ id: "first" }); },
         });
-        await harness.client.registerWaiter(
-          waiter(Store.name, "stale-registration", initial.instanceId, initial.version)
+        // Observed an older version.
+        await runtime.stores.registerWaiter(
+          waiter(Store.name, "stale-registration", initial.instanceId, initial.version, [["messages"]], "behind")
         );
-        await eventually(() => expect(events).toEqual([event]));
-        await harness.client.updateStore({
-          definition: Store,
-          id: "stale-registration",
-          updater(draft) { draft.messages.push({ id: "second" }); },
-        });
-        expect(events).toEqual([event]);
-      } finally {
-        await harness.dispose?.();
-      }
-    });
+        await expectWoken(runtime, ["behind"]);
 
-    test("retries failed stale-registration delivery after an unrelated commit", async () => {
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      const events: WorkflowEvent[] = [];
-      let attempts = 0;
-      const harness = await create({
-        async requestWakeUp(wakeEvent) {
-          attempts++;
-          if (attempts === 1) throw new Error("temporary scheduler failure");
-          events.push(wakeEvent);
-        },
-      });
-      try {
-        const initial = await harness.client.getOrCreateStore({
+        // Observed an instance that has since been deleted and recreated.
+        const original = await runtime.stores.getOrCreateStore({
           definition: Store,
-          id: "stale-retry",
+          id: "stale-instance",
           initial: { messages: [] },
         });
-        await harness.client.updateStore({
+        await runtime.stores.deleteStore({ definition: Store, id: "stale-instance" });
+        await runtime.stores.getOrCreateStore({
           definition: Store,
-          id: "stale-retry",
-          updater(draft) { draft.messages.push({ id: "first" }); },
+          id: "stale-instance",
+          initial: { messages: [] },
         });
-        await harness.client.registerWaiter(
-          waiter(Store.name, "stale-retry", initial.instanceId, initial.version)
+        await runtime.stores.registerWaiter(
+          waiter(Store.name, "stale-instance", original.instanceId, original.version, [["messages"]], "replaced")
         );
-        expect(attempts).toBe(1);
-        await harness.client.updateStore({
+        await expectWoken(runtime, ["replaced"]);
+
+        // Observed a store that no longer exists.
+        const gone = await runtime.stores.getOrCreateStore({
           definition: Store,
-          id: "stale-retry",
-          updater(draft) { draft.unrelated = 1; },
+          id: "stale-missing",
+          initial: { messages: [] },
         });
-        await eventually(() => expect(events).toEqual([event]));
-        expect(attempts).toBe(2);
+        await runtime.stores.deleteStore({ definition: Store, id: "stale-missing" });
+        await runtime.stores.registerWaiter(
+          waiter(Store.name, "stale-missing", gone.instanceId, gone.version, [["messages"]], "missing")
+        );
+        await expectWoken(runtime, ["missing"]);
       } finally {
         await harness.dispose?.();
-        errorSpy.mockRestore();
       }
     });
 
     test("does not lose a waiter registration racing a commit", async () => {
-      const events: WorkflowEvent[] = [];
-      const harness = await create({ async requestWakeUp(wakeEvent) { events.push(wakeEvent); } });
+      const harness = await create();
+      const { runtime } = harness;
+      const executionIds = Array.from({ length: 10 }, (_, index) => `registration-race-${index}`);
       try {
-        for (let index = 0; index < 10; index++) {
-          const id = `registration-race-${index}`;
-          const initial = await harness.client.getOrCreateStore({
+        await admitWaiting(runtime, ...executionIds);
+        for (const [index, id] of executionIds.entries()) {
+          const initial = await runtime.stores.getOrCreateStore({
             definition: Store,
             id,
             initial: { messages: [] },
           });
           const register = () =>
-            harness.client.registerWaiter(waiter(Store.name, id, initial.instanceId, initial.version));
+            runtime.stores.registerWaiter(
+              waiter(Store.name, id, initial.instanceId, initial.version, [["messages"]], id)
+            );
           const update = () =>
-            harness.client.updateStore({
+            runtime.stores.updateStore({
               definition: Store,
               id,
-              updater(draft) {
-                draft.messages.push({ id: "ready" });
-              },
+              updater(draft) { draft.messages.push({ id: "ready" }); },
             });
           await Promise.all(index % 2 === 0 ? [register(), update()] : [update(), register()]);
         }
-        await eventually(() => expect(events).toHaveLength(10));
+        await expectWoken(runtime, executionIds);
       } finally {
         await harness.dispose?.();
       }
     });
 
-    test("retries failed wakes without blocking healthy waiters", async () => {
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      const attempts = new Map<string, number>();
-      const delivered: string[] = [];
-      let updaterRuns = 0;
-      const harness = await create({
-        async requestWakeUp(wakeEvent) {
-          const count = (attempts.get(wakeEvent.executionId) ?? 0) + 1;
-          attempts.set(wakeEvent.executionId, count);
-          if (wakeEvent.executionId === "retry" && count === 1) throw new Error("temporary failure");
-          delivered.push(wakeEvent.executionId);
-        },
-      });
+    test("qualifies declared shared-client capabilities", async () => {
+      const harness = await create();
       try {
-        const initial = await harness.client.getOrCreateStore({
+        if (!harness.createPeer) return;
+        const primary = harness.runtime;
+        const peer = await harness.createPeer();
+        await primary.stores.getOrCreateStore({
           definition: Store,
-          id: "retry-wake",
+          id: "shared-client",
           initial: { messages: [] },
         });
-        for (const executionId of ["retry", "healthy"]) {
-          await harness.client.registerWaiter({
-            ...waiter(Store.name, "retry-wake", initial.instanceId, initial.version),
-            executionId,
-            event: { ...event, executionId },
-          });
-        }
-        const update = () =>
-          harness.client.updateStore({
-            definition: Store,
-            id: "retry-wake",
-            stepId: { executionId: "producer", stepKey: "append" },
-            updater(draft) {
-              updaterRuns++;
-              draft.messages.push({ id: "ready" });
-            },
-          });
-        const committed = await update();
-        await eventually(() => expect(delivered).toEqual(["healthy"]));
-        expect(await update()).toEqual(committed);
-        expect(updaterRuns).toBe(1);
-        expect(attempts.get("retry")).toBe(1);
-        expect(delivered).toEqual(["healthy"]);
-        await harness.client.updateStore({
-          definition: Store,
-          id: "retry-wake",
-          updater(draft) {
-            draft.unrelated = 1;
-          },
-        });
-        await eventually(() => expect(delivered).toEqual(["healthy", "retry"]));
-      } finally {
-        await harness.dispose?.();
-        errorSpy.mockRestore();
-      }
-    });
-
-    test("does not transfer a pending wake to a recreated store", async () => {
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      let attempts = 0;
-      const delivered: WorkflowEvent[] = [];
-      const harness = await create({
-        async requestWakeUp(wakeEvent) {
-          attempts++;
-          if (attempts === 1) throw new Error("temporary failure");
-          delivered.push(wakeEvent);
-        },
-      });
-      try {
-        const original = await harness.client.getOrCreateStore({
-          definition: Store,
-          id: "recreated-wake",
-          initial: { messages: [] },
-        });
-        const originalWaiter = waiter(
-          Store.name,
-          "recreated-wake",
-          original.instanceId,
-          original.version
-        );
-        await harness.client.registerWaiter(originalWaiter);
-        await harness.client.updateStore({
-          definition: Store,
-          id: "recreated-wake",
-          updater(draft) { draft.messages.push({ id: "old" }); },
-        });
-        await harness.client.deleteStore({ definition: Store, id: "recreated-wake" });
-        const recreated = await harness.client.getOrCreateStore({
-          definition: Store,
-          id: "recreated-wake",
-          initial: { messages: [] },
-        });
-        await harness.client.registerWaiter({
-          ...originalWaiter,
-          instanceId: recreated.instanceId,
-          sinceVersion: recreated.version,
-        });
-        await harness.client.updateStore({
-          definition: Store,
-          id: "recreated-wake",
-          updater(draft) { draft.unrelated = 1; },
-        });
-        expect(recreated.instanceId).not.toBe(original.instanceId);
-        expect(attempts).toBe(1);
-        expect(delivered).toEqual([]);
-      } finally {
-        await harness.dispose?.();
-        errorSpy.mockRestore();
-      }
-    });
-
-    test("qualifies declared shared-client and durable-delivery capabilities", async () => {
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-      const delivered: WorkflowEvent[] = [];
-      const harness = await create({
-        async requestWakeUp() {
-          throw new Error("scheduler unavailable");
-        },
-      });
-      try {
-        if (harness.createPeer) {
-          let wakeCount = 0;
-          let peer!: StoreClient;
-          const primary = await harness.createPeer({
-            async requestWakeUp() {
-              wakeCount++;
-              if (wakeCount === 1) {
-                const current = await peer.getStore({ definition: Store, id: "wake-generation" });
-                await peer.registerWaiter(
-                  waiter(Store.name, "wake-generation", current.instanceId, current.version)
-                );
-              }
-            },
-          });
-          peer = await harness.createPeer(noopScheduler);
-          const initial = await harness.client.getOrCreateStore({
+        const results = await Promise.all([
+          primary.stores.updateStore({
             definition: Store,
             id: "shared-client",
-            initial: { messages: [] },
-          });
-          const results = await Promise.all([
-            harness.client.updateStore({
-              definition: Store,
-              id: "shared-client",
-              updater(draft) { draft.messages.push({ id: "a" }); },
-            }),
-            peer.updateStore({
-              definition: Store,
-              id: "shared-client",
-              updater(draft) { draft.messages.push({ id: "b" }); },
-            }),
-          ]);
-          expect(results.map((result) => result.version).sort()).toEqual([1, 2]);
-          expect(initial.version).toBe(0);
-
-          const wakeInitial = await primary.getOrCreateStore({
+            updater(draft) { draft.messages.push({ id: "a" }); },
+          }),
+          peer.stores.updateStore({
             definition: Store,
-            id: "wake-generation",
+            id: "shared-client",
+            updater(draft) { draft.messages.push({ id: "b" }); },
+          }),
+        ]);
+        expect(results.map((result) => result.version).sort()).toEqual([1, 2]);
+
+        // A waiter registered through one client is woken by a commit through
+        // another, and the wake is visible to every client.
+        await admitWaiting(primary, "shared-wake");
+        const wakeInitial = await peer.stores.getOrCreateStore({
+          definition: Store,
+          id: "shared-wake",
+          initial: { messages: [] },
+        });
+        await peer.stores.registerWaiter(
+          waiter(Store.name, "shared-wake", wakeInitial.instanceId, wakeInitial.version, [["messages"]], "shared-wake")
+        );
+        await primary.stores.updateStore({
+          definition: Store,
+          id: "shared-wake",
+          updater(draft) { draft.messages.push({ id: "ready" }); },
+        });
+        await expectWoken(peer, ["shared-wake"]);
+        // A step recorded through one client deletes the waiter for every client.
+        await recordStep(primary, "shared-wake");
+        await peer.stores.updateStore({
+          definition: Store,
+          id: "shared-wake",
+          updater(draft) { draft.messages.push({ id: "after-step" }); },
+        });
+        await expectNotWoken(primary);
+
+        const registrar = await harness.createPeer();
+        const committer = await harness.createPeer();
+        const executionIds = Array.from({ length: 10 }, (_, index) => `shared-registration-race-${index}`);
+        await admitWaiting(primary, ...executionIds);
+        for (const [index, id] of executionIds.entries()) {
+          const snapshot = await committer.stores.getOrCreateStore({
+            definition: Store,
+            id,
             initial: { messages: [] },
           });
-          await primary.registerWaiter(
-            waiter(Store.name, "wake-generation", wakeInitial.instanceId, wakeInitial.version)
-          );
-          for (const id of ["first", "second"]) {
-            await primary.updateStore({
-              definition: Store,
-              id: "wake-generation",
-              updater(draft) { draft.messages.push({ id }); },
-            });
-          }
-          await eventually(() => expect(wakeCount).toBe(2));
-
-          const registrationEvents: WorkflowEvent[] = [];
-          const registrationScheduler: SchedulerClient = {
-            async requestWakeUp(wakeEvent) {
-              registrationEvents.push(wakeEvent);
-            },
-          };
-          const registrar = await harness.createPeer(registrationScheduler);
-          const committer = await harness.createPeer(registrationScheduler);
-          for (let index = 0; index < 10; index++) {
-            const id = `shared-registration-race-${index}`;
-            const snapshot = await committer.getOrCreateStore({
+          const register = () =>
+            registrar.stores.registerWaiter(
+              waiter(Store.name, id, snapshot.instanceId, snapshot.version, [["messages"]], id)
+            );
+          const update = () =>
+            committer.stores.updateStore({
               definition: Store,
               id,
-              initial: { messages: [] },
+              updater(draft) { draft.messages.push({ id: "ready" }); },
             });
-            const register = () =>
-              registrar.registerWaiter(
-                waiter(Store.name, id, snapshot.instanceId, snapshot.version)
-              );
-            const update = () =>
-              committer.updateStore({
-                definition: Store,
-                id,
-                updater(draft) { draft.messages.push({ id: "ready" }); },
-              });
-            await Promise.all(index % 2 === 0 ? [register(), update()] : [update(), register()]);
-          }
-          await eventually(() => expect(registrationEvents).toHaveLength(10));
+          await Promise.all(index % 2 === 0 ? [register(), update()] : [update(), register()]);
         }
-
-        if (harness.restart) {
-          const initial = await harness.client.getOrCreateStore({
-            definition: Store,
-            id: "durable-wake",
-            initial: { messages: [] },
-          });
-          await harness.client.registerWaiter(
-            waiter(Store.name, "durable-wake", initial.instanceId, initial.version)
-          );
-          await harness.client.updateStore({
-            definition: Store,
-            id: "durable-wake",
-            updater(draft) { draft.messages.push({ id: "ready" }); },
-          });
-          await harness.restart({ async requestWakeUp(wakeEvent) { delivered.push(wakeEvent); } });
-          await eventually(() => expect(delivered).toEqual([event]));
-        }
+        await expectWoken(primary, executionIds);
       } finally {
         await harness.dispose?.();
-        errorSpy.mockRestore();
+      }
+    });
+
+    test("qualifies declared durable-wake capabilities", async () => {
+      const harness = await create();
+      try {
+        if (!harness.restart) return;
+        const { runtime } = harness;
+        await admitWaiting(runtime, "durable-wake", "durable-waiter");
+        for (const executionId of ["durable-wake", "durable-waiter"]) {
+          const initial = await runtime.stores.getOrCreateStore({
+            definition: Store,
+            id: executionId,
+            initial: { messages: [] },
+          });
+          await runtime.stores.registerWaiter(
+            waiter(Store.name, executionId, initial.instanceId, initial.version, [["messages"]], executionId)
+          );
+        }
+        await runtime.stores.updateStore({
+          definition: Store,
+          id: "durable-wake",
+          updater(draft) { draft.messages.push({ id: "ready" }); },
+        });
+
+        // The commit returned, so its wake survives a crash before any claim.
+        const restarted = await harness.restart();
+        expect(
+          await restarted.stores.getStore({ definition: Store, id: "durable-wake" })
+        ).toMatchObject({ state: { messages: [{ id: "ready" }] }, version: 1 });
+        await expectWoken(restarted, ["durable-wake"]);
+
+        // Waiters survive the restart too, until their step is recorded.
+        for (const id of ["durable-wake", "durable-waiter"]) {
+          await restarted.stores.updateStore({
+            definition: Store,
+            id,
+            updater(draft) { draft.messages.push({ id: "after-restart" }); },
+          });
+        }
+        await expectWoken(restarted, ["durable-wake", "durable-waiter"]);
+      } finally {
+        await harness.dispose?.();
       }
     });
   });
