@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, expectTypeOf, test, vi } from "vitest";
 import type { Logger } from "pino";
 import {
   ExecutionDispatcher,
@@ -22,6 +22,7 @@ import {
   registerErrorClass,
   workflow,
   type StandardSchemaV1,
+  type WorkflowEvent,
   type WorkflowFn,
 } from "yieldstar";
 
@@ -255,6 +256,36 @@ describe("workflow results", () => {
     expect(result).toEqual({ a: undefined, list: [1, undefined] });
     expect(Object.keys(result)).toEqual(["a", "list"]);
   });
+
+  test("workflow results are typed as durable values", () => {
+    // @ts-expect-error a Date is not a durable value
+    workflow(async function* () {
+      return new Date();
+    });
+    // @ts-expect-error a Map is not a durable value
+    workflow(async function* () {
+      return { totals: new Map<string, number>() };
+    });
+    interface Receipt {
+      id: string;
+      note?: string;
+    }
+    const receipt = workflow(async function* (_step, event: WorkflowEvent<{ id?: string }>) {
+      const receipt: Receipt | undefined = event.params.id ? { id: event.params.id } : undefined;
+      return receipt;
+    });
+    const counted = workflow(async function* () {
+      return { count: 1 };
+    });
+    const nothing = workflow(async function* () {});
+    const sdk = createTestSdkFactory()({ receipt, counted, nothing });
+    type ResultOf<K extends "receipt" | "counted" | "nothing"> = Awaited<
+      ReturnType<typeof sdk.triggerAndWait<K>>
+    >;
+    expectTypeOf<ResultOf<"receipt">>().toEqualTypeOf<Receipt | undefined>();
+    expectTypeOf<ResultOf<"counted">>().toEqualTypeOf<{ count: number }>();
+    expectTypeOf<ResultOf<"nothing">>().toEqualTypeOf<void>();
+  });
 });
 
 describe("params and context", () => {
@@ -272,6 +303,28 @@ describe("params and context", () => {
       expect(error).toBeInstanceOf(ExecutionAdmissionError);
       expect(error.code).toBe("INVALID_EXECUTION_EVENT");
     }
+  });
+
+  test("workflow and step.start params are typed as durable values", () => {
+    // @ts-expect-error a Date is not a durable value
+    workflow(async function* (_step, _event: WorkflowEvent<{ at: Date }>) {
+      return null;
+    });
+    // @ts-expect-error a Set is not a durable value
+    workflow<{ tags: Set<string> }, null, ReadonlyMap<any, any>>(async function* () {
+      return null;
+    });
+    interface Order {
+      id: string;
+      note?: string;
+      lines: { sku: string }[];
+    }
+    workflow(async function* (step, event: WorkflowEvent<Order>) {
+      // @ts-expect-error a Date is not a durable value
+      yield* step.start("bad", { workflowId: "ship", params: { at: new Date() } });
+      const order: Order = event.params;
+      return yield* step.start("ship", { workflowId: "ship", params: order });
+    });
   });
 
   test("every delivery receives the context as a ReadonlyMap with equal entries", async () => {
@@ -526,7 +579,7 @@ describe("step errors", () => {
 });
 
 describe("store values", () => {
-  type Order = { lines: { sku: string }[]; note?: unknown };
+  type Order = { lines: { sku: string }[]; note?: any };
   const Orders = defineStore("durable-orders", testSchema<Order>());
 
   test("an update to a non-durable state throws INVALID_STEP_VALUE and leaves the store unchanged", async () => {
@@ -587,6 +640,43 @@ describe("store values", () => {
     for (const run of [first, replay]) {
       expect(thrownBy(run)).toMatchObject({ code: "INVALID_STEP_VALUE", stepKey: "value" });
     }
+  });
+
+  test("store state and store step results are typed as durable values", () => {
+    // @ts-expect-error a Date is not a durable value
+    defineStore("dated", testSchema<{ at: Date }>());
+    interface Cart {
+      id: string;
+      note?: string;
+      lines: { sku: string; qty: number }[];
+    }
+    const Carts = defineStore("carts", testSchema<Cart>());
+    workflow(async function* (step) {
+      // @ts-expect-error a Date is not a durable value
+      yield* step.store({ name: "dated", schema: testSchema<{ at: Date }>() });
+      const cart = yield* step.store(Carts, { initial: { id: "c", lines: [] } });
+      // @ts-expect-error a Date is not a durable value
+      yield* cart.select("at", () => new Date());
+      // @ts-expect-error a Set is not a durable value
+      yield* cart.when("skus", (state) => state.lines.length > 0 && new Set(state.lines));
+      yield* cart.take(
+        "taken",
+        // @ts-expect-error a Map is not a durable value
+        (state) => state.lines.length > 0 && { bySku: new Map<string, number>() },
+        (draft) => {
+          draft.lines = [];
+        }
+      );
+      const count = yield* cart.select("count", (state) => state.lines.length);
+      const note = yield* cart.select("note", (state) => state.note);
+      const lines = yield* cart.when("lines", (state) => state.lines.length > 0 && state.lines);
+      const busy = yield* cart.when("busy", (state) => state.lines.length > 1);
+      expectTypeOf(count).toEqualTypeOf<number>();
+      expectTypeOf(note).toEqualTypeOf<string | undefined>();
+      expectTypeOf(lines).toEqualTypeOf<{ sku: string; qty: number }[]>();
+      expectTypeOf(busy).toEqualTypeOf<true>();
+      return null;
+    });
   });
 
   test("store state keeps undefined properties", async () => {
