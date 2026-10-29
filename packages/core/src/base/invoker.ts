@@ -2,9 +2,8 @@ import type { EventEmitter } from "node:events";
 import type { WorkflowEvent } from "./event";
 import type { ExecutionLease, WorkflowRunOutcome } from "./execution";
 
-/** What the dispatcher passes with each delivery. */
 export type DeliveryOptions = {
-  /** The delivery's lease. Every fenced write the delivery makes carries it. */
+  /** Every fenced write the delivery makes carries this lease. */
   lease: ExecutionLease;
   /**
    * Aborted when the delivery must stop: the dispatcher aborts it, with a
@@ -25,8 +24,7 @@ export type WorkflowInvoker = {
   /**
    * Runs one delivery of an execution and resolves with its outcome. Rejects,
    * without an outcome, when the delivery hits an infrastructure error or the
-   * worker exits before replying. Every fenced write the delivery makes
-   * carries `options.lease`. Once `options.signal` aborts, the delivery runs
+   * worker exits before replying. Once `options.signal` aborts, the delivery runs
    * no more workflow code and makes no more fenced writes; it rejects with an
    * `InfrastructureError` whose cause is the signal's reason. An invoker that
    * can stop a step function already running, as the worker invoker does by

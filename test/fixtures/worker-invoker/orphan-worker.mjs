@@ -1,6 +1,3 @@
-// A worker over the same SQLite file. Its second step writes a marker with
-// its pid, then pauses, giving the test time to kill the runtime process
-// before the step's result is written.
 import { writeFileSync } from "node:fs";
 import { WorkflowRunner } from "@yieldstar/core";
 import { SqliteRuntime } from "@yieldstar/sqlite-runtime";
@@ -21,6 +18,8 @@ const router = {
     yield* step.run("before", () => "written");
     yield* step.run("during", async () => {
       writeFileSync(event.params.markerPath, String(process.pid));
+      // Gives the test time to kill the runtime process before this step's
+      // result is written.
       await new Promise((resolve) => setTimeout(resolve, 600));
       return "written after the runtime process died";
     });

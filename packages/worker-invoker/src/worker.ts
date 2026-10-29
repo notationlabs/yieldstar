@@ -33,7 +33,6 @@ export type WorkerDelivery = {
   lease: ExecutionLease;
 };
 
-/** Messages a parent sends its worker. */
 export type WorkerRequest = WorkerDelivery;
 
 export type SerializedOutcome =

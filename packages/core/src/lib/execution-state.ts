@@ -19,62 +19,61 @@ import { ReadOnlyMap } from "../utils/map";
  * apply the transitions below inside one atomic write, so every adapter keeps
  * the same lease, wake and acknowledgement semantics.
  *
- * `status` is the status the execution rests in when it has no live lease
- * (`admitted`, `suspended` or terminal); it is never `running`. The record's
- * `running` status is derived from the lease and the clock by
- * `executionStatusAt`, so an expired lease reads as ended without a write.
  * Lease transitions (claim, renew, release) do not change `updatedAt`.
- *
- * Pending wakes are split in two:
- * - `dueAt` merges wakes not covered by a lease;
- * - `claimedDueAt` holds the wakes the current lease covers. They stay
- *   pending until that lease is acknowledged, so a lease that is released or
- *   expires leaves them due.
- *
- * Leases:
- * - `leaseToken` is the highest token issued for this execution (0 before the
- *   first claim). It never decreases.
- * - `leaseExpiresAt` is non-null while the lease with `leaseToken` is held,
- *   that is, claimed and not yet released or acknowledged. A held lease
- *   stays current after it expires, until a later claim issues a higher token.
- * - `unacknowledgedDeliveries` counts consecutive leases that ended by release
- *   or by expiry and a later claim. It does not include a held lease that has
- *   expired; `unacknowledgedDeliveriesAt` adds that one.
- * - `redeliverAt` is when a released execution may be claimed again, after the
- *   redelivery delay. A held lease's delay is measured from `leaseExpiresAt`.
  */
 export type ExecutionState = {
   executionId: string;
   workflowId: string;
   params: string;
   context: string;
+  /**
+   * The status the execution rests in when it has no live lease. The record's
+   * `running` status is derived from the lease and the clock by
+   * `executionStatusAt`, so an expired lease reads as ended without a write.
+   */
   status: Exclude<ExecutionStatus, "running">;
   outcome: string | null;
   admittedAt: number;
   updatedAt: number;
+  /** The earliest of the wakes not covered by a lease. */
   dueAt: number | null;
+  /**
+   * The wakes the current lease covers. They stay pending until that lease is
+   * acknowledged, so a lease that is released or expires leaves them due.
+   */
   claimedDueAt: number | null;
+  /** The highest token issued for this execution (0 before the first claim). */
   leaseToken: number;
+  /**
+   * Non-null while the lease with `leaseToken` is held, that is, claimed and
+   * not yet released or acknowledged. A held lease stays current after it
+   * expires, until a later claim issues a higher token.
+   */
   leaseExpiresAt: number | null;
+  /**
+   * Consecutive leases that ended by release or by expiry and a later claim.
+   * It does not include a held lease that has expired;
+   * `unacknowledgedDeliveriesAt` adds that one.
+   */
   unacknowledgedDeliveries: number;
+  /**
+   * When a released execution may be claimed again. A held lease's delay is
+   * measured from `leaseExpiresAt` instead.
+   */
   redeliverAt: number | null;
 };
 
-/** How long a lease lasts unless renewed: 30 seconds. */
 export const DEFAULT_LEASE_DURATION = 30_000;
 
-/** The redelivery delay after one unacknowledged delivery: 1 second. */
+/** The redelivery delay after one unacknowledged delivery. */
 export const REDELIVERY_DELAY_BASE = 1_000;
 
-/** The longest redelivery delay: 5 minutes. */
 export const REDELIVERY_DELAY_MAX = 300_000;
 
 /**
  * How long an execution waits after a delivery ends unacknowledged before it
  * can be claimed again. Starts at `REDELIVERY_DELAY_BASE` and doubles with
- * each consecutive unacknowledged delivery, up to `REDELIVERY_DELAY_MAX`. It
- * never decreases as `unacknowledgedDeliveries` grows, and it is zero only
- * when there are none.
+ * each consecutive unacknowledged delivery, up to `REDELIVERY_DELAY_MAX`.
  */
 export function redeliveryDelay(unacknowledgedDeliveries: number): number {
   if (unacknowledgedDeliveries <= 0) return 0;
@@ -153,7 +152,6 @@ export function decodeExecutionOutcome(encoded: string): ExecutionOutcome {
   return { status: "failed", error: decodeError(parsed.error) };
 }
 
-/** Keeps at least `name` and `message`, plus `stack` and a string `code`. */
 function encodeError(error: unknown) {
   const err = error instanceof Error ? error : new Error(String(error));
   const code = (err as { code?: unknown }).code;
@@ -195,7 +193,6 @@ export function createExecutionState(params: {
     outcome: null,
     admittedAt: params.now,
     updatedAt: params.now,
-    // Admission makes the execution due immediately.
     dueAt: params.now,
     claimedDueAt: null,
     leaseToken: 0,

@@ -10,16 +10,10 @@ import type {
 import { LeaseLostError, isTerminalExecutionStatus } from "../base/execution";
 import { DEFAULT_LEASE_DURATION } from "./execution-state";
 
-/** How many deliveries a dispatcher runs at once unless configured: 10. */
 export const DEFAULT_DISPATCHER_CONCURRENCY = 10;
 
-/**
- * How long the dispatcher waits for a delivery to settle after aborting its
- * signal, unless configured: 1 second.
- */
 export const DEFAULT_ABORT_GRACE_PERIOD = 1_000;
 
-/** Marks a delivery the dispatcher stopped waiting for. */
 const ABANDONED = Symbol("abandoned");
 
 export interface DispatcherOptions {
@@ -125,7 +119,6 @@ export class ExecutionDispatcher {
     await this.drain();
   }
 
-  /** The number of deliveries running now. */
   get activeDeliveries() {
     return this.inFlight.size;
   }

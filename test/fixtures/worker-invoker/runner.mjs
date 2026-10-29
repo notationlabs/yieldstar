@@ -1,4 +1,3 @@
-// A real worker: runs the shared parity workflows over an in-memory runtime.
 import { WorkflowRunner } from "@yieldstar/core";
 import { MemoryRuntime } from "@yieldstar/test-runtime";
 import { createWorkflowWorker } from "@yieldstar/worker-invoker";

@@ -10,7 +10,7 @@ export type WorkflowGeneratorParams<
   Context extends EventContext
 > = {
   event: WorkflowEvent<Params, Context>;
-  /** The delivery's lease. Every heap step write is fenced by it. */
+  /** Every heap step write is fenced by this lease. */
   lease: ExecutionLease;
   /**
    * Aborted when the delivery must stop. The driver checks it before each

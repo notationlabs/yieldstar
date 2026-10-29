@@ -95,7 +95,6 @@ async function admit(runtime: Runtime, executionId: string, workflowId = "workfl
   expect(result).toEqual({ status: "accepted", executionId });
 }
 
-/** A runtime on a controlled clock. */
 function clocked() {
   const clock = { now: 1_000_000 };
   const runtime = new MemoryRuntime({ clock: () => clock.now });

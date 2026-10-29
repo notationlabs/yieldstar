@@ -1,9 +1,3 @@
-// A worker over a SQLite file shared with the test's dispatcher. It writes its
-// pid to `pid`. Its "slow" step writes a marker, then waits `slowMs` (300 by
-// default), long enough for the test to abort the delivery; its "after" step
-// writes another marker if it ever runs. Every heap step write is logged to
-// `writes` beside the database as `executionId stepKey`. The "quick" workflow
-// completes at once.
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WorkflowRunner } from "@yieldstar/core";
@@ -24,6 +18,7 @@ const router = {
     yield* step.run("before", () => "written");
     yield* step.run("slow", async () => {
       writeFileSync(join(dir, "slow-started"), "");
+      // Long enough for the test to abort the delivery mid-step.
       await new Promise((resolve) => setTimeout(resolve, slowMs));
       return "finished after the lease was lost";
     });

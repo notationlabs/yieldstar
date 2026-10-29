@@ -1,5 +1,3 @@
-// The runtime process: leases one execution in a shared SQLite file and
-// delivers it to a forked orphan-worker.mjs, then stays alive until killed.
 import { createWorkflowInvoker } from "@yieldstar/worker-invoker";
 import { SqliteRuntime } from "@yieldstar/sqlite-runtime";
 
@@ -36,4 +34,5 @@ invoker
   )
   .catch(() => {});
 
+// Stay alive until the test kills this process.
 setInterval(() => {}, 1_000);

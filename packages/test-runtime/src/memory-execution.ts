@@ -113,7 +113,6 @@ export class MemoryExecutionClient implements ExecutionClient {
     const claimable = [...this.executions.values()]
       .filter((state) => isExecutionClaimable(state, now))
       .map((state) => ({ state, at: nextClaimAt(state)! }))
-      // Earliest due first.
       .sort(
         (a, b) =>
           a.at - b.at ||

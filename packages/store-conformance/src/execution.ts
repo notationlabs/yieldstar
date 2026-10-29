@@ -9,14 +9,11 @@ import {
 } from "@yieldstar/core";
 import { describe, expect, test } from "vitest";
 
-/**
- * Runtime-adapter conformance for `ExecutionClient` and fenced heap writes
- * (RFC 001 and RFC 002). Time comes from the clock the suite passes to
- * `create`, so due times, lease expiry and redelivery delays are
- * deterministic. Construct the runtime with that clock.
- */
-
 export type ExecutionConformanceHarnessOptions = {
+  /**
+   * The suite's clock. Construct the runtime with it, so due times, lease
+   * expiry and redelivery delays are deterministic.
+   */
   clock: () => number;
 };
 
@@ -42,7 +39,6 @@ export type ExecutionConformanceOptions = {
 
 const START = 1_000_000;
 
-/** The lease duration the suite claims with. */
 const LEASE = DEFAULT_LEASE_DURATION;
 
 /**
@@ -84,7 +80,10 @@ class PaymentDeclinedError extends Error {
   }
 }
 
-/** Registers the RFC 001 `ExecutionClient` runtime-adapter suite. */
+/**
+ * Registers the runtime-adapter suite for `ExecutionClient` and fenced heap
+ * writes (RFC 001 and RFC 002).
+ */
 export function registerExecutionClientConformance({
   name,
   create,
@@ -106,7 +105,6 @@ export function registerExecutionClientConformance({
     };
   }
 
-  /** Runs `fn` against a fresh runtime and always disposes it. */
   function it(title: string, fn: (ctx: TestContext) => Promise<void>) {
     test(title, async () => {
       const ctx = await setup();
@@ -148,7 +146,6 @@ export function registerExecutionClientConformance({
     return executionId;
   }
 
-  /** Claims every due execution with the suite's lease duration. */
   function claim(runtime: Runtime, limit = 100) {
     return runtime.executions.claimDue({ limit, duration: LEASE });
   }
@@ -1244,7 +1241,6 @@ export function registerExecutionClientConformance({
           expect(await runtime.executions.get("retrying")).toMatchObject({
             unacknowledgedDeliveries: attempt,
           });
-          // Find when the execution becomes claimable again.
           const releasedAt = clock.now;
           let next: ExecutionLease[];
           while ((next = await claim(runtime)).length === 0) {
