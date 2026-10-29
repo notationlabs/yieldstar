@@ -140,10 +140,16 @@ export class MemoryExecutionClient implements ExecutionClient {
   async claimDue(request: {
     limit: number;
     duration: number;
+    executionIds?: readonly string[];
   }): Promise<ExecutionLease[]> {
     const now = this.clock();
+    const ids = request.executionIds && new Set(request.executionIds);
     const claimable = [...this.executions.values()]
-      .filter((state) => isExecutionClaimable(state, now))
+      .filter(
+        (state) =>
+          (!ids || ids.has(state.executionId)) &&
+          isExecutionClaimable(state, now)
+      )
       .map((state) => ({ state, at: nextClaimAt(state)! }))
       .sort(
         (a, b) =>

@@ -1084,6 +1084,25 @@ export function registerExecutionClientConformance({
         expect((await claim(runtime, 2)).map((lease) => lease.executionId)).toEqual(["late"]);
       });
 
+      it("claims only the requested executions and leaves the others due and unclaimed", async ({
+        runtime,
+      }) => {
+        for (const id of ["a", "b", "c", "d"]) await admit(runtime, id);
+        const claimIds = (executionIds: string[]) =>
+          runtime.executions.claimDue({ limit: 100, duration: LEASE, executionIds });
+
+        expect(await claimIds([])).toEqual([]);
+        const leases = await claimIds(["d", "b", "unknown"]);
+        expect(leases.map((lease) => lease.executionId).sort()).toEqual(["b", "d"]);
+        for (const id of ["a", "c"]) {
+          expect(await runtime.executions.get(id)).toMatchObject({
+            status: "admitted",
+            unacknowledgedDeliveryCount: 0,
+          });
+        }
+        expect(await claimedIds(runtime)).toEqual(["a", "c"]);
+      });
+
       it("marks a claimed execution running", async ({ runtime }) => {
         await admit(runtime, "running");
         expect(await runtime.executions.get("running")).toMatchObject({ status: "admitted" });

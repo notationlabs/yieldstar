@@ -41,6 +41,13 @@ export interface DispatcherOptions {
    * @default 1_000
    */
   abortGracePeriod?: number;
+  /**
+   * Delivers only executions whose ID is in this list. The filter is applied
+   * by `claimDue`, so other due executions are never claimed and gain no
+   * redelivery delay. An empty list delivers nothing.
+   * @default every due execution
+   */
+  executionIds?: readonly string[];
 }
 
 /**
@@ -74,6 +81,7 @@ export class ExecutionDispatcher {
   private leaseDuration: number;
   private renewInterval: number;
   private abortGracePeriod: number;
+  private executionIds: readonly string[] | undefined;
   private running = false;
   private looping = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -91,6 +99,7 @@ export class ExecutionDispatcher {
     this.leaseDuration = options.leaseDuration ?? DEFAULT_LEASE_DURATION;
     this.renewInterval = options.renewInterval ?? this.leaseDuration / 3;
     this.abortGracePeriod = options.abortGracePeriod ?? DEFAULT_ABORT_GRACE_PERIOD;
+    this.executionIds = options.executionIds;
     if (!Number.isInteger(this.concurrency) || this.concurrency < 1) {
       throw new RangeError("concurrency must be a positive integer");
     }
@@ -137,6 +146,7 @@ export class ExecutionDispatcher {
       leases = await this.runtime.executions.claimDue({
         limit: slots,
         duration: this.leaseDuration,
+        executionIds: this.executionIds,
       });
     } finally {
       this.claiming -= slots;

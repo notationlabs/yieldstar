@@ -184,6 +184,12 @@ export interface ExecutionClient {
   claimDue(request: {
     limit: number;
     duration: number;
+    /**
+     * Claims only due executions whose ID is in this list, as part of the same
+     * atomic claim. An empty list claims nothing. When absent, any due
+     * execution may be claimed.
+     */
+    executionIds?: readonly string[];
   }): Promise<ExecutionLease[]>;
 
   /**

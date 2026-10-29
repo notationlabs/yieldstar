@@ -76,17 +76,28 @@ export class ExecutionsDao {
 
   /**
    * Up to `limit` claimable execution IDs, earliest due first. `now` is a
-   * millisecond Unix timestamp from the runtime clock.
+   * millisecond Unix timestamp from the runtime clock. When `executionIds` is
+   * given, only those executions are considered.
    */
-  getClaimableIds(now: number, limit: number) {
+  getClaimableIds(
+    now: number,
+    limit: number,
+    executionIds?: readonly string[]
+  ) {
     return this.db
       .query<ExecutionIdRow>(
         `SELECT execution_id FROM executions
          WHERE next_claim_at IS NOT NULL AND next_claim_at <= $now
+           AND ($executionIds IS NULL
+             OR execution_id IN (SELECT value FROM json_each($executionIds)))
          ORDER BY next_claim_at, execution_id
          LIMIT $limit`
       )
-      .all({ $now: now, $limit: limit })
+      .all({
+        $now: now,
+        $limit: limit,
+        $executionIds: executionIds ? JSON.stringify(executionIds) : null,
+      })
       .map((row) => row.execution_id);
   }
 
