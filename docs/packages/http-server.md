@@ -33,18 +33,18 @@ Bun.serve({
 
 ### `POST /trigger`
 
-Accepts a `{ workflowId, params?, context?, executionId? }` JSON body. Runs the middleware chain, then calls `runtime.executions.admit`. The routes never run workflow code; an `ExecutionDispatcher` must be running against the same runtime.
+Accepts a `{ workflowId, params?, context?, executionId? }` body encoded with the durable value codec, of which plain JSON is a subset. Runs the middleware chain, then calls `runtime.executions.admit`. The routes never run workflow code; an `ExecutionDispatcher` must be running against the same runtime.
 
 | Status | Body                                            | Cause                                                          |
 | ------ | ----------------------------------------------- | -------------------------------------------------------------- |
 | `202`  | `{ executionId }`                               | Admission committed. The ID is the caller's or the runtime's   |
 | `409`  | `{ code: "EXECUTION_ID_CONFLICT", message }`    | The supplied `executionId` is already in use                   |
-| `400`  | `{ code: "INVALID_EXECUTION_EVENT", message }`  | `params` or `context` cannot round-trip through JSON exactly   |
+| `400`  | `{ code: "INVALID_EXECUTION_EVENT", message }`  | the body is not a valid encoding, or `params` or `context` are not durable values |
 | `500`  | Error message                                   | Admission threw, for example because the database failed       |
 
 ### `POST /events`
 
-Accepts `{ executionId }` JSON body. Blocks until the execution record is terminal, polling the record and re-reading early when `invoker.workflowEndEmitter` fires. Returns the result as JSON, a serialized recorded error with status 500, or 404 when no record exists. The request's abort signal ends the wait.
+Accepts `{ executionId }` JSON body. Blocks until the execution record is terminal, polling the record and re-reading early when `invoker.workflowEndEmitter` fires. Returns the result encoded with the durable value codec, the recorded error encoded the same way with status 500, or 404 when no record exists. The request's abort signal ends the wait.
 
 ## `createMiddleware(fn)`
 

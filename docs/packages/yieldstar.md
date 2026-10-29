@@ -23,6 +23,7 @@ import type {
   ExecutionRecord,
   ExecutionStatus,
   ExecutionParent,
+  Durable,
   DurableObject,
   DurableValue,
   WorkflowStartErrorCode,
@@ -31,7 +32,7 @@ import type {
 
 ## `workflow(fn)` / `createWorkflow(fn)`
 
-Defines a workflow. Returns a `WorkflowGenerator`.
+Defines a workflow. Returns a `WorkflowGenerator`. `Params` and `Result` are checked with `Durable<T>` (see [Step values](../manual/steps.md#step-values)), so a workflow whose params or result type holds a `Date`, `Map`, `Set`, `bigint` or function is a type error. A generic `Result` cannot be checked, so a function that wraps `workflow` must give it a concrete result type.
 
 ```ts
 const w = workflow<Params, Result>(async function* (step, event, logger) {
@@ -41,8 +42,8 @@ const w = workflow<Params, Result>(async function* (step, event, logger) {
 
 | Type parameter | Constraint                    | Description                                  |
 | -------------- | ----------------------------- | -------------------------------------------- |
-| `Params`       | `Record<string, any> \| void` | Shape of `event.params`                      |
-| `Result`       | any                           | Return type of the workflow                  |
+| `Params`       | `Record<string, any> \| void` | Shape of `event.params`; must be durable     |
+| `Result`       | any                           | Return type of the workflow; must be durable |
 | `Context`      | `ReadonlyMap<any, any>`       | Shape of `event.context` (set by middleware) |
 
 ## `createWorkflowRouter(workflows)`
@@ -59,7 +60,7 @@ export type Router = typeof router;
 
 ## `RetryableError`
 
-Thrown inside `step.run` to trigger structured retries.
+Thrown inside `step.run` to trigger structured retries. It is registered by default, so replay rethrows a `RetryableError`.
 
 ```ts
 throw new RetryableError(message, { maxAttempts, retryInterval });
@@ -72,11 +73,19 @@ throw new RetryableError(message, { maxAttempts, retryInterval });
 
 ## `ExecutionAdmissionError`
 
-Thrown by both SDKs' `trigger` when admission is rejected. `err.code` is `"EXECUTION_ID_CONFLICT"` (the `executionId` is already in use) or `"INVALID_EXECUTION_EVENT"` (the event cannot round-trip through JSON).
+Thrown by both SDKs' `trigger` when admission is rejected. `err.code` is `"EXECUTION_ID_CONFLICT"` (the `executionId` is already in use) or `"INVALID_EXECUTION_EVENT"` (`params` or `context` are not durable values).
 
 ## `WorkflowStartError`
 
-Thrown to workflow code by `step.start` when the runtime rejects the start. `err.code` is `"INVALID_START_PARAMETERS"` (`params` are not plain data, or `workflowId` is empty) or `"START_REQUEST_MISMATCH"` (the step already started a different workflow or different `params`). See [`step.start`](../manual/steps.md#stepstart).
+Thrown to workflow code by `step.start` when the runtime rejects the start. `err.code` is `"INVALID_START_PARAMETERS"` (`params` are not a durable value, or `workflowId` is empty) or `"START_REQUEST_MISMATCH"` (the step already started a different workflow or different `params`). See [`step.start`](../manual/steps.md#stepstart).
+
+## `WorkflowValueError`
+
+Thrown to workflow code when a step's value cannot be recorded unchanged. `err.code` is `"INVALID_STEP_VALUE"` (a step result, store state or workflow result is not a durable value) or `"STEP_SCHEMA_INVALID"` (a step's `schema` rejected its value), and `err.stepKey` names the step; it is `WORKFLOW_RESULT_STEP_KEY` (`"$$workflow-result$$"`) for an invalid workflow result. See [Step values](../manual/steps.md#step-values).
+
+## `registerErrorClass(name, errorClass)`
+
+Registers the class that recorded errors named `name` are revived as, in this process. See [Errors in step records](../manual/steps.md#errors-in-step-records).
 
 ## `createLocalSdk<Router>(runtime, { invoker?, pollInterval? })`
 
@@ -88,7 +97,7 @@ Returns a factory for HTTP SDK clients. See [HTTP SDK](../manual/sdk-http.md).
 
 ## `defineStore(name, schema)`
 
-Defines a durable store type from a name and any Standard Schema. See [Durable Stores](../manual/stores.md).
+Defines a durable store type from a name and any Standard Schema whose output type is durable (`DurableStoreSchema<Schema>`). See [Durable Stores](../manual/stores.md).
 
 ```ts
 const ConversationStore = defineStore("conversation", schema);
@@ -101,6 +110,7 @@ Available on the first argument of a workflow function:
 ```ts
 yield * step.run(fn);
 yield * step.run("key", fn);
+yield * step.run("key", fn, { schema });
 
 yield * step.delay(ms);
 yield * step.delay("key", ms);

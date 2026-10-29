@@ -25,12 +25,12 @@ A `Runtime` bundles three clients: `executions` (`ExecutionClient`), `heap` (`He
 
 The `ExecutionClient` contract that wakes rely on:
 
-- Execution IDs MUST be unique across the runtime and MUST never be reused, whatever the delivery outcome. `admit` returns `EXECUTION_ID_CONFLICT` for an ID in use, and `INVALID_EXECUTION_EVENT` for `params` or `context` that cannot round-trip exactly; it MUST NOT store a lossy copy.
+- Execution IDs MUST be unique across the runtime and MUST never be reused, whatever the delivery outcome. `admit` returns `EXECUTION_ID_CONFLICT` for an ID in use, and `INVALID_EXECUTION_EVENT` for `params` or `context` values that `durableValueCodec` cannot encode, or `context` keys that are not strings; it MUST NOT store a lossy copy.
 - Admission MUST create the record as `admitted` and make it due immediately, all-or-nothing.
 - A wake names an execution and a due time; it carries no copy of the event. `requestWake` for an unknown execution returns `EXECUTION_NOT_FOUND` and creates nothing; for a terminal execution it returns `ignored`.
 - Wakes not covered by a lease MUST merge into one due time, the earliest requested. `claimDue` MUST return an execution at most once per result, however many wakes it has.
 - Acknowledgement clears the wakes the delivery covered. The next due time is the earlier of the outcome's `wakeAt` and any wake requested after the claim. An unacknowledged delivery's wakes stay pending.
-- `completed` and `failed` are immutable. A failed outcome's error MUST keep at least its `name` and `message`.
+- `completed` and `failed` are immutable. A failed outcome's error MUST keep its `name`, `message`, `code`, `cause` and durable fields, and revive as its registered class. A completed result that `durableValueCodec` cannot encode MUST be recorded as `failed` with `WorkflowValueError` (`INVALID_STEP_VALUE`). The state machine's outcome codec does all of this.
 - Records, pending wakes and leases MUST survive a restart.
 
 ### Leases
@@ -81,7 +81,7 @@ Connector authors SHOULD extend `CasStoreClient`. They implement the ordinary `S
 - `getAppliedStoreStep` reads a previously committed step receipt.
 - `commitStoreMutation` compares the expected instance and version, commits the next state, records an optional step receipt, and requests wakes for the waiters the commit satisfies, as one atomic action.
 
-A connector MUST treat `(definition.name, id)` as a logical store key. A physical store instance has an opaque, non-empty, UUID-compatible lowercase hexadecimal-and-hyphen `instanceId` and a monotonically increasing integer `version`, beginning at zero. Deleting and recreating a logical store MUST produce a new `instanceId` and reset its version to zero. Store states and returned results MUST be detached values: changing a value returned to or supplied by a caller MUST NOT mutate persisted state.
+A connector MUST treat `(definition.name, id)` as a logical store key. A physical store instance has an opaque, non-empty, UUID-compatible lowercase hexadecimal-and-hyphen `instanceId` and a monotonically increasing integer `version`, beginning at zero. Deleting and recreating a logical store MUST produce a new `instanceId` and reset its version to zero. Store states and returned results MUST be detached values: changing a value returned to or supplied by a caller MUST NOT mutate persisted state. A connector MUST persist store states and step receipts so that they read back exactly as `durableValueCodec` decodes them, for example with `encodeStoreValue` and `decodeStoreValue`: `undefined` properties keep their keys and errors keep their registered class. `validateStoreState` rejects a state that is not a durable value with `WorkflowValueError` (`INVALID_STEP_VALUE`) before any commit, so a rejected state MUST leave the store unchanged.
 
 `getStore` MUST return the current detached snapshot and MUST reject when the logical store does not exist. `getOrCreateStore` MUST return the existing snapshot when present; otherwise it MUST require and schema-validate `initial`, create one version-zero instance, and return it. A shared-client backend MUST serialize concurrent creation so every caller observes the same created instance.
 

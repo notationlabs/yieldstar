@@ -3,6 +3,8 @@ import {
   CasStoreClient,
   StoreNotFoundError,
   cloneStoreState,
+  decodeStoreValue,
+  encodeStoreValue,
   storePathsIntersect,
   validateStoreState,
   type StandardSchemaV1,
@@ -123,7 +125,7 @@ export class MemoryStoreClient extends CasStoreClient {
     const applied = this.appliedSteps.get(
       this.appliedStepKey(params.definition.name, params.id, params.stepId)
     );
-    return applied ? { result: JSON.parse(applied) } : undefined;
+    return applied ? { result: decodeStoreValue(applied) } : undefined;
   }
 
   protected commitStoreMutation(
@@ -141,7 +143,7 @@ export class MemoryStoreClient extends CasStoreClient {
         if (applied) {
           return {
             status: "already-applied",
-            result: JSON.parse(applied),
+            result: decodeStoreValue(applied),
           };
         }
       }
@@ -179,7 +181,7 @@ export class MemoryStoreClient extends CasStoreClient {
             mutation.id,
             mutation.stepId
           ),
-          JSON.stringify(mutation.result)
+          encodeStoreValue(mutation.result)
         );
       }
 
@@ -237,7 +239,7 @@ export class MemoryStoreClient extends CasStoreClient {
         : undefined;
       if (ledgerKey) {
         const applied = this.appliedSteps.get(ledgerKey);
-        if (applied) return JSON.parse(applied) as StoreDeleteFromResult;
+        if (applied) return decodeStoreValue(applied) as StoreDeleteFromResult;
       }
 
       this.assertSnapshotHasInstanceId(params.snapshot);
@@ -273,7 +275,7 @@ export class MemoryStoreClient extends CasStoreClient {
         }
       }
       const result = { deleted: true as const };
-      if (ledgerKey) this.appliedSteps.set(ledgerKey, JSON.stringify(result));
+      if (ledgerKey) this.appliedSteps.set(ledgerKey, encodeStoreValue(result));
       return result;
     });
   }

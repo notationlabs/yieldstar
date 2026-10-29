@@ -3,6 +3,7 @@ import {
   defineStore,
   durableValueCodec,
   redeliveryDelay,
+  registerErrorClass,
   type DurableObject,
   type ExecutionLease,
   type ExecutionStartResult,
@@ -83,11 +84,22 @@ class Point {
 }
 
 class PaymentDeclinedError extends Error {
+  code = "CARD_DECLINED";
   constructor(message: string) {
     super(message);
     this.name = "PaymentDeclinedError";
   }
 }
+
+class GatewayTimeoutError extends Error {
+  gateway: string;
+  constructor(gateway: string, options?: ErrorOptions) {
+    super(`${gateway} timed out`, options);
+    this.name = "ConformanceGatewayTimeoutError";
+    this.gateway = gateway;
+  }
+}
+registerErrorClass("ConformanceGatewayTimeoutError", GatewayTimeoutError);
 
 /**
  * Registers the runtime-adapter suite for `ExecutionClient` and fenced heap
@@ -358,11 +370,16 @@ export function registerExecutionClientConformance({
           list: [1, "two", { three: [null] }],
           nested: { a: { b: { c: "d" } } },
           empty: {},
+          missing: undefined,
+          holes: [1, undefined],
+          tagged: { $type: "undefined" },
+          report: { name: "launch", message: "Ship it", stack: "web" },
         };
-        const context = new Map<string | number, unknown>([
+        const context = new Map<string, unknown>([
           ["tenant", "acme"],
           ["count", 2],
-          [7, { roles: ["admin"] }],
+          ["7", { roles: ["admin"] }],
+          ["nothing", undefined],
         ]);
         await runtime.executions.admit({
           executionId: "event",
@@ -385,13 +402,18 @@ export function registerExecutionClientConformance({
         const ctx = record!.context;
         expect(typeof ctx.get).toBe("function");
         expect(typeof ctx.has).toBe("function");
-        expect(ctx.size).toBe(3);
+        // `undefined` properties keep their keys, and an error-shaped plain
+        // object stays a plain object.
+        expect(Object.keys(record!.params!)).toContain("missing");
+        expect(record!.params!.report).not.toBeInstanceOf(Error);
+        expect(ctx.size).toBe(4);
         expect(ctx.get("tenant")).toBe("acme");
-        expect(ctx.get(7)).toEqual({ roles: ["admin"] });
+        expect(ctx.get("7")).toEqual({ roles: ["admin"] });
         expect([...ctx.entries()]).toEqual([
           ["tenant", "acme"],
           ["count", 2],
-          [7, { roles: ["admin"] }],
+          ["7", { roles: ["admin"] }],
+          ["nothing", undefined],
         ]);
 
         await runtime.executions.admit({
@@ -434,7 +456,6 @@ export function registerExecutionClientConformance({
       cyclic.self = cyclic;
       const invalidEvents: [string, { params: any; context: Map<any, any> }][] = [
         ["a Date", { params: { at: new Date(0) }, context: new Map() }],
-        ["an undefined property", { params: { missing: undefined }, context: new Map() }],
         ["a class instance", { params: { point: new Point(1) }, context: new Map() }],
         ["NaN", { params: { n: NaN }, context: new Map() }],
         ["Infinity", { params: { n: Infinity }, context: new Map() }],
@@ -444,8 +465,8 @@ export function registerExecutionClientConformance({
         ["a sparse array", { params: { list: [1, , 3] }, context: new Map() }],
         ["a cycle", { params: cyclic, context: new Map() }],
         ["a Date in context", { params: {}, context: new Map([["at", new Date(0)]]) }],
-        ["an undefined context value", { params: {}, context: new Map([["v", undefined]]) }],
         ["an object context key", { params: {}, context: new Map([[{}, 1]]) }],
+        ["a number context key", { params: {}, context: new Map([[7, 1]]) }],
       ];
       for (const [label, event] of invalidEvents) {
         it(`rejects ${label} with INVALID_EXECUTION_EVENT and stores nothing`, async ({
@@ -866,12 +887,86 @@ export function registerExecutionClientConformance({
           expect(outcome.error).toBeInstanceOf(Error);
           expect(outcome.error.name).toBe("PaymentDeclinedError");
           expect(outcome.error.message).toBe("card declined");
+          // The class is not registered, so its code survives on a plain Error.
+          expect(Object.getPrototypeOf(outcome.error)).toBe(Error.prototype);
+          expect((outcome.error as { code?: string }).code).toBe("CARD_DECLINED");
         }
         // Every later read returns the same recorded error.
         const again = await runtime.executions.get("fails");
         expect(again!.outcome).toMatchObject({ status: "failed" });
         const error = (again!.outcome as { error: Error }).error;
         expect([error.name, error.message]).toEqual(["PaymentDeclinedError", "card declined"]);
+      });
+
+      it("records a failed outcome's registered error class, code, cause and fields", async ({
+        runtime,
+      }) => {
+        await admit(runtime, "fails-registered");
+        const lease = await claimOne(runtime, "fails-registered");
+        const error = new GatewayTimeoutError("stripe", {
+          cause: new PaymentDeclinedError("card declined"),
+        });
+        const acknowledged = await runtime.executions.acknowledge({
+          lease,
+          outcome: { status: "failed", error },
+        });
+        const record = await runtime.executions.get("fails-registered");
+        for (const outcome of [acknowledged, record!.outcome!]) {
+          if (outcome.status !== "failed") throw new Error("expected a failed outcome");
+          expect(outcome.error).toBeInstanceOf(GatewayTimeoutError);
+          expect(outcome.error).toMatchObject({
+            name: "ConformanceGatewayTimeoutError",
+            message: "stripe timed out",
+            gateway: "stripe",
+          });
+          expect(outcome.error.stack).toBe(error.stack);
+          const cause = outcome.error.cause as Error & { code?: string };
+          expect([cause.name, cause.message, cause.code]).toEqual([
+            "PaymentDeclinedError",
+            "card declined",
+            "CARD_DECLINED",
+          ]);
+        }
+      });
+
+      it("records a completed result's undefined values, errors and tag-shaped objects", async ({
+        runtime,
+      }) => {
+        const result = {
+          ok: false,
+          error: new TypeError("bad input"),
+          missing: undefined,
+          tagged: { $type: "error", name: "E", message: "m" },
+        };
+        await admitCompleted(runtime, "completes-tagged", result);
+        const outcome = (await runtime.executions.get("completes-tagged"))!.outcome!;
+        if (outcome.status !== "completed") throw new Error("expected completed");
+        const recorded = outcome.result as typeof result;
+        expect(recorded).toEqual(result);
+        expect(Object.keys(recorded)).toContain("missing");
+        expect(recorded.error).toBeInstanceOf(TypeError);
+        expect(recorded.tagged).not.toBeInstanceOf(Error);
+      });
+
+      it("records a non-durable completed result as failed with INVALID_STEP_VALUE", async ({
+        runtime,
+      }) => {
+        await admit(runtime, "invalid-result");
+        const lease = await claimOne(runtime, "invalid-result");
+        const acknowledged = await runtime.executions.acknowledge({
+          lease,
+          outcome: { status: "completed", result: { at: new Date(0) } },
+        });
+        const record = await runtime.executions.get("invalid-result");
+        expect(record!.status).toBe("failed");
+        for (const outcome of [acknowledged, record!.outcome!]) {
+          expect(outcome).toMatchObject({
+            status: "failed",
+            error: { code: "INVALID_STEP_VALUE", stepKey: "$$workflow-result$$" },
+          });
+          expect((outcome as { error: Error }).error.name).toBe("WorkflowValueError");
+        }
+        expect(await claim(runtime)).toEqual([]);
       });
 
       it("keeps the first terminal outcome: a later acknowledgement under the ended lease is lost", async ({
@@ -1700,6 +1795,16 @@ export function registerExecutionClientConformance({
         });
         expect(await claimedIds(runtime)).toEqual([targetId]);
 
+        // An undefined property is kept, not dropped.
+        const undefinedParams = acceptedId(
+          await startFrom(runtime, "caller", "ship-undefined", {
+            params: { orderId: 42, note: undefined },
+          })
+        );
+        const withUndefined = (await runtime.executions.get(undefinedParams))!.params!;
+        expect(withUndefined).toEqual({ orderId: 42, note: undefined });
+        expect(Object.keys(withUndefined)).toContain("note");
+
         // Executions admitted directly have no parent.
         expect(await runtime.executions.get("caller")).not.toHaveProperty("parent");
 
@@ -1713,16 +1818,18 @@ export function registerExecutionClientConformance({
           executionId: "caller",
           workflowId: "charge-order",
           params: undefined,
-          context: new Map<string | number, unknown>([
+          context: new Map<string, unknown>([
             ["tenant", "acme"],
-            [7, { roles: ["admin"] }],
+            ["7", { roles: ["admin"] }],
+            ["nothing", undefined],
           ]),
         });
         const targetId = acceptedId(await startFrom(runtime, "caller", "ship"));
         const target = await runtime.executions.get(targetId);
         expect([...target!.context.entries()]).toEqual([
           ["tenant", "acme"],
-          [7, { roles: ["admin"] }],
+          ["7", { roles: ["admin"] }],
+          ["nothing", undefined],
         ]);
       });
 
@@ -1762,7 +1869,6 @@ export function registerExecutionClientConformance({
       const hidden = Object.defineProperty({}, "value", { value: 1, enumerable: false });
       const invalidParams: [string, unknown][] = [
         ["a Date", { at: new Date(0) }],
-        ["an undefined property", { missing: undefined }],
         ["a class instance", { point: new Point(1) }],
         ["NaN", { n: NaN }],
         ["Infinity", { n: Infinity }],
@@ -1849,6 +1955,8 @@ export function registerExecutionClientConformance({
           ["caller", { params: { orderId: 43 } }],
           ["caller", { params: { orderId: 42, express: true } }],
           ["caller", { params: undefined }],
+          // An undefined property is not the same as a missing one.
+          ["caller", { params: { orderId: 42, express: undefined } }],
           // Missing parameters and an empty object do not match.
           ["caller-without-params", { params: {} }],
         ];

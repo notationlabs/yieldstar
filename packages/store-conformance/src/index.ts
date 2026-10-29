@@ -215,6 +215,127 @@ export function registerStoreClientConformance({
       }
     });
 
+    test("rejects non-durable state with INVALID_STEP_VALUE and leaves the store unchanged", async () => {
+      const harness = await create();
+      const { stores } = harness.runtime;
+      const invalid = { code: "INVALID_STEP_VALUE", name: "WorkflowValueError" };
+      try {
+        await expect(
+          stores.getOrCreateStore({
+            definition: Store,
+            id: "never-created",
+            initial: { messages: [], unrelated: new Date(0) as never },
+          })
+        ).rejects.toMatchObject(invalid);
+        await expect(
+          stores.getStore({ definition: Store, id: "never-created" })
+        ).rejects.toThrow(/does not exist/);
+
+        const created = await stores.getOrCreateStore({
+          definition: Store,
+          id: "durable",
+          initial: { messages: [{ id: "one" }] },
+        });
+        const stepId = { executionId: "durable-execution", stepKey: "update" };
+        await expect(
+          stores.updateStore({
+            definition: Store,
+            id: "durable",
+            stepId,
+            updater(draft) {
+              draft.messages.push({ id: "two" });
+              (draft as Record<string, unknown>).at = new Map();
+            },
+          })
+        ).rejects.toMatchObject({ ...invalid, stepKey: "update" });
+        await expect(
+          stores.updateStoreFrom({
+            definition: Store,
+            id: "durable",
+            snapshot: created,
+            updater: () => ({ messages: [], unrelated: 1n as never }),
+          })
+        ).rejects.toMatchObject(invalid);
+        expect(await stores.getStore({ definition: Store, id: "durable" })).toMatchObject({
+          state: { messages: [{ id: "one" }] },
+          version: 0,
+        });
+
+        await stores.getOrCreateStore({
+          definition: TakeStore,
+          id: "durable-take",
+          initial: { messages: [{ id: "one" }] },
+        });
+        await expect(
+          stores.takeFromStore({
+            definition: TakeStore,
+            id: "durable-take",
+            selector: (state) => state.messages.length > 0 && new Set(state.messages),
+            claim(draft) {
+              draft.messages = [];
+            },
+          })
+        ).rejects.toMatchObject(invalid);
+        expect(
+          await stores.getStore({ definition: TakeStore, id: "durable-take" })
+        ).toMatchObject({ state: { messages: [{ id: "one" }] }, version: 0 });
+
+        // A failed update records no receipt, so the step can commit later.
+        const retried = await stores.updateStore({
+          definition: Store,
+          id: "durable",
+          stepId,
+          updater(draft) {
+            draft.messages.push({ id: "two" });
+          },
+        });
+        expect(retried).toMatchObject({ version: 1, state: { messages: [{ id: "one" }, { id: "two" }] } });
+      } finally {
+        await harness.dispose?.();
+      }
+    });
+
+    test("stores state and receipts with the durable value codec", async () => {
+      const harness = await create();
+      const { stores } = harness.runtime;
+      try {
+        await stores.getOrCreateStore({
+          definition: Store,
+          id: "codec",
+          initial: { messages: [], unrelated: undefined },
+        });
+        const stepId = { executionId: "codec-execution", stepKey: "update" };
+        const update = () =>
+          stores.updateStore({
+            definition: Store,
+            id: "codec",
+            stepId,
+            updater(draft) {
+              draft.messages.push({ id: "one", $type: "undefined" } as never);
+              (draft as Record<string, unknown>).error = new RangeError("r");
+            },
+          });
+        const first = await update();
+        const replayed = await update();
+        const read = await stores.getStore({ definition: Store, id: "codec" });
+        for (const state of [first.state, replayed.state, read.state]) {
+          expect(Object.keys(state).sort()).toEqual(["error", "messages", "unrelated"]);
+          expect(state.messages).toEqual([{ id: "one", $type: "undefined" }]);
+          expect((state as Record<string, unknown>).error).toBeInstanceOf(RangeError);
+        }
+        expect(replayed.version).toBe(1);
+
+        if (harness.restart) {
+          const restarted = await harness.restart();
+          const reopened = await restarted.stores.getStore({ definition: Store, id: "codec" });
+          expect(Object.keys(reopened.state).sort()).toEqual(["error", "messages", "unrelated"]);
+          expect((reopened.state as Record<string, unknown>).error).toBeInstanceOf(RangeError);
+        }
+      } finally {
+        await harness.dispose?.();
+      }
+    });
+
     test("rejects asynchronous updaters and claims without committing", async () => {
       const harness = await create();
       try {

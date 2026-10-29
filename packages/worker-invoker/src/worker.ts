@@ -6,8 +6,13 @@ import type {
   WorkflowRunOutcome,
   WorkflowRunner,
 } from "@yieldstar/core";
-import { ReadOnlyMap } from "@yieldstar/core";
-import { serializeError } from "serialize-error";
+import {
+  WORKFLOW_RESULT_STEP_KEY,
+  WorkflowValueError,
+  decodeExecutionEvent,
+  durableValueCodec,
+  encodeThrownValue,
+} from "@yieldstar/core";
 
 let context: EventContext;
 
@@ -15,12 +20,13 @@ export const getContext = () => context;
 
 /**
  * Messages a worker sends its parent. `outcome` reports a finished delivery;
- * `error` reports an infrastructure error, which is not an outcome.
+ * `error` reports an infrastructure error, which is not an outcome. Errors and
+ * results are durable value encodings, so they keep their class and shape.
  */
 export type WorkerMessage =
   | { status: "ready" }
   | { status: "outcome"; outcome: SerializedOutcome }
-  | { status: "error"; error: unknown };
+  | { status: "error"; error: string };
 
 /**
  * The message a parent sends its worker to start one delivery under its
@@ -29,15 +35,20 @@ export type WorkerMessage =
  */
 export type WorkerDelivery = {
   type: "deliver";
-  event: Omit<WorkflowEvent, "context"> & { context: Map<any, any> };
+  /** `params` and `context` as encoded by `encodeExecutionEvent`. */
+  event: Omit<WorkflowEvent, "params" | "context"> & {
+    params: string;
+    context: string;
+  };
   lease: ExecutionLease;
 };
 
 export type WorkerRequest = WorkerDelivery;
 
 export type SerializedOutcome =
-  | Exclude<WorkflowRunOutcome, { status: "failed" }>
-  | { status: "failed"; error: unknown };
+  | Extract<WorkflowRunOutcome, { status: "suspended" }>
+  | { status: "completed"; result: string }
+  | { status: "failed"; error: string };
 
 /** The exit code of a worker whose runtime process has gone. */
 export const WORKER_ORPHANED_EXIT_CODE = 75;
@@ -65,29 +76,41 @@ export function createWorkflowWorker(
       const { signal } = new AbortController();
       process.on("message", async (message: WorkerRequest) => {
         const { event, lease } = message;
-        const workflowEvent: WorkflowEvent = {
-          ...event,
-          context: new ReadOnlyMap(event.context),
-        };
-        context = workflowEvent.context;
         try {
+          const workflowEvent: WorkflowEvent = {
+            ...event,
+            ...decodeExecutionEvent(event),
+          };
+          context = workflowEvent.context;
           const outcome = await workflowRunner.run(workflowEvent, {
             lease,
             signal,
             logger,
           });
-          send({
-            status: "outcome",
-            outcome:
-              outcome.status === "failed"
-                ? { status: "failed", error: serializeError(outcome.error) }
-                : outcome,
-          });
+          send({ status: "outcome", outcome: serializeOutcome(outcome) });
         } catch (error: any) {
-          send({ status: "error", error: serializeError(error) });
+          send({ status: "error", error: encodeThrownValue(error) });
         }
       });
       send({ status: "ready" });
     },
   };
+}
+
+function serializeOutcome(outcome: WorkflowRunOutcome): SerializedOutcome {
+  if (outcome.status === "suspended") return outcome;
+  if (outcome.status === "failed") {
+    return { status: "failed", error: encodeThrownValue(outcome.error) };
+  }
+  const result = durableValueCodec.encode(outcome.result);
+  if (result.status === "encoded") {
+    return { status: "completed", result: result.canonical };
+  }
+  // As acknowledgement would record it.
+  const error = new WorkflowValueError(
+    "INVALID_STEP_VALUE",
+    WORKFLOW_RESULT_STEP_KEY,
+    `Workflow result is not a durable value: ${result.message}`
+  );
+  return { status: "failed", error: encodeThrownValue(error) };
 }

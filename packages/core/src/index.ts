@@ -33,12 +33,26 @@ export {
   isTerminalExecutionStatus,
 } from "./base/execution";
 export type {
+  Durable,
+  DurableDecoding,
   DurableObject,
   DurableValue,
   DurableValueCodec,
   DurableValueEncoding,
+  IfDurable,
 } from "./base/durable-value";
-export { durableValueCodec } from "./base/durable-value";
+export {
+  DurableValueError,
+  decodeParsedValue,
+  durableValueCodec,
+  encodeThrownValue,
+} from "./base/durable-value";
+export type { ErrorClass, WorkflowValueErrorCode } from "./base/errors";
+export {
+  WORKFLOW_RESULT_STEP_KEY,
+  WorkflowValueError,
+  registerErrorClass,
+} from "./base/errors";
 export type {
   ExecutionState,
   PreparedExecutionStart,
@@ -91,6 +105,7 @@ export type {
   StoreSelector,
   StoreSnapshot,
   StoreState,
+  DurableStoreSchema,
   StoreStepId,
   StoreTakeResult,
   StoreUpdateFromResult,
@@ -109,7 +124,9 @@ export {
   assertSynchronousClaim,
   assertSynchronousUpdater,
   cloneStoreState,
+  decodeStoreValue,
   defineStore,
+  encodeStoreValue,
   diffStorePaths,
   isStoreSelectorMatch,
   storePathsIntersect,
@@ -150,6 +167,7 @@ export {
   WorkflowRestart,
   WorkflowResult,
 } from "./base/step";
+export type { StepSchemaVerdict } from "./base/step";
 
 export { WorkflowRunner } from "./lib/workflow-runner";
 

@@ -1,4 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
+import { durableValueCodec, type Durable, type IfDurable } from "./durable-value";
+import { WorkflowValueError, registerErrorClass } from "./errors";
 
 export type Draft<T> = T extends object
   ? { -readonly [K in keyof T]: Draft<T[K]> }
@@ -143,9 +145,24 @@ export class StoreNotFoundError extends Error {
   }
 }
 
+registerErrorClass("StoreValidationError", StoreValidationError);
+registerErrorClass("StoreNotFoundError", StoreNotFoundError);
+
+/**
+ * A schema whose output, the store state, is a durable value. The state is
+ * still validated by the codec at runtime.
+ */
+export type DurableStoreSchema<Schema extends StandardSchemaV1> = IfDurable<
+  StoreState<Schema>,
+  StandardSchemaV1<
+    StandardSchemaV1.InferInput<Schema>,
+    Durable<StoreState<Schema>>
+  >
+>;
+
 export function defineStore<Schema extends StandardSchemaV1>(
   name: string,
-  schema: Schema
+  schema: Schema & DurableStoreSchema<Schema>
 ): StoreDefinition<Schema> {
   return { name, schema };
 }
@@ -339,7 +356,8 @@ export abstract class CasStoreClient extends StoreClient {
       const prepared = await prepareStoreUpdate(
         params.definition,
         snapshot,
-        params.updater
+        params.updater,
+        params.stepId?.stepKey
       );
       const result: StoreUpdateResult<StoreState<Schema>> = {
         state: cloneStoreState(prepared.nextState),
@@ -391,7 +409,8 @@ export abstract class CasStoreClient extends StoreClient {
     const prepared = await prepareStoreUpdate(
       params.definition,
       params.snapshot,
-      params.updater
+      params.updater,
+      params.stepId?.stepKey
     );
     const result: StoreUpdateFromResult<StoreState<Schema>> = {
       updated: true,
@@ -458,7 +477,15 @@ export abstract class CasStoreClient extends StoreClient {
         previousState,
         draft,
         tracked,
+        stepKey: params.stepId?.stepKey,
       });
+      // Checked before the commit, so a selection that cannot be recorded
+      // leaves the store unchanged.
+      assertDurableStoreValue(
+        selected,
+        params.stepId?.stepKey ?? "",
+        `Store take selection for "${params.definition.name}"`
+      );
       const selectedSnapshot = cloneStoreState(selected);
       const result: StoreTakeResult<R> = {
         matched: true,
@@ -503,7 +530,8 @@ export abstract class CasStoreClient extends StoreClient {
 async function prepareStoreUpdate<Schema extends StandardSchemaV1>(
   definition: StoreDefinition<Schema>,
   snapshot: StoreSnapshot<StoreState<Schema>>,
-  updater: (draft: Draft<StoreState<Schema>>) => void | StoreState<Schema>
+  updater: (draft: Draft<StoreState<Schema>>) => void | StoreState<Schema>,
+  stepKey: string | undefined
 ) {
   const previousState = cloneStoreState(snapshot.state);
   const draft = cloneStoreState(previousState) as Draft<StoreState<Schema>>;
@@ -517,6 +545,7 @@ async function prepareStoreUpdate<Schema extends StandardSchemaV1>(
     draft,
     tracked,
     replacement: returned,
+    stepKey,
   });
 }
 
@@ -526,12 +555,14 @@ async function finalizeStoreMutation<Schema extends StandardSchemaV1>(params: {
   draft: Draft<StoreState<Schema>>;
   tracked: TrackedStoreUpdater<Draft<StoreState<Schema>>>;
   replacement?: unknown;
+  stepKey?: string;
 }) {
   const isReplacement =
     params.replacement !== undefined && params.replacement !== params.draft;
   const nextState = await validateStoreState(
     params.definition,
-    isReplacement ? params.replacement : params.draft
+    isReplacement ? params.replacement : params.draft,
+    params.stepKey
   );
   const changedPaths =
     !isReplacement && (nextState as unknown) === params.draft
@@ -594,9 +625,17 @@ export function assertSynchronousUpdater(updaterResult: unknown): void {
   }
 }
 
+/**
+ * Validates a state against its store's schema, then checks that the schema's
+ * output is a durable value. Throws `StoreValidationError` when the schema
+ * rejects the state, and `WorkflowValueError` (`INVALID_STEP_VALUE`) when the
+ * output is not durable, so callers that validate before committing leave the
+ * store unchanged. `stepKey` names the step in that error.
+ */
 export async function validateStoreState<Schema extends StandardSchemaV1>(
   definition: StoreDefinition<Schema>,
-  state: unknown
+  state: unknown,
+  stepKey = ""
 ): Promise<StoreState<Schema>> {
   const result = await definition.schema["~standard"].validate(state);
 
@@ -607,10 +646,49 @@ export async function validateStoreState<Schema extends StandardSchemaV1>(
     );
   }
 
+  assertDurableStoreValue(result.value, stepKey, `Store state for "${definition.name}"`);
   return result.value as StoreState<Schema>;
 }
 
+function assertDurableStoreValue(value: unknown, stepKey: string, label: string) {
+  const encoding = durableValueCodec.encode(value);
+  if (encoding.status === "invalid") {
+    throw new WorkflowValueError(
+      "INVALID_STEP_VALUE",
+      stepKey,
+      `${label} is not a durable value: ${encoding.message}`
+    );
+  }
+}
+
+/** Encodes a store state or step result for storage. Throws if it is not durable. */
+export function encodeStoreValue(value: unknown): string {
+  const encoding = durableValueCodec.encode(value);
+  if (encoding.status === "invalid") {
+    throw new Error(`Store value is not a durable value: ${encoding.message}`);
+  }
+  return encoding.canonical;
+}
+
+export function decodeStoreValue(canonical: string): unknown {
+  const decoding = durableValueCodec.decode(canonical);
+  if (decoding.status === "invalid") {
+    throw new Error(`Invalid store value encoding: ${decoding.message}`);
+  }
+  return decoding.value;
+}
+
+/**
+ * Copies a state as the durable value codec would read it back. Values the
+ * codec rejects, which validation keeps out of committed state, are copied
+ * with `structuredClone`.
+ */
 export function cloneStoreState<T>(state: T): T {
+  const encoding = durableValueCodec.encode(state);
+  if (encoding.status === "encoded") {
+    const decoding = durableValueCodec.decode(encoding.canonical);
+    if (decoding.status === "decoded") return decoding.value as T;
+  }
   if (typeof structuredClone === "function") {
     try {
       return structuredClone(state);

@@ -143,7 +143,7 @@ const myMiddleware = createMiddleware(async (req, event, next) => {
   event.context.set("key", "value"); // Error: Cannot call set on a frozen map
 
   // The context is admitted with the execution, and every delivery reads it
-  // back as a read-only map, so values must be plain JSON data
+  // back as a read-only map, so values must be durable values
 
   // The response can still be updated before it is sent to the user
   response.headers.set("X-Handled-By", "SuperAceDev");
@@ -168,8 +168,8 @@ Options:
 
 Responses:
 
-- `POST /trigger`: `202 { executionId }` once admission commits, `409 { code: "EXECUTION_ID_CONFLICT", message }` when the execution ID is already in use, `400 { code: "INVALID_EXECUTION_EVENT", message }` when `params` or `context` cannot round-trip through JSON
-- `POST /events`: blocks until the execution record is terminal; `200` with the result, `500` with the serialized recorded error, `404` for an unknown execution ID
+- `POST /trigger`: `202 { executionId }` once admission commits, `409 { code: "EXECUTION_ID_CONFLICT", message }` when the execution ID is already in use, `400 { code: "INVALID_EXECUTION_EVENT", message }` when `params` or `context` are not durable values
+- `POST /events`: blocks until the execution record is terminal; `200` with the result, `500` with the recorded error, both encoded with the durable value codec, `404` for an unknown execution ID
 
 ### `createMiddleware(handler)`
 

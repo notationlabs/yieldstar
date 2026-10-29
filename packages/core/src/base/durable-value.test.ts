@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { durableValueCodec } from "./durable-value";
+import { describe, expect, expectTypeOf, test } from "vitest";
+import { type Durable, durableValueCodec } from "./durable-value";
 
 function canonical(value: unknown) {
   const encoding = durableValueCodec.encode(value);
@@ -84,7 +84,6 @@ describe("durableValueCodec.encode is canonical", () => {
 
 describe("durableValueCodec.encode rejects", () => {
   test.each([
-    ["undefined", undefined],
     ["functions", () => {}],
     ["symbols", Symbol("s")],
     ["bigints", 1n],
@@ -99,8 +98,8 @@ describe("durableValueCodec.encode rejects", () => {
     expect(durableValueCodec.encode(value).status).toBe("invalid");
   });
 
-  test("undefined property values", () => {
-    expect(invalidMessage({ a: { b: undefined } })).toMatch(/^\$\["a"\]\["b"\]: /);
+  test("nested invalid values, naming their path", () => {
+    expect(invalidMessage({ a: { b: new Date(0) } })).toMatch(/^\$\["a"\]\["b"\]: /);
   });
 
   test("missing array items", () => {
@@ -146,5 +145,141 @@ describe("durableValueCodec.encode rejects", () => {
     const array: unknown[] = [];
     array.push({ back: array });
     expect(invalidMessage(array)).toMatch(/cycle/);
+  });
+});
+
+function roundTrip(value: unknown) {
+  const decoding = durableValueCodec.decode(canonical(value));
+  if (decoding.status !== "decoded") {
+    throw new Error(`expected decoded, got: ${decoding.message}`);
+  }
+  return decoding.value;
+}
+
+function decodeInvalid(text: string) {
+  const decoding = durableValueCodec.decode(text);
+  if (decoding.status !== "invalid") {
+    throw new Error("expected invalid");
+  }
+  return decoding.message;
+}
+
+describe("durableValueCodec tags undefined", () => {
+  test("as a whole value, a property and an array item", () => {
+    expect(canonical(undefined)).toBe('{"$type":"undefined"}');
+    expect(canonical({ a: undefined })).toBe('{"a":{"$type":"undefined"}}');
+    expect(canonical([1, undefined])).toBe('[1,{"$type":"undefined"}]');
+  });
+
+  test("keeping { a: undefined } distinct from {}", () => {
+    expect(canonical({ a: undefined })).not.toBe(canonical({}));
+    const decoded = roundTrip({ a: undefined });
+    expect(decoded).toHaveProperty("a");
+    expect(Object.keys(decoded as object)).toEqual(["a"]);
+  });
+
+  test("round trip", () => {
+    expect(roundTrip(undefined)).toBeUndefined();
+    const list = roundTrip([1, undefined]) as unknown[];
+    expect(list).toEqual([1, undefined]);
+    expect(1 in list).toBe(true);
+  });
+});
+
+describe("durableValueCodec wraps plain objects with a $type key", () => {
+  test("so they read back as written", () => {
+    const value = { $type: "undefined" };
+    expect(canonical(value)).toBe('{"$type":"object","value":{"$type":"undefined"}}');
+    expect(roundTrip(value)).toEqual(value);
+  });
+
+  test("including tag-shaped objects nested inside values", () => {
+    const value = {
+      list: [{ $type: "error", name: "E", message: "m" }],
+      wrapped: { $type: "object", value: { $type: "undefined" } },
+    };
+    expect(roundTrip(value)).toEqual(value);
+  });
+
+  test("but leaves other objects unwrapped", () => {
+    expect(canonical({ type: "x" })).toBe('{"type":"x"}');
+  });
+});
+
+describe("durableValueCodec.decode", () => {
+  test.each([
+    null,
+    true,
+    0,
+    1.5,
+    "text",
+    [],
+    {},
+    { a: [1, { b: null }], c: "x" },
+  ])("round trips %j", (value) => {
+    expect(roundTrip(value)).toEqual(value);
+  });
+
+  test("returns a copy", () => {
+    const value = { nested: { a: 1 } };
+    const decoded = roundTrip(value) as typeof value;
+    expect(decoded).not.toBe(value);
+    expect(decoded.nested).not.toBe(value.nested);
+  });
+
+  test("keeps an own __proto__ key as data", () => {
+    const decoded = roundTrip(JSON.parse('{"__proto__":{"polluted":true}}')) as object;
+    expect(Object.getPrototypeOf(decoded)).toBe(Object.prototype);
+    expect(Object.keys(decoded)).toEqual(["__proto__"]);
+    expect((decoded as { polluted?: boolean }).polluted).toBeUndefined();
+  });
+
+  test("leaves error-shaped plain objects as plain objects", () => {
+    const report = { name: "launch", message: "Ship it", stack: "web" };
+    const decoded = roundTrip(report);
+    expect(decoded).not.toBeInstanceOf(Error);
+    expect(decoded).toEqual(report);
+  });
+
+  test.each([
+    ["text that is not JSON", "{"],
+    ["an unknown tag", '{"$type":"date","value":0}'],
+    ["a tag with extra keys", '{"$type":"undefined","value":1}'],
+    ["a wrapped value that is not an object", '{"$type":"object","value":[1]}'],
+    ["an error without a message", '{"$type":"error","name":"Error"}'],
+    ["an error with a non-string code", '{"$type":"error","name":"E","message":"m","code":1}'],
+  ])("rejects %s", (_label, text) => {
+    expect(typeof decodeInvalid(text)).toBe("string");
+  });
+});
+
+describe("Durable<T>", () => {
+  function record<T>(value: T & Durable<T>): T {
+    return value;
+  }
+
+  test("accepts interfaces, undefined and errors", () => {
+    interface Reservation {
+      id: string;
+      note?: string;
+      lines: { sku: string; qty: number }[];
+      error: Error | null;
+    }
+    const reservation: Reservation = { id: "r", lines: [], error: null };
+    expectTypeOf(record(reservation)).toEqualTypeOf<Reservation>();
+    expectTypeOf(record(undefined)).toEqualTypeOf<undefined>();
+  });
+
+  test("rejects Dates, Maps, Sets, bigints and functions", () => {
+    // @ts-expect-error
+    record({ at: new Date() });
+    // @ts-expect-error
+    record({ map: new Map<string, number>() });
+    // @ts-expect-error
+    record(new Set<number>());
+    // @ts-expect-error
+    record(1n);
+    // @ts-expect-error
+    record({ fn: () => 1 });
   });
 });

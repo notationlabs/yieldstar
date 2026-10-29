@@ -5,6 +5,8 @@ import {
   defineStore,
   type Draft,
   type DurableObject,
+  type DurableStoreSchema,
+  type IfDurable,
   type ExecutionStartRequest,
   type ExecutionStartResult,
   InfrastructureError,
@@ -27,7 +29,11 @@ import {
   type StoreUpdateResult,
   type StoreWaiter,
   trackStoreSelector,
+  type Durable,
+  type StepSchemaVerdict,
+  durableValueCodec,
   WorkflowStartError,
+  WorkflowValueError,
 } from "@yieldstar/core";
 import { RetryableError } from "../exports/errors";
 import { getCallSiteHash } from "./utils";
@@ -56,7 +62,7 @@ export type WorkflowStore<T> = {
   get(key?: string): AsyncGenerator<StepResponse, StoreSnapshot<T>>;
   select<R>(
     key: string,
-    selector: StoreSelector<T, R>
+    selector: StoreSelector<T, R> & DurableSelector<T, R>
   ): AsyncGenerator<StepResponse, R>;
   update(
     key: string,
@@ -72,18 +78,33 @@ export type WorkflowStore<T> = {
     snapshot: StoreSnapshot<T>
   ): AsyncGenerator<StepResponse, StoreDeleteFromResult>;
   when<R>(
-    selector: StoreSelector<T, R | undefined | null | false>
+    selector: StoreSelector<T, R | undefined | null | false> &
+      DurableMatchSelector<T, R>
   ): AsyncGenerator<StepResponse, NonNullable<R>>;
   when<R>(
     key: string,
-    selector: StoreSelector<T, R | undefined | null | false>
+    selector: StoreSelector<T, R | undefined | null | false> &
+      DurableMatchSelector<T, R>
   ): AsyncGenerator<StepResponse, NonNullable<R>>;
   take<R>(
     key: string,
-    selector: StoreSelector<T, R | undefined | null | false>,
+    selector: StoreSelector<T, R | undefined | null | false> &
+      DurableMatchSelector<T, R>,
     claim: (draft: Draft<T>, selected: NonNullable<R>) => void
   ): AsyncGenerator<StepResponse, NonNullable<R>>;
 };
+
+/** A store selector whose result, which the step records, is durable. */
+type DurableSelector<T, R> = IfDurable<R, StoreSelector<T, Durable<R>>>;
+
+/**
+ * A `when` or `take` selector whose match is durable. `false` is excluded
+ * before the check so that `R` is inferred as it would be without it.
+ */
+type DurableMatchSelector<T, R> = IfDurable<
+  Exclude<R, false>,
+  StoreSelector<T, Durable<Exclude<R, false>> | undefined | null | false>
+>;
 
 export type StepRunner = ReturnType<typeof createStepRunner>;
 
@@ -94,7 +115,9 @@ export function createStepRunner(params: {
   const { event, clock } = params;
 
   function store<Schema extends StandardSchemaV1>(
-    definition: StoreDefinition<Schema>,
+    definition: StoreDefinition<Schema> & {
+      schema: DurableStoreSchema<Schema>;
+    },
     params?: {
       id?: string;
       initial?:
@@ -120,9 +143,9 @@ export function createStepRunner(params: {
    * replay of the step names the same target. A rejected start throws a
    * `WorkflowStartError`.
    */
-  function start(
+  function start<Params extends Record<string, any>>(
     stepKey: string,
-    target: { workflowId: string; params?: DurableObject }
+    target: { workflowId: string; params?: Params & Durable<Params> }
   ): AsyncGenerator<
     StepResponse,
     { executionId: string },
@@ -136,7 +159,9 @@ export function createStepRunner(params: {
       workflowId: target.workflowId,
     };
     // A missing params and an empty object are different requests.
-    if (target.params !== undefined) request.params = target.params;
+    if (target.params !== undefined) {
+      request.params = target.params as DurableObject;
+    }
     return startStep(stepKey, request);
   }
 
@@ -151,14 +176,7 @@ async function* startStep(
 
   const cached = yield new StepCacheCheck();
 
-  if (cached) {
-    yield cached;
-    if (cached instanceof StepError) {
-      // unreachable – consumer calls throw() on the generator first
-      throw cached.err;
-    }
-    return cached.result;
-  }
+  if (cached) return yield* replay(cached);
 
   const started: RuntimeCallResult<ExecutionStartResult> =
     yield new StepRuntimeCall(async ({ executions }) => {
@@ -184,9 +202,7 @@ async function* startStep(
     throw err;
   }
 
-  const result = { executionId: outcome.executionId };
-  yield new StepResult(result);
-  return result;
+  return yield* record({ executionId: outcome.executionId });
 }
 
 async function* storeStep<Schema extends StandardSchemaV1>(params: {
@@ -209,10 +225,7 @@ async function* storeStep<Schema extends StandardSchemaV1>(params: {
   const cached = yield new StepCacheCheck();
 
   if (cached) {
-    yield cached;
-    if (cached instanceof StepError) {
-      throw cached.err;
-    }
+    yield* replay(cached);
     return createWorkflowStore({ definition, id, event });
   }
 
@@ -238,12 +251,9 @@ async function* storeStep<Schema extends StandardSchemaV1>(params: {
       })
   );
 
-  if (!created.ok) {
-    yield new StepError(created.error);
-    throw created.error;
-  }
+  if (!created.ok) return yield* fail(key, created.error);
 
-  yield new StepResult({ storeName: definition.name, storeId: id });
+  yield* record({ storeName: definition.name, storeId: id });
   return createWorkflowStore({ definition, id, event });
 }
 
@@ -350,14 +360,45 @@ function createWorkflowStore<T>(params: {
   };
 }
 
-function run<T extends any>(
-  fn: () => T | Promise<T>,
-): AsyncGenerator<StepResponse, T, StepResult | StepError>;
+export type StepRunOptions<S extends StandardSchemaV1> = {
+  /**
+   * Validates the step's decoded value, on the first run and on every
+   * replay; the step returns the schema's output. The step function must
+   * return the schema's input as a durable value.
+   */
+  schema: S;
+};
 
-function run<T extends any>(
+/**
+ * A step function whose result, or the value its promise resolves to, is a
+ * durable value. Checking the whole function type keeps the result's type as
+ * TypeScript infers it, and names the offending property in the error.
+ */
+export type DurableStepFn<F> = F extends () => infer R
+  ? () => R extends PromiseLike<infer U> ? PromiseLike<DurableUnion<U>> : DurableUnion<R>
+  : never;
+
+type DurableUnion<T> = T extends unknown ? Durable<T> : never;
+
+function run<F extends () => unknown>(
+  fn: F & DurableStepFn<F>
+): AsyncGenerator<StepResponse, Awaited<ReturnType<F>>, StepResponse>;
+
+function run<F extends () => unknown>(
   key: string,
-  fn: () => T | Promise<T>,
-): AsyncGenerator<StepResponse, T, StepResult | StepError>;
+  fn: F & DurableStepFn<F>
+): AsyncGenerator<StepResponse, Awaited<ReturnType<F>>, StepResponse>;
+
+function run<S extends StandardSchemaV1>(
+  fn: () => StepSchemaInput<S> | PromiseLike<StepSchemaInput<S>>,
+  options: StepRunOptions<S>
+): AsyncGenerator<StepResponse, StandardSchemaV1.InferOutput<S>, StepResponse>;
+
+function run<S extends StandardSchemaV1>(
+  key: string,
+  fn: () => StepSchemaInput<S> | PromiseLike<StepSchemaInput<S>>,
+  options: StepRunOptions<S>
+): AsyncGenerator<StepResponse, StandardSchemaV1.InferOutput<S>, StepResponse>;
 
 // NOTE: run/delay/poll are plain (synchronous) functions that delegate to
 // async generators. This matters for keyless steps: the call-site hash must be
@@ -365,24 +406,32 @@ function run<T extends any>(
 // generator body doesn't execute until its first .next(), which happens inside
 // the workflow driver, so hashing there would give every keyless step the same
 // key.
-function run<T extends any>(
-  arg1: string | (() => T | Promise<T>),
-  arg2?: (() => T | Promise<T>) | string,
-): AsyncGenerator<StepResponse, T, StepResult | StepError> {
+function run(
+  arg1: string | (() => unknown),
+  arg2?: (() => unknown) | StepRunOptions<StandardSchemaV1>,
+  arg3?: StepRunOptions<StandardSchemaV1>
+): AsyncGenerator<StepResponse, any, StepResponse> {
   let key: string | null = null;
-  let fn: () => T | Promise<T>;
+  let fn: () => unknown;
+  let options: StepRunOptions<StandardSchemaV1> | undefined;
 
   if (typeof arg1 === "string") {
     key = arg1;
-    fn = arg2 as () => T | Promise<T>;
+    fn = arg2 as () => unknown;
+    options = arg3;
   } else {
     fn = arg1;
+    options = arg2 as StepRunOptions<StandardSchemaV1> | undefined;
   }
 
   if (!key) key = getCallSiteHash(run);
 
-  return durableStep(key, fn);
+  return durableStep(key, fn, options?.schema);
 }
+
+type StepSchemaInput<S extends StandardSchemaV1> = Durable<
+  StandardSchemaV1.InferInput<S>
+>;
 
 /** `step.delay`, reading its wake time from the runtime clock. */
 function createDelay(clock: () => number) {
@@ -464,27 +513,32 @@ function poll(
   return run(key, task);
 }
 
-async function* durableStep<T extends any>(
+async function* durableStep(
   key: string,
-  fn: () => T | Promise<T>
-): AsyncGenerator<StepResponse, T, StepResult | StepError> {
+  fn: () => unknown,
+  schema: StandardSchemaV1 | undefined
+): AsyncGenerator<StepResponse, any, any> {
   yield new StepKey(key);
 
   const cached = yield new StepCacheCheck();
 
   if (cached) {
-    yield cached;
-    if (cached instanceof StepError) {
-      // unreachable – consumer calls throw() on the generator first
-      throw cached.err;
+    const value = yield* replay(cached);
+    if (!schema) return value;
+    const validated = await validateStepValue(key, schema, value);
+    if (cached.schema === "rejected" && validated.ok) {
+      throw new WorkflowValueError(
+        "STEP_SCHEMA_INVALID",
+        key,
+        `Step "${key}" schema rejected its value on the first run`
+      );
     }
-    return cached.result;
+    return unwrapValidated(validated);
   }
 
+  let result: unknown;
   try {
-    const result = await fn();
-    yield new StepResult(result);
-    return result;
+    result = await fn();
   } catch (err: unknown) {
     if (err instanceof RetryableError) {
       yield new StepError(err, {
@@ -497,6 +551,80 @@ async function* durableStep<T extends any>(
     // unreachable – consumer calls throw() on the generator first
     throw err;
   }
+
+  if (!schema) return yield* record(result);
+
+  // The schema validates the value as replay will decode it. A value the
+  // codec rejects is left for the driver to record as INVALID_STEP_VALUE.
+  const encoding = durableValueCodec.encode(result);
+  if (encoding.status === "invalid") return yield* record(result);
+  const decoding = durableValueCodec.decode(encoding.canonical);
+  if (decoding.status === "invalid") throw new Error(decoding.message);
+  const validated = await validateStepValue(key, schema, decoding.value);
+  yield* record(result, validated.ok ? "accepted" : "rejected");
+  return unwrapValidated(validated);
+}
+
+type ValidatedStepValue =
+  | { ok: true; value: unknown }
+  | { ok: false; error: WorkflowValueError };
+
+async function validateStepValue(
+  key: string,
+  schema: StandardSchemaV1,
+  value: unknown
+): Promise<ValidatedStepValue> {
+  const result = await schema["~standard"].validate(value);
+  if (result.issues) {
+    const messages = result.issues.map((issue) => issue.message).join("; ");
+    return {
+      ok: false,
+      error: new WorkflowValueError(
+        "STEP_SCHEMA_INVALID",
+        key,
+        `Step "${key}" value failed its schema: ${messages}`
+      ),
+    };
+  }
+  return { ok: true, value: result.value };
+}
+
+function unwrapValidated(validated: ValidatedStepValue) {
+  if (!validated.ok) throw validated.error;
+  return validated.value;
+}
+
+/**
+ * Yields a step's result for the driver to record, and returns the decoded
+ * record the driver resumes the step with, so that the first run returns
+ * what replay will.
+ */
+async function* record<T>(
+  result: T,
+  schema?: StepSchemaVerdict
+): AsyncGenerator<StepResponse, T, any> {
+  const recorded: StepResult = yield new StepResult(result, schema);
+  return recorded.result;
+}
+
+/** Yields a recorded response; the driver throws a recorded error into the step. */
+async function* replay(cached: StepResponse): AsyncGenerator<StepResponse, any, any> {
+  const recorded: StepResult = yield cached;
+  return recorded.result;
+}
+
+/**
+ * Yields a store step's error for the driver to record and throw. A value
+ * error raised by a store client is given this step's key.
+ */
+async function* fail(key: string, error: unknown): AsyncGenerator<StepResponse, never, any> {
+  const err =
+    error instanceof WorkflowValueError && error.stepKey !== key
+      ? new WorkflowValueError(error.code, key, error.message)
+      : error;
+  yield new StepError(err);
+  // unreachable – consumer calls throw() on the generator first
+  throw err;
 }
 
 /**
@@ -511,25 +639,13 @@ async function* runtimeStep<T>(
 
   const cached = yield new StepCacheCheck();
 
-  if (cached) {
-    yield cached;
-    if (cached instanceof StepError) {
-      // unreachable – consumer calls throw() on the generator first
-      throw cached.err;
-    }
-    return cached.result;
-  }
+  if (cached) return yield* replay(cached);
 
   const outcome: RuntimeCallResult<T> = yield new StepRuntimeCall(call);
 
-  if (!outcome.ok) {
-    yield new StepError(outcome.error);
-    // unreachable – consumer calls throw() on the generator first
-    throw outcome.error;
-  }
+  if (!outcome.ok) return yield* fail(key, outcome.error);
 
-  yield new StepResult(outcome.value);
-  return outcome.value;
+  return yield* record(outcome.value);
 }
 
 async function* whenStep<T, R>(params: {
@@ -545,23 +661,14 @@ async function* whenStep<T, R>(params: {
 
   const cached = yield new StepCacheCheck();
 
-  if (cached) {
-    yield cached;
-    if (!(cached instanceof StepResult)) {
-      throw new Error("Store wait step cache must resolve to a step result");
-    }
-    return cached.result;
-  }
+  if (cached) return yield* replay(cached);
 
   const read: RuntimeCallResult<StoreSnapshot<unknown>> =
     yield new StepRuntimeCall(({ stores }) =>
       stores.getStore({ definition, id })
     );
 
-  if (!read.ok) {
-    yield new StepError(read.error);
-    throw read.error;
-  }
+  if (!read.ok) return yield* fail(stepKey, read.error);
 
   const snapshot = read.value;
   const { result, readPaths } = trackStoreSelector(
@@ -570,9 +677,7 @@ async function* whenStep<T, R>(params: {
   );
 
   if (result !== undefined && result !== null && result !== false) {
-    const clonedResult = cloneStoreState(result);
-    yield new StepResult(clonedResult);
-    return clonedResult as NonNullable<R>;
+    return yield* record(result as NonNullable<R>);
   }
 
   yield* registerWaiter({
@@ -603,13 +708,7 @@ async function* takeStep<T, R>(params: {
 
   const cached = yield new StepCacheCheck();
 
-  if (cached) {
-    yield cached;
-    if (!(cached instanceof StepResult)) {
-      throw new Error("Store take step cache must resolve to a step result");
-    }
-    return cached.result;
-  }
+  if (cached) return yield* replay(cached);
 
   const taken: RuntimeCallResult<StoreTakeResult<R>> =
     yield new StepRuntimeCall(({ stores }) =>
@@ -625,18 +724,11 @@ async function* takeStep<T, R>(params: {
       })
     );
 
-  if (!taken.ok) {
-    yield new StepError(taken.error);
-    // unreachable – consumer calls throw() on the generator first
-    throw taken.error;
-  }
+  if (!taken.ok) return yield* fail(stepKey, taken.error);
 
   const outcome = taken.value;
 
-  if (outcome.matched) {
-    yield new StepResult(outcome.selected);
-    return outcome.selected as NonNullable<R>;
-  }
+  if (outcome.matched) return yield* record(outcome.selected as NonNullable<R>);
 
   yield* registerWaiter({
     workflowId: event.workflowId,
@@ -660,10 +752,7 @@ async function* registerWaiter(
     ({ stores }) => stores.registerWaiter(waiter)
   );
 
-  if (!registered.ok) {
-    yield new StepError(registered.error);
-    throw registered.error;
-  }
+  if (!registered.ok) return yield* fail(waiter.stepKey, registered.error);
 
   yield new StepStoreWait();
 }

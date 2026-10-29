@@ -15,7 +15,7 @@ import { createWorkflowInvoker as createTestInvoker } from "@yieldstar/test-invo
 import { MemoryRuntime } from "@yieldstar/test-runtime";
 import { SqliteRuntime } from "@yieldstar/sqlite-runtime";
 // @ts-expect-error – plain .mjs fixture shared with the worker process
-import { parityRouter } from "./fixtures/worker-invoker/parity-workflows.mjs";
+import { ParcelError, parityRouter } from "./fixtures/worker-invoker/parity-workflows.mjs";
 // @ts-expect-error – plain .mjs fixture shared with the worker process
 import { leaseLocally } from "./fixtures/worker-invoker/lease-locally.mjs";
 
@@ -164,6 +164,36 @@ test("worker and test invokers deliver the same outcomes", { timeout: 10_000 }, 
     ]);
     expect(normalize(fromWorker)).toEqual(normalize(fromTest));
   }
+});
+
+test("errors and values keep their class and shape across the worker boundary", { timeout: 10_000 }, async () => {
+  const workerInvoker = createWorkflowInvoker({
+    workerPath: new URL("runner.mjs", fixtures).href,
+    logger,
+  });
+
+  const failing = event({ workflowId: "fails-with-class", executionId: "durable-fails" });
+  const failed = await workerInvoker.deliver(failing, optionsFor(failing));
+  expect(failed.status).toBe("failed");
+  const error = (failed as unknown as { error: Error & Record<string, unknown> }).error;
+  expect(error).toBeInstanceOf(ParcelError);
+  expect(error).toMatchObject({ code: "PARCEL_LOST", parcel: 7, message: "parcel 7 lost" });
+  expect(error.cause).toBeInstanceOf(RangeError);
+
+  const returning = event({
+    workflowId: "returns-values",
+    executionId: "durable-returns",
+    params: { a: undefined, $type: "object" },
+    context: new Map<string, unknown>([["nothing", undefined]]),
+  });
+  const completed = await workerInvoker.deliver(returning, optionsFor(returning));
+  expect(completed.status).toBe("completed");
+  const result = (completed as unknown as { result: Record<string, any> }).result;
+  expect(result.params).toEqual({ a: undefined, $type: "object" });
+  expect(Object.keys(result.params)).toEqual(["$type", "a"]);
+  expect(result.context).toEqual([["nothing", undefined]]);
+  expect(result.error).toBeInstanceOf(ParcelError);
+  expect(result.error.parcel).toBe(8);
 });
 
 /** Errors compare by name and message; delay wake times by their status. */

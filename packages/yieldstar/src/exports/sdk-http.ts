@@ -5,10 +5,9 @@ import type {
   WorkflowGeneratorReturnType,
   ExecutionAdmissionErrorCode,
 } from "@yieldstar/core";
-import { deserializeError } from "serialize-error";
 import {
   ExecutionAdmissionError,
-  errorWithOriginalStack,
+  durableValueCodec,
 } from "@yieldstar/core";
 
 type TriggerAck = {
@@ -34,21 +33,31 @@ export function createHttpSdkFactory<W extends WorkflowRouter>() {
     return {
       /**
        * Admits an execution through the trigger route. When `executionId` is
-       * omitted the runtime chooses one, which the response carries.
-       * @throws {ExecutionAdmissionError} on `409 Conflict` or an invalid event
+       * omitted the runtime chooses one, which the response carries. The body
+       * is encoded with the durable value codec, so params and context reach
+       * the runtime unchanged.
+       * @throws {ExecutionAdmissionError} on `409 Conflict` or an invalid event,
+       * including params or context the codec rejects, before any request
        */
       async trigger<K extends string & keyof W>(
         event: TriggerEvent<K, EventParamsOf<W[K]>>
       ): Promise<TriggerResponse<W, K>> {
+        const request: Record<string, unknown> = { workflowId: event?.workflowId };
+        if (event?.executionId !== undefined) request.executionId = event.executionId;
+        if (event && "params" in event) request.params = event.params;
+        if (event?.context !== undefined) request.context = event.context;
+        const encoding = durableValueCodec.encode(request);
+        if (encoding.status === "invalid") {
+          throw new ExecutionAdmissionError(
+            "INVALID_EXECUTION_EVENT",
+            `Event cannot be stored without loss: ${encoding.message}`
+          );
+        }
         const res = await fetch(`${params.url}/trigger`, {
           ...params.fetchOptions,
           method: "POST",
-          body: JSON.stringify({
-            executionId: event?.executionId,
-            workflowId: event?.workflowId,
-            params: event?.params,
-            context: event?.context,
-          }),
+          headers: { "content-type": "application/json" },
+          body: encoding.canonical,
         });
 
         if (res.ok) {
@@ -77,19 +86,26 @@ export function createHttpSdkFactory<W extends WorkflowRouter>() {
           ...params.fetchOptions,
         });
 
-        if (res.status === 500) {
-          const error = await res.json();
-          throw errorWithOriginalStack(
-            deserializeError(error),
-            this.waitForResult
-          );
-        }
-
-        if (!res.ok) {
+        if (res.status !== 500 && !res.ok) {
           throw res.statusText;
         }
 
-        return res.json() as Promise<WorkflowGeneratorReturnType<W[K]>>;
+        const decoding = durableValueCodec.decode(await res.text());
+        if (decoding.status === "invalid") {
+          throw new Error(`Invalid workflow outcome: ${decoding.message}`);
+        }
+
+        if (res.status === 500) {
+          const error =
+            decoding.value instanceof Error
+              ? decoding.value
+              : new Error(String(decoding.value));
+          // Thrown as revived, so it keeps its registered class and the
+          // stack recorded where it was first thrown.
+          throw error;
+        }
+
+        return decoding.value as WorkflowGeneratorReturnType<W[K]>;
       },
     };
   };

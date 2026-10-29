@@ -1,3 +1,5 @@
+import { registerErrorClass } from "@yieldstar/core";
+
 export class RetryableError extends Error {
   maxAttempts: number;
   retryInterval: number;
@@ -11,3 +13,5 @@ export class RetryableError extends Error {
     this.retryInterval = opts.retryInterval;
   }
 }
+
+registerErrorClass("RetryableError", RetryableError);

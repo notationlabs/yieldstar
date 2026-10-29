@@ -331,7 +331,7 @@ const { executionId } = await sdk.trigger({ workflowId, params?, context?, execu
 await sdk.triggerAndWait({ workflowId, params? });
 ```
 
-`trigger` resolves once admission commits. `triggerAndWait` resolves with the result recorded on the execution record, or rejects with the recorded error. Both throw `ExecutionAdmissionError` when the `executionId` is already in use (`EXECUTION_ID_CONFLICT`) or `params`/`context` cannot round-trip through JSON (`INVALID_EXECUTION_EVENT`).
+`trigger` resolves once admission commits. `triggerAndWait` resolves with the result recorded on the execution record, or rejects with the recorded error. Both throw `ExecutionAdmissionError` when the `executionId` is already in use (`EXECUTION_ID_CONFLICT`) or `params`/`context` are not durable values (`INVALID_EXECUTION_EVENT`).
 
 ### HTTP SDK
 

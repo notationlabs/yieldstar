@@ -1,5 +1,5 @@
 import type { Logger } from "pino";
-import type { WorkflowFn } from "yieldstar";
+import type { DurableValue, WorkflowFn } from "yieldstar";
 import { workflow } from "yieldstar";
 
 type CustomWorkflowFn<Params, Result> = (
@@ -17,12 +17,13 @@ const waitForStateFactory = (step: any, event: any, logger: Logger) =>
     });
   };
 
-const workflowFactory = <Params, Result>(
+const workflowFactory = <Params, Result extends DurableValue>(
   workflowFn: CustomWorkflowFn<Params, Result>
 ) => {
   return workflow(async function* (step, event, logger) {
     const waitForState = waitForStateFactory(step, event, logger);
-    return yield* workflowFn(step, waitForState);
+    const result: DurableValue = yield* workflowFn(step, waitForState);
+    return result;
   });
 };
 

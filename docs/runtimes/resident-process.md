@@ -56,7 +56,7 @@ Both connectors implement the same synchronous `SqliteDriver` contract. Transact
 
 ## Process requirements
 
-The invoker uses `node:child_process.fork` with advanced IPC serialization so workflow context remains a `Map` across the process boundary. The worker sends a `ready` handshake before the invoker delivers an event; a missing handshake fails after the configured timeout instead of hanging. TypeScript worker paths require Node 22.6 or newer for built-in type stripping. Use compiled JavaScript worker files with older Node releases.
+The invoker uses `node:child_process.fork` with advanced IPC serialization. Event params and context, results and errors cross the process boundary as durable value encodings, so errors keep their registered class and `undefined` properties keep their keys. The worker sends a `ready` handshake before the invoker delivers an event; a missing handshake fails after the configured timeout instead of hanging. TypeScript worker paths require Node 22.6 or newer for built-in type stripping. Use compiled JavaScript worker files with older Node releases.
 
 Parent and worker must use the same runtime family. Node must fork Node and Bun must fork Bun because their advanced IPC wire formats are not interoperable. The optional `execPath` can select another executable only within that constraint.
 

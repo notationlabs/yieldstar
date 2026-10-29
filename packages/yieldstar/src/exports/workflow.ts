@@ -1,16 +1,15 @@
 import type { Logger } from "pino";
 import type {
+  Durable,
   WorkflowEvent,
   WorkflowGenerator,
   EventParams,
   EventContext,
+  IfDurable,
 } from "@yieldstar/core";
 import type { StepRunner } from "../internal/step-runner";
 import { isIterable } from "../internal/utils";
-import {
-  deserializeStepResponse,
-  serializeStepResponse,
-} from "../internal/serialise";
+import { decodeStepRecord, encodeStepRecord } from "../internal/step-record";
 import { createStepRunner } from "../internal/step-runner";
 import {
   StepRuntimeCall,
@@ -31,6 +30,7 @@ import {
   LeaseLostError,
   StepConflictError,
   isLeaseLost,
+  WORKFLOW_RESULT_STEP_KEY,
 } from "@yieldstar/core";
 
 export type WorkflowFn<
@@ -44,6 +44,20 @@ export type WorkflowFn<
 ) => AsyncGenerator<any, Result>;
 
 /**
+ * A workflow function whose params and result are durable values. Params are
+ * an input, so a function type cannot check them; a missing property named
+ * for the problem does instead.
+ */
+export type DurableWorkflowFn<Params, Result> = IfDurable<
+  Params,
+  { "Workflow params must be durable values": Durable<Params> }
+> &
+  IfDurable<
+    Result,
+    (step: any, event: any, logger: any) => AsyncGenerator<any, Durable<Result>>
+  >;
+
+/**
  * Wraps a workflow function in a generator that advances its steps and yields
  * control to the executor whenever a step needs async work.
  */
@@ -52,7 +66,8 @@ export function workflow<
   Result,
   Context extends EventContext
 >(
-  workflowFn: WorkflowFn<Params, Result, Context>
+  workflowFn: WorkflowFn<Params, Result, Context> &
+    DurableWorkflowFn<Params, Result>
 ): WorkflowGenerator<Params, Result, Context> {
   return async function* workflowGenerator({
     event,
@@ -70,6 +85,9 @@ export function workflow<
 
     let iteratorResult: IteratorResult<any> | null = null;
     let nextIteratorResult: IteratorResult<any> | null = null;
+    // A step that produced a result resumes with its decoded record, which
+    // is what it returns to workflow code.
+    let resumeWith: StepResult | undefined;
     const stepKeys = new Set<string>();
 
     while (true) {
@@ -82,11 +100,12 @@ export function workflow<
         nextIteratorResult = null;
       } else {
         stopIfAborted(signal);
-        iteratorResult = await workflowIterator.next();
+        iteratorResult = await workflowIterator.next(resumeWith);
       }
+      resumeWith = undefined;
 
       if (iteratorResult.done) {
-        stepKey = "$$workflow-result$$";
+        stepKey = WORKFLOW_RESULT_STEP_KEY;
       } else if (!(iteratorResult.value instanceof StepKey)) {
         throw new Error("Step runners must yield a StepKey object");
       } else {
@@ -127,7 +146,7 @@ export function workflow<
 
       if (stepResponse instanceof StepCacheCheck) {
         const cachedResponse = cached
-          ? deserializeStepResponse(cached.stepResponseJson)
+          ? decodeStepRecord(cached.stepResponseJson)
           : null;
         // Resuming the step runs the step function unless it is cached.
         stopIfAborted(signal);
@@ -164,6 +183,15 @@ export function workflow<
         stepResponse = new StepInvalid();
       }
 
+      let stepResponseJson: string | undefined;
+      // The workflow result is encoded on every delivery, so that an invalid
+      // result fails the same way whether or not it is already recorded.
+      if (!cached || stepResponse instanceof WorkflowResult) {
+        const record = encodeStepRecord(stepResponse, stepKey);
+        stepResponseJson = record.json;
+        stepResponse = record.response;
+      }
+
       const needsRetry =
         !cached?.meta.done &&
         stepResponse instanceof StepError &&
@@ -172,9 +200,8 @@ export function workflow<
       const needsWake =
         !cached?.meta.done && stepResponse instanceof StepStoreWait;
 
-      if (!cached) {
+      if (!cached && stepResponseJson !== undefined) {
         const done = !needsRetry && !needsWake;
-        const stepResponseJson = serializeStepResponse(stepResponse);
         stopIfAborted(signal);
         const written = await infrastructure(() =>
           heapClient.writeStep({
@@ -182,7 +209,7 @@ export function workflow<
             stepKey,
             stepAttempt,
             done,
-            stepResponseJson,
+            stepResponseJson: stepResponseJson!,
           })
         );
         // Another claim has taken over: stop without an outcome.
@@ -206,6 +233,12 @@ export function workflow<
         return stepResponse;
       }
 
+      // Only an invalid workflow result is recorded as a step error under
+      // the workflow result's key. The workflow has finished, so it fails.
+      if (iteratorResult.done && stepResponse instanceof StepError) {
+        throw stepResponse.err;
+      }
+
       if (stepResponse instanceof StepInvalid) {
         break;
       }
@@ -226,7 +259,9 @@ export function workflow<
         }
       }
 
-      if (!(stepResponse instanceof StepResult)) {
+      if (stepResponse instanceof StepResult) {
+        resumeWith = stepResponse;
+      } else {
         yield stepResponse;
       }
     }

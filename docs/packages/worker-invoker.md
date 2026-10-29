@@ -36,7 +36,7 @@ The worker replies with one of two messages, and the child process is killed aft
 
 | Message                         | `deliver`                                                                                      |
 | ------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `{ status: "outcome", outcome }` | Resolves with the outcome. A `failed` outcome's error is deserialized with `serialize-error`  |
+| `{ status: "outcome", outcome }` | Resolves with the outcome. A `completed` result and a `failed` outcome's error are decoded with the durable value codec  |
 | `{ status: "error", error }`     | Rejects: the worker hit an infrastructure error, which is not an outcome                      |
 
 `deliver` also rejects on a spawn error, a missing handshake, or an exit before replying. The dispatcher never acknowledges a rejected delivery, and the runtime delivers it again after the redelivery delay:
