@@ -16,8 +16,7 @@
   },
   "dependencies": {
     "@yieldstar/core": "workspace:*",
-    "pino": "^9.9.0",
-    "serialize-error": "^11.0.3"
+    "pino": "^9.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.18.0"

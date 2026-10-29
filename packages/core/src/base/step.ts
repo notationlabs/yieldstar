@@ -22,13 +22,18 @@ export class StepInvalid extends StepResponse {
   readonly type = "step-invalid";
 }
 
+export type StepSchemaVerdict = "accepted" | "rejected";
+
 export class StepResult extends StepResponse {
   static type = "step-result";
   readonly type = "step-result";
   result: any;
-  constructor(result: any) {
+  /** Whether the step's schema accepted its value on the first run. */
+  schema?: StepSchemaVerdict;
+  constructor(result: any, schema?: StepSchemaVerdict) {
     super();
     this.result = result;
+    if (schema !== undefined) this.schema = schema;
   }
 }
 

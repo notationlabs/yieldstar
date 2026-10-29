@@ -3,6 +3,7 @@ import {
   StepResponse,
   StoreNotFoundError,
   StoreValidationError,
+  WorkflowValueError,
   type ExecutionClient,
   type StoreClient,
 } from "@yieldstar/core";
@@ -80,6 +81,7 @@ export async function executeRuntimeCall<T>(
 function isWorkflowFacingError(err: unknown) {
   return (
     err instanceof StoreValidationError ||
+    err instanceof WorkflowValueError ||
     err instanceof StoreNotFoundError ||
     (err instanceof Error &&
       (err.name === "StoreValidationError" || err.name === "StoreNotFoundError"))

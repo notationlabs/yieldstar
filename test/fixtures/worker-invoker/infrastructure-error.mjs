@@ -1,7 +1,7 @@
 process.on("message", () => {
   process.send({
     status: "error",
-    error: { name: "Error", message: "database is locked" },
+    error: JSON.stringify({ $type: "error", name: "Error", message: "database is locked" }),
   });
 });
 

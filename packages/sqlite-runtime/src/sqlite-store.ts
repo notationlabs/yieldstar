@@ -6,6 +6,8 @@ import { runTransaction } from "./sqlite-transaction";
 import {
   cloneStoreState,
   CasStoreClient,
+  decodeStoreValue,
+  encodeStoreValue,
   StoreNotFoundError,
   storePathsIntersect,
   validateStoreState,
@@ -106,7 +108,7 @@ export class SqliteStoreClient extends CasStoreClient {
           $instanceId: instanceId,
           $storeName: params.definition.name,
           $storeId: params.id,
-          $state: JSON.stringify(state),
+          $state: encodeStoreValue(state),
         });
       return {
         state: cloneStoreState(state),
@@ -139,7 +141,7 @@ export class SqliteStoreClient extends CasStoreClient {
       storeId: params.id,
       stepId: params.stepId,
     });
-    return row ? { result: JSON.parse(row.result) } : undefined;
+    return row ? { result: decodeStoreValue(row.result) } : undefined;
   }
 
   protected async commitStoreMutation(
@@ -155,7 +157,7 @@ export class SqliteStoreClient extends CasStoreClient {
         if (applied) {
           return {
             status: "already-applied",
-            result: JSON.parse(applied.result),
+            result: decodeStoreValue(applied.result),
           };
         }
       }
@@ -182,7 +184,7 @@ export class SqliteStoreClient extends CasStoreClient {
           $instanceId: mutation.expected.instanceId,
           $expectedVersion: mutation.expected.version,
           $version: version,
-          $state: JSON.stringify(mutation.nextState),
+          $state: encodeStoreValue(mutation.nextState),
         });
       if (Number(changed.changes) !== 1) {
         throw new Error("Store changed during its mutation transaction");
@@ -193,7 +195,7 @@ export class SqliteStoreClient extends CasStoreClient {
           storeName: mutation.definition.name,
           storeId: mutation.id,
           stepId: mutation.stepId,
-          result: JSON.stringify(mutation.result),
+          result: encodeStoreValue(mutation.result),
         });
       }
 
@@ -258,7 +260,7 @@ export class SqliteStoreClient extends CasStoreClient {
           stepId: params.stepId,
         });
         if (applied) {
-          return JSON.parse(applied.result) as StoreDeleteFromResult;
+          return decodeStoreValue(applied.result) as StoreDeleteFromResult;
         }
       }
 
@@ -297,7 +299,7 @@ export class SqliteStoreClient extends CasStoreClient {
           storeName: params.definition.name,
           storeId: params.id,
           stepId: params.stepId,
-          result: JSON.stringify(result),
+          result: encodeStoreValue(result),
         });
       }
       return result;
@@ -443,7 +445,7 @@ export class SqliteStoreClient extends CasStoreClient {
 
 function toSnapshot(row: StoreRow) {
   return {
-    state: JSON.parse(row.state),
+    state: decodeStoreValue(row.state),
     instanceId: row.instance_id,
     version: row.version,
   };

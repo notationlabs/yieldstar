@@ -5,12 +5,21 @@ import type {
   WorkflowInvoker,
   WorkflowRunOutcome,
 } from "@yieldstar/core";
-import { InfrastructureError, WorkerExitedError } from "@yieldstar/core";
+import {
+  InfrastructureError,
+  WorkerExitedError,
+  durableValueCodec,
+  encodeExecutionEvent,
+} from "@yieldstar/core";
 import { EventEmitter } from "node:events";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { deserializeError } from "serialize-error";
-import type { WorkerDelivery, WorkerMessage, WorkerRequest } from "./worker";
+import type {
+  SerializedOutcome,
+  WorkerDelivery,
+  WorkerMessage,
+  WorkerRequest,
+} from "./worker";
 
 /**
  * Runs each delivery in a forked worker process. `deliver` resolves with the
@@ -121,31 +130,68 @@ export function createWorkflowInvoker(params: {
               if (ready) return;
               ready = true;
               clearTimeout(handshakeTimer);
-              // Advanced serialization carries a Map but not a ReadonlyMap
-              // wrapper, so send the context as a plain Map.
+              let encoded: { params: string; context: string };
+              try {
+                encoded = encodeExecutionEvent(event);
+              } catch (error) {
+                settle({ error: error as Error });
+                return;
+              }
               const delivery: WorkerDelivery = {
                 type: "deliver",
-                event: { ...event, context: new Map(event.context) },
+                event: { ...event, ...encoded },
                 lease,
               };
               request(delivery);
               return;
             case "outcome": {
               const { outcome } = message;
-              settle({
-                outcome:
-                  outcome.status === "failed"
-                    ? { status: "failed", error: deserializeError(outcome.error) }
-                    : outcome,
-              });
+              try {
+                settle({ outcome: deserializeOutcome(outcome) });
+              } catch (error) {
+                settle({ error: error as Error });
+              }
               return;
             }
             case "error":
-              settle({ error: deserializeError(message.error) });
+              settle({ error: decodeWorkerError(message.error) });
               return;
           }
         });
       });
     },
   };
+}
+
+function deserializeOutcome(outcome: SerializedOutcome): WorkflowRunOutcome {
+  switch (outcome.status) {
+    case "suspended":
+      return outcome;
+    case "completed":
+      return { status: "completed", result: decodeOrThrow(outcome.result) };
+    case "failed": {
+      const error = decodeOrThrow(outcome.error);
+      return {
+        status: "failed",
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
+  }
+}
+
+function decodeWorkerError(encoded: string): Error {
+  const decoding = durableValueCodec.decode(encoded);
+  if (decoding.status === "invalid") {
+    return new Error(`Worker sent an invalid error: ${decoding.message}`);
+  }
+  const error = decoding.value;
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function decodeOrThrow(encoded: string) {
+  const decoding = durableValueCodec.decode(encoded);
+  if (decoding.status === "invalid") {
+    throw new Error(`Worker sent an invalid outcome: ${decoding.message}`);
+  }
+  return decoding.value;
 }

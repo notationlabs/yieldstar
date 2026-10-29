@@ -1,10 +1,11 @@
 import type { Logger } from "pino";
 import type { ExecutionClient, WorkflowInvoker } from "@yieldstar/core";
-import { serializeError } from "serialize-error";
 import {
   FreezableMap,
   MiddlewareEvent,
   MiddlewareFunction,
+  durableValueCodec,
+  encodeThrownValue,
   waitForExecutionOutcome,
 } from "@yieldstar/core";
 import { executeMiddlewareChain } from "./middleware";
@@ -20,9 +21,11 @@ type TriggerBody = {
 };
 
 /**
- * Admits an execution. Responds `202` with the accepted `executionId`, `409`
- * when the ID is already in use, and `400` when the event cannot be stored
- * without loss. A dispatcher delivers the execution afterwards.
+ * Admits an execution. The body is read with the durable value codec, so plain
+ * JSON is accepted and the HTTP SDK's tagged values (such as `undefined` and
+ * errors) keep their shape. Responds `202` with the accepted `executionId`,
+ * `409` when the ID is already in use, and `400` when the event cannot be
+ * stored without loss. A dispatcher delivers the execution afterwards.
  */
 export const createTriggerHandler =
   (params: {
@@ -33,7 +36,20 @@ export const createTriggerHandler =
   async (req) => {
     const { logger, executions, middleware = [] } = params;
 
-    const body = (await req.json()) as TriggerBody;
+    const decoding = durableValueCodec.decode(await req.text());
+    if (decoding.status === "invalid" || !isTriggerBody(decoding.value)) {
+      return Response.json(
+        {
+          code: "INVALID_EXECUTION_EVENT",
+          message:
+            decoding.status === "invalid"
+              ? `Invalid trigger body: ${decoding.message}`
+              : "Invalid trigger body: expected { workflowId, executionId?, params?, context? }",
+        },
+        { status: 400 }
+      );
+    }
+    const body = decoding.value;
 
     const event: MiddlewareEvent = {
       executionId: body.executionId,
@@ -75,7 +91,8 @@ export const createTriggerHandler =
 
 /**
  * Waits for an execution's record to reach a terminal status. Responds with
- * the result, `500` with the recorded error, or `404` for an unknown ID.
+ * the result, or `500` with the recorded error, each encoded with the durable
+ * value codec, or `404` for an unknown ID.
  */
 export const createEventsHandler =
   (params: {
@@ -105,13 +122,41 @@ export const createEventsHandler =
     }
 
     if (outcome.status === "failed") {
-      return Response.json(serializeError(outcome.error), {
-        status: 500,
-      });
+      return durableJson(encodeThrownValue(outcome.error), 500);
     }
 
-    return Response.json(outcome.result ?? null);
+    const result = durableValueCodec.encode(outcome.result);
+    if (result.status === "invalid") {
+      return durableJson(encodeThrownValue(new Error(result.message)), 500);
+    }
+    return durableJson(result.canonical, 200);
   };
+
+function durableJson(canonical: string, status: number) {
+  return new Response(canonical, {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function isDecodedObject(value: unknown): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    !(value instanceof Error)
+  );
+}
+
+function isTriggerBody(value: unknown): value is TriggerBody {
+  if (!isDecodedObject(value) || typeof value.workflowId !== "string") {
+    return false;
+  }
+  if (value.executionId !== undefined && typeof value.executionId !== "string") {
+    return false;
+  }
+  return value.context === undefined || isDecodedObject(value.context);
+}
 
 export function createRoutes(params: {
   basePath?: `/${string}`;

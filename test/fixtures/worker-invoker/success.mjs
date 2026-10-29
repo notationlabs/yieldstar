@@ -1,13 +1,14 @@
 process.on("message", ({ event, lease }) => {
+  const context = new Map(JSON.parse(event.context));
   process.send({
     status: "outcome",
     outcome: {
       status: "completed",
-      result:
-        event.context instanceof Map &&
-        event.context.get("requestId") === "request" &&
-        lease.executionId === event.executionId &&
-        typeof lease.token === "number",
+      result: JSON.stringify(
+        context.get("requestId") === "request" &&
+          lease.executionId === event.executionId &&
+          typeof lease.token === "number"
+      ),
     },
   });
 });

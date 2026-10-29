@@ -135,9 +135,6 @@ importers:
       pino:
         specifier: ^9.9.0
         version: 9.9.0
-      serialize-error:
-        specifier: ^11.0.3
-        version: 11.0.3
     devDependencies:
       '@types/node':
         specifier: ^22.18.0
@@ -226,9 +223,6 @@ importers:
       pino:
         specifier: ^9.9.0
         version: 9.9.0
-      serialize-error:
-        specifier: ^11.0.3
-        version: 11.0.3
     devDependencies:
       '@types/node':
         specifier: ^22.18.0
@@ -245,9 +239,6 @@ importers:
       pino:
         specifier: ^9.9.0
         version: 9.9.0
-      serialize-error:
-        specifier: ^11.0.3
-        version: 11.0.3
     devDependencies:
       '@types/node':
         specifier: ^22.18.0
@@ -3597,10 +3588,6 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  serialize-error@11.0.3:
-    resolution: {integrity: sha512-2G2y++21dhj2R7iHAdd0FIzjGwuKZld+7Pl/bTU6YIkrC2ZMbVUjm+luj6A6V34Rv9XfKJDKpTWu9W4Gse1D9g==}
-    engines: {node: '>=14.16'}
-
   seroval-plugins@1.6.9:
     resolution: {integrity: sha512-kiDK/Tb8IWZ61WEU8pA2PDmAuw37gKph9Y77OZlD56mg0Y2g0Bg7gZ1HeHhs5d40w+nRoUq/wj08V26ilbez9g==}
     engines: {node: '>=10'}
@@ -3785,10 +3772,6 @@ packages:
   type-fest@0.21.3:
     resolution: {integrity: sha512-t0rzBq87m3fVcduHDUFhKmyyX+9eo6WQjZvf51Ea/M0Q7+T374Jp1aUiyUl0GKxp8M/OETVHSDvmkyPgvX+X2w==}
     engines: {node: '>=10'}
-
-  type-fest@2.19.0:
-    resolution: {integrity: sha512-RAH822pAdBgcNMAfWnCBU3CFZcfZ/i1eZjwFU/dsLKumyuuP3niueg2UAukXYF0E2AAoc82ZSSf9J0WQBinzHA==}
-    engines: {node: '>=12.20'}
 
   typescript@5.9.2:
     resolution: {integrity: sha512-CWBzXQrc/qOkhidw1OzBTQuYRbfyxDXJMVJ1XNwUHGROVmuaeiEm3OslpZ1RV96d7SKKjZKrSJu3+t/xlw3R9A==}
@@ -7045,10 +7028,6 @@ snapshots:
 
   semver@7.8.5: {}
 
-  serialize-error@11.0.3:
-    dependencies:
-      type-fest: 2.19.0
-
   seroval-plugins@1.6.9(seroval@1.6.9):
     dependencies:
       seroval: 1.6.9
@@ -7219,8 +7198,6 @@ snapshots:
     optional: true
 
   type-fest@0.21.3: {}
-
-  type-fest@2.19.0: {}
 
   typescript@5.9.2: {}
 
