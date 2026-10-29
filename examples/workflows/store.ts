@@ -23,9 +23,8 @@ export const storeWorkflow = workflow(async function* (
   step,
   event: WorkflowEvent<ConversationParams>
 ) {
-  const conversation = yield* step.store(ConversationStore, {
+  const conversation = step.store(ConversationStore, {
     id: event.params.conversationId,
-    initial: { messages: [] },
   });
 
   yield* conversation.update("append-message", (draft) => {

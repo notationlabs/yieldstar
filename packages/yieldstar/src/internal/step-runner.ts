@@ -41,7 +41,6 @@ import {
 import { RetryableError } from "../exports/errors";
 import { getCallSiteHash } from "./utils";
 import {
-  StepCallbackError,
   StepRuntimeCall,
   workflowCallback,
   type RuntimeCallResult,
@@ -124,26 +123,22 @@ export function createStepRunner(params: {
 }) {
   const { event, clock } = params;
 
+  /**
+   * Returns a handle to the store `definition.name` + `id`, where `id`
+   * defaults to this execution's ID. Obtaining a handle reads, creates and
+   * records nothing, so any caller may obtain the same handle again. Each
+   * operation on a missing store first creates it from `definition.initial`.
+   */
   function store<Schema extends StandardSchemaV1>(
     definition: StoreDefinition<Schema> & {
       schema: DurableStoreSchema<Schema>;
     },
-    params?: {
-      id?: string;
-      initial?:
-        | StoreState<Schema>
-        | (() => StoreState<Schema> | Promise<StoreState<Schema>>);
-    }
-  ): AsyncGenerator<StepResponse, WorkflowStore<StoreState<Schema>>> {
-    const id = params?.id ?? event.executionId;
-    const key = `store:${definition.name}:${id}`;
-
-    return storeStep({
-      key,
+    params?: { id?: string }
+  ): WorkflowStore<StoreState<Schema>> {
+    return createWorkflowStore({
       definition,
-      id,
+      id: params?.id ?? event.executionId,
       event,
-      initial: params?.initial,
     });
   }
 
@@ -339,63 +334,22 @@ async function* startStep(
   return yield* record({ executionId: outcome.executionId });
 }
 
-async function* storeStep<Schema extends StandardSchemaV1>(params: {
-  key: string;
-  definition: StoreDefinition<Schema>;
-  id: string;
-  event: WorkflowEvent;
-  initial?:
-    | StoreState<Schema>
-    | (() => StoreState<Schema> | Promise<StoreState<Schema>>);
-}): AsyncGenerator<
-  StepResponse,
-  WorkflowStore<StoreState<Schema>>,
-  any
-> {
-  const { key, definition, id, event } = params;
-
-  yield new StepKey(key);
-
-  const cached = yield new StepCacheCheck();
-
-  if (cached) {
-    yield* replay(cached);
-    return createWorkflowStore({ definition, id, event });
-  }
-
-  const created: RuntimeCallResult<unknown> = yield new StepRuntimeCall(
-    ({ stores }) =>
-      stores.getStore({
-        definition: {
-          ...definition,
-          initial: (storeId) => {
-            try {
-              return definition.initial(storeId);
-            } catch (err) {
-              throw new StepCallbackError(err);
-            }
-          },
-        },
-        id,
-      })
-  );
-
-  if (!created.ok) return yield* fail(key, created.error);
-
-  yield* record({ storeName: definition.name, storeId: id });
-  return createWorkflowStore({ definition, id, event });
-}
-
 function createWorkflowStore<T>(params: {
   definition: StoreDefinition<any>;
   id: string;
   event: WorkflowEvent;
 }): WorkflowStore<T> {
-  const { definition, id, event } = params;
-  const key = { storeName: definition.name, storeId: id };
+  const { id, event } = params;
+  const key = { storeName: params.definition.name, storeId: id };
+  // Any operation may run `initial` on a missing store, so its errors must
+  // reach workflow code instead of ending the delivery as infrastructure.
+  const definition: StoreDefinition<any> = {
+    ...params.definition,
+    initial: workflowCallback(params.definition.initial),
+  };
 
   return {
-    definition,
+    definition: params.definition,
     id,
     key,
     get(stepKey?: string) {
