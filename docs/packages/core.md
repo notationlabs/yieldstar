@@ -43,7 +43,7 @@ const runner = new WorkflowRunner(runtime, { router, logger });
 | `options.router` | `WorkflowRouter` | Map of workflow IDs to generators |
 | `options.logger` | `Logger`         | Pino logger                       |
 
-`runner.run(event, lease, logger?)` runs the delivery under `lease`, the `ExecutionLease` the dispatcher claimed. Every step write carries it. The method resolves with an outcome for everything workflow code can cause, and rejects only with an `InfrastructureError`:
+`runner.run(event, { lease, signal, logger? })` runs the delivery under `lease`, the `ExecutionLease` the dispatcher claimed. Every step write carries it. The method resolves with an outcome for everything workflow code can cause, and rejects only with an `InfrastructureError`:
 
 ```ts
 type WorkflowRunOutcome =
@@ -80,8 +80,13 @@ interface ExecutionRecord {
   admittedAt: number;
   updatedAt: number;
   unacknowledgedDeliveryCount: number; // consecutive deliveries that ended without an acknowledgement
+  parent?: ExecutionParent; // present only on executions admitted by `start`
 }
+
+type ExecutionParent = { executionId: string; stepKey: string };
 ```
+
+`parent` names the execution and step that started this one with [`step.start`](../manual/steps.md#stepstart). It is set when the target is admitted and never changes. An execution admitted through `admit`, such as a trigger, has no parent.
 
 `running` means the execution has a live lease. When the lease ends without a terminal acknowledgement, the status returns to `suspended` if an earlier delivery was acknowledged as suspended, and to `admitted` otherwise. Operators can read `unacknowledgedDeliveryCount` to find executions that keep failing.
 
@@ -102,6 +107,15 @@ interface ExecutionClient {
   >;
 
   get(executionId: string): Promise<ExecutionRecord | undefined>;
+
+  start(request: {
+    requestId: { executionId: string; stepKey: string }; // the calling execution and its step
+    workflowId: string;
+    params?: DurableObject;
+  }): Promise<
+    | { status: "accepted"; executionId: string }
+    | { status: "rejected"; code: WorkflowStartErrorCode; message: string }
+  >;
 
   requestWake(request: { executionId: string; wakeAt: number }): Promise<
     | { status: "requested" }
@@ -131,19 +145,39 @@ type LeaseLost = { status: "lost" };
 | Method        | Contract                                                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `admit`       | Creates the record as `admitted` and makes it due now, all-or-nothing. Reserves a supplied ID unchanged or chooses one. Rejects a used ID with `EXECUTION_ID_CONFLICT`, and an event that cannot round-trip with `INVALID_EXECUTION_EVENT` |
+| `start`       | Admits a target execution on behalf of the step named by `requestId`, idempotently by that ID. A new start admits the target due now, with the caller's `context` and `parent` set to `requestId`, and records the start request, all-or-nothing. A repeated request ID returns the first target's ID if its `workflowId` and canonical `params` match, and `START_REQUEST_MISMATCH` otherwise, whatever the target's status. Missing `params` and `{}` do not match. An empty `workflowId`, or `params` that are not a plain object or that `durableValueCodec` cannot encode, return `INVALID_START_PARAMETERS` and admit nothing |
 | `requestWake` | Carries wakes from outside a delivery, such as a store commit. Pending wakes merge into one due time: the earliest                                                       |
 | `claimDue`    | Leases up to `limit` executions that are due at or before the runtime clock and have no live lease, earliest due first. Each lease lasts `duration` ms and carries a token greater than every earlier token for that execution. An execution has at most one live lease at a time, across every client sharing the backend |
 | `renew`       | Extends the lease to `duration` ms from now. Returns `lost` once a higher token has been issued or the lease has ended. An expired lease that nobody has claimed again is still current |
 | `release`     | Ends the lease without an outcome. The delivery counts as unacknowledged, so the execution is claimable again after the redelivery delay |
 | `acknowledge` | Records the outcome and ends the lease, clearing the wakes the delivery covered. The next due time is the earlier of the outcome's `wakeAt` and any wake requested after the claim. A stale lease returns `lost` and changes nothing |
 
-`renew`, `release`, `acknowledge` and `HeapClient.writeStep` are fenced: the adapter checks the lease's token and makes the write in one atomic step, and accepts the write only if the token is current. Clocks decide only when an execution becomes claimable again; tokens decide whose writes count. A holder that receives `lost` must stop, without acknowledging.
+`renew`, `release`, `acknowledge` and `HeapClient.writeStep` are fenced: the adapter checks the lease's token and makes the write in one atomic step, and accepts the write only if the token is current. Clocks decide only when an execution becomes claimable again; tokens decide whose writes count. A holder that receives `lost` must stop, without acknowledging. `start` is not fenced: it is idempotent by its request ID, so a stale holder that calls it receives the same target and starts nothing new.
 
 A lease ends without an acknowledgement when it is released, or when it expires and another claim takes over. Each such delivery adds one to `unacknowledgedDeliveryCount`, and any acknowledgement resets it to zero. While it is above zero, the execution waits a redelivery delay after the delivery ended before it can be claimed. The delay starts at 1 second and doubles with each unacknowledged delivery, up to 5 minutes (`redeliveryDelay(n)`).
 
-`ExecutionAdmissionError` (`code: "EXECUTION_ID_CONFLICT" | "INVALID_EXECUTION_EVENT"`) is what the SDKs throw for a rejected admission. `InfrastructureError` wraps a runtime failure; `InfrastructureError.is(err)` recognises one even when several copies of `@yieldstar/core` are loaded. `isLeaseLost(value)` recognises a `LeaseLost` result.
+`ExecutionAdmissionError` (`code: "EXECUTION_ID_CONFLICT" | "INVALID_EXECUTION_EVENT"`) is what the SDKs throw for a rejected admission. `WorkflowStartError` (`code: "INVALID_START_PARAMETERS" | "START_REQUEST_MISMATCH"`) is what `step.start` throws to workflow code for a rejected start; the rejection is recorded as the step's result, so replay throws the same class and code. `InfrastructureError` wraps a runtime failure; `InfrastructureError.is(err)` recognises one even when several copies of `@yieldstar/core` are loaded. `isLeaseLost(value)` recognises a `LeaseLost` result.
 
-Runtime adapter authors can import the storage-neutral state machine that `SqliteRuntime` and `MemoryRuntime` share: `prepareExecutionAdmission`, `createExecutionState`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`, `isExecutionClaimable`, `toExecutionRecord`, and the event and outcome codecs. An adapter persists `ExecutionState` however it likes and applies each transition inside one atomic write. A fenced heap write checks `isLeaseCurrent` in the same write. `DEFAULT_LEASE_DURATION` (30 seconds), `REDELIVERY_DELAY_BASE` and `REDELIVERY_DELAY_MAX` are the defaults.
+Runtime adapter authors can import the storage-neutral state machine that `SqliteRuntime` and `MemoryRuntime` share: `prepareExecutionAdmission`, `createExecutionState`, `prepareExecutionStart`, `matchStartRequest`, `createStartedExecution`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`, `isExecutionClaimable`, `toExecutionRecord`, and the event and outcome codecs. An adapter persists `ExecutionState` however it likes and applies each transition inside one atomic write. A fenced heap write checks `isLeaseCurrent` in the same write. For `start`, an adapter validates the request with `prepareExecutionStart`, looks up the request ID, answers a recorded request with `matchStartRequest`, and otherwise inserts the target and the `StartRequestState` from `createStartedExecution` in one atomic write, choosing another ID if the target's is in use. `DEFAULT_LEASE_DURATION` (30 seconds), `REDELIVERY_DELAY_BASE` and `REDELIVERY_DELAY_MAX` are the defaults.
+
+## `durableValueCodec`
+
+Validates durable values and encodes them as canonical JSON. `ExecutionClient.start` uses it to validate `params` and to compare a repeated request with the recorded one.
+
+```ts
+type DurableValue = null | boolean | number | string | DurableValue[] | DurableObject;
+type DurableObject = { [key: string]: DurableValue };
+
+type DurableValueEncoding =
+  | { status: "encoded"; canonical: string }
+  | { status: "invalid"; message: string };
+
+const durableValueCodec: { encode(value: unknown): DurableValueEncoding };
+```
+
+`encode` accepts `null`, booleans, finite numbers, strings, arrays with no missing items, and plain objects (the default prototype or `null`) whose own properties are enumerable data properties with string keys. It rejects `undefined`, functions, symbols, bigints, `NaN` and infinities, class instances such as `Date` and `Map`, accessors, symbol or non-enumerable properties, missing array items and reference cycles, and returns a message naming the path of the first invalid value. It never throws for an invalid value.
+
+The canonical string sorts object keys and writes `-0` as `0`, so two values that differ only in key order encode to the same string.
 
 ## `ExecutionDispatcher`
 

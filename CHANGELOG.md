@@ -37,6 +37,12 @@
 - Added `WORKER_ORPHANED_EXIT_CODE` to `@yieldstar/worker-invoker`.
 - Added `step.start(stepKey, { workflowId, params? })` (RFC 003), which starts another workflow as a durable step and returns `{ executionId }`. Replays and repeated attempts return the first target instead of starting another. A rejected start throws `WorkflowStartError` (`INVALID_START_PARAMETERS` or `START_REQUEST_MISMATCH`), and replay restores its class and code.
 - Re-exported `WorkflowStartError` and the `DurableObject`, `DurableValue`, `ExecutionParent` and `WorkflowStartErrorCode` types from `yieldstar`.
+- Added `ExecutionClient.start` (RFC 003), which admits a target execution idempotently by its request ID (`{ executionId, stepKey }`), together with its start-request record. A repeat with a different `workflowId` or `params` returns `START_REQUEST_MISMATCH`, also after the target has finished. `start` is not fenced. Custom runtime adapters must implement it.
+- Added `parent` (`ExecutionParent`) to `ExecutionRecord`: the execution and step that started it with `step.start`. It never changes, and executions admitted through `admit` have none.
+- Added `durableValueCodec` and the `DurableValue`, `DurableObject` and `DurableValueEncoding` types to `@yieldstar/core`. `encode` validates plain data and returns canonical JSON with sorted keys.
+- Added `WorkflowStartError` and `WorkflowStartErrorCode` to `@yieldstar/core`, and the start transitions `prepareExecutionStart`, `matchStartRequest` and `createStartedExecution` (with `StartRequestState`) for runtime adapter authors.
+- `SqliteRuntime` stores start requests in a `start_requests` table and the parent link in `parent_execution_id` and `parent_step_key` columns on `executions`. A new start inserts the target and the request in one transaction.
+- Added RFC 003's `start` cases to `registerExecutionClientConformance`. Harnesses may return `failStartCommits` to run the case that a start which fails before it commits leaves no trace.
 
 ### Changed
 

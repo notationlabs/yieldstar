@@ -99,6 +99,8 @@ yield * step.delay("key", ms);
 yield * step.poll("key", opts, predicate);
 ```
 
+`step.start` always takes a key, because the key identifies the start request as well as the cached step. Keep it stable across deploys: a different key starts a different target.
+
 If two steps in the same execution resolve to the same cache key, the runtime throws: `"Each step in a loop must have a unique cache key."`
 
 ## Errors

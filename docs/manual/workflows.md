@@ -76,11 +76,12 @@ interface ExecutionRecord {
   workflowId: string;
   params: EventParams;
   context: EventContext;
-  status: "admitted" | "suspended" | "completed" | "failed";
+  status: "admitted" | "running" | "suspended" | "completed" | "failed";
   outcome?: { status: "completed"; result: unknown } | { status: "failed"; error: Error };
   admittedAt: number;
   updatedAt: number;
   unacknowledgedDeliveryCount: number; // consecutive deliveries that ended without an outcome
+  parent?: { executionId: string; stepKey: string }; // set when step.start admitted it
 }
 ```
 
@@ -93,6 +94,8 @@ interface ExecutionRecord {
 | `failed`    | Workflow code threw an uncaught error. `outcome.error` holds it      |
 
 `completed` and `failed` are terminal and permanent. A finished execution never runs workflow code again: a later delivery returns the recorded outcome.
+
+An execution started by another workflow with [`step.start`](./steps.md#stepstart) records the caller's execution ID and step key as `parent`. The link never changes, and executions created by a trigger have none.
 
 **Execution IDs are unique for the lifetime of the runtime.** A trigger may supply its own `executionId`, and the runtime reserves it unchanged; otherwise the runtime chooses one. Reusing an ID that was ever admitted, including one whose execution failed, is rejected with `EXECUTION_ID_CONFLICT`. This matters because the ID is how a replay finds its own recorded steps, so a reused ID would replay another execution's results.
 
