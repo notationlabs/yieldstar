@@ -31,6 +31,16 @@ export type Durable<T> = T extends
   ? never
   : { [K in keyof T]: Durable<T[K]> };
 
+/**
+ * `unknown` when `T` is a durable value, and `Otherwise` when it is not.
+ * Intersect a parameter with it to check a type inferred from the rest of
+ * that parameter: the check takes no part in inference, so literal widening
+ * and union inference are unchanged. `Otherwise` should restate the
+ * parameter with `Durable<T>` in place of `T`, so the error names the
+ * offending property.
+ */
+export type IfDurable<T, Otherwise> = [T] extends [Durable<T>] ? unknown : Otherwise;
+
 export type DurableValueEncoding =
   | { status: "encoded"; canonical: string }
   | { status: "invalid"; message: string };

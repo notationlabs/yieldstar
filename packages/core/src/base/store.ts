@@ -1,5 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec";
-import { durableValueCodec } from "./durable-value";
+import { durableValueCodec, type Durable, type IfDurable } from "./durable-value";
 import { WorkflowValueError, registerErrorClass } from "./errors";
 
 export type Draft<T> = T extends object
@@ -148,9 +148,21 @@ export class StoreNotFoundError extends Error {
 registerErrorClass("StoreValidationError", StoreValidationError);
 registerErrorClass("StoreNotFoundError", StoreNotFoundError);
 
+/**
+ * A schema whose output, the store state, is a durable value. The state is
+ * still validated by the codec at runtime.
+ */
+export type DurableStoreSchema<Schema extends StandardSchemaV1> = IfDurable<
+  StoreState<Schema>,
+  StandardSchemaV1<
+    StandardSchemaV1.InferInput<Schema>,
+    Durable<StoreState<Schema>>
+  >
+>;
+
 export function defineStore<Schema extends StandardSchemaV1>(
   name: string,
-  schema: Schema
+  schema: Schema & DurableStoreSchema<Schema>
 ): StoreDefinition<Schema> {
   return { name, schema };
 }

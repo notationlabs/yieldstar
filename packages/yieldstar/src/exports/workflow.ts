@@ -1,9 +1,11 @@
 import type { Logger } from "pino";
 import type {
+  Durable,
   WorkflowEvent,
   WorkflowGenerator,
   EventParams,
   EventContext,
+  IfDurable,
 } from "@yieldstar/core";
 import type { StepRunner } from "../internal/step-runner";
 import { isIterable } from "../internal/utils";
@@ -42,6 +44,20 @@ export type WorkflowFn<
 ) => AsyncGenerator<any, Result>;
 
 /**
+ * A workflow function whose params and result are durable values. Params are
+ * an input, so a function type cannot check them; a missing property named
+ * for the problem does instead.
+ */
+export type DurableWorkflowFn<Params, Result> = IfDurable<
+  Params,
+  { "Workflow params must be durable values": Durable<Params> }
+> &
+  IfDurable<
+    Result,
+    (step: any, event: any, logger: any) => AsyncGenerator<any, Durable<Result>>
+  >;
+
+/**
  * Wraps a workflow function in a generator that advances its steps and yields
  * control to the executor whenever a step needs async work.
  */
@@ -50,7 +66,8 @@ export function workflow<
   Result,
   Context extends EventContext
 >(
-  workflowFn: WorkflowFn<Params, Result, Context>
+  workflowFn: WorkflowFn<Params, Result, Context> &
+    DurableWorkflowFn<Params, Result>
 ): WorkflowGenerator<Params, Result, Context> {
   return async function* workflowGenerator({
     event,

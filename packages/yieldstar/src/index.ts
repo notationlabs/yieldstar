@@ -10,7 +10,7 @@ export {
   registerErrorClass,
 } from "@yieldstar/core";
 export { createWorkflow, workflow } from "./exports/workflow";
-export type { WorkflowFn } from "./exports/workflow";
+export type { DurableWorkflowFn, WorkflowFn } from "./exports/workflow";
 export { defineStore } from "./internal/step-runner";
 export type {
   DurableStepFn,
@@ -28,6 +28,7 @@ export type {
   StoreSelector,
   StoreSnapshot,
   StoreState,
+  DurableStoreSchema,
   StoreUpdateFromResult,
   StoreUpdateResult,
   StoreVersion,

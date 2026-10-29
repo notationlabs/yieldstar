@@ -39,6 +39,7 @@ export type {
   DurableValue,
   DurableValueCodec,
   DurableValueEncoding,
+  IfDurable,
 } from "./base/durable-value";
 export {
   DurableValueError,
@@ -104,6 +105,7 @@ export type {
   StoreSelector,
   StoreSnapshot,
   StoreState,
+  DurableStoreSchema,
   StoreStepId,
   StoreTakeResult,
   StoreUpdateFromResult,

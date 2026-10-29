@@ -5,6 +5,8 @@ import {
   defineStore,
   type Draft,
   type DurableObject,
+  type DurableStoreSchema,
+  type IfDurable,
   type ExecutionStartRequest,
   type ExecutionStartResult,
   InfrastructureError,
@@ -60,7 +62,7 @@ export type WorkflowStore<T> = {
   get(key?: string): AsyncGenerator<StepResponse, StoreSnapshot<T>>;
   select<R>(
     key: string,
-    selector: StoreSelector<T, R>
+    selector: StoreSelector<T, R> & DurableSelector<T, R>
   ): AsyncGenerator<StepResponse, R>;
   update(
     key: string,
@@ -76,18 +78,33 @@ export type WorkflowStore<T> = {
     snapshot: StoreSnapshot<T>
   ): AsyncGenerator<StepResponse, StoreDeleteFromResult>;
   when<R>(
-    selector: StoreSelector<T, R | undefined | null | false>
+    selector: StoreSelector<T, R | undefined | null | false> &
+      DurableMatchSelector<T, R>
   ): AsyncGenerator<StepResponse, NonNullable<R>>;
   when<R>(
     key: string,
-    selector: StoreSelector<T, R | undefined | null | false>
+    selector: StoreSelector<T, R | undefined | null | false> &
+      DurableMatchSelector<T, R>
   ): AsyncGenerator<StepResponse, NonNullable<R>>;
   take<R>(
     key: string,
-    selector: StoreSelector<T, R | undefined | null | false>,
+    selector: StoreSelector<T, R | undefined | null | false> &
+      DurableMatchSelector<T, R>,
     claim: (draft: Draft<T>, selected: NonNullable<R>) => void
   ): AsyncGenerator<StepResponse, NonNullable<R>>;
 };
+
+/** A store selector whose result, which the step records, is durable. */
+type DurableSelector<T, R> = IfDurable<R, StoreSelector<T, Durable<R>>>;
+
+/**
+ * A `when` or `take` selector whose match is durable. `false` is excluded
+ * before the check so that `R` is inferred as it would be without it.
+ */
+type DurableMatchSelector<T, R> = IfDurable<
+  Exclude<R, false>,
+  StoreSelector<T, Durable<Exclude<R, false>> | undefined | null | false>
+>;
 
 export type StepRunner = ReturnType<typeof createStepRunner>;
 
@@ -98,7 +115,9 @@ export function createStepRunner(params: {
   const { event, clock } = params;
 
   function store<Schema extends StandardSchemaV1>(
-    definition: StoreDefinition<Schema>,
+    definition: StoreDefinition<Schema> & {
+      schema: DurableStoreSchema<Schema>;
+    },
     params?: {
       id?: string;
       initial?:
@@ -124,9 +143,9 @@ export function createStepRunner(params: {
    * replay of the step names the same target. A rejected start throws a
    * `WorkflowStartError`.
    */
-  function start(
+  function start<Params extends Record<string, any>>(
     stepKey: string,
-    target: { workflowId: string; params?: DurableObject }
+    target: { workflowId: string; params?: Params & Durable<Params> }
   ): AsyncGenerator<
     StepResponse,
     { executionId: string },
@@ -140,7 +159,9 @@ export function createStepRunner(params: {
       workflowId: target.workflowId,
     };
     // A missing params and an empty object are different requests.
-    if (target.params !== undefined) request.params = target.params;
+    if (target.params !== undefined) {
+      request.params = target.params as DurableObject;
+    }
     return startStep(stepKey, request);
   }
 
