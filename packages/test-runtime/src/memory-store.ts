@@ -1,20 +1,17 @@
 import { v7 as uuidv7 } from "uuid";
 import {
   CasStoreClient,
-  StoreNotFoundError,
   cloneStoreState,
   decodeStoreValue,
   encodeStoreValue,
   storePathsIntersect,
-  validateStoreState,
   type StandardSchemaV1,
   type StoreDefinition,
-  type StoreDeleteFromResult,
+  type StoreDeletion,
   type StoreMutation,
   type StoreMutationCommitResult,
   type StorePath,
   type StoreSnapshot,
-  type StoreState,
   type StoreStepId,
   type StoreWaiter,
 } from "@yieldstar/core";
@@ -51,70 +48,36 @@ export class MemoryStoreClient extends CasStoreClient {
     return result;
   }
 
-  async getOrCreateStore<Schema extends StandardSchemaV1>(params: {
-    definition: StoreDefinition<Schema>;
-    id: string;
-    initial?:
-      | StoreState<Schema>
-      | (() => StoreState<Schema> | Promise<StoreState<Schema>>);
-  }): Promise<StoreSnapshot<StoreState<Schema>>> {
-    const key = this.storeKey(params.definition.name, params.id);
-    const existing = this.stores.get(key);
-
-    if (existing) {
-      return {
-        state: cloneStoreState(existing.state) as StoreState<Schema>,
-        instanceId: existing.instanceId,
-        version: existing.version,
-      };
-    }
-
-    if (!params.initial) {
-      throw new StoreNotFoundError(params.definition.name, params.id);
-    }
-
-    const initialValue = params.initial;
-    const initial =
-      typeof initialValue === "function"
-        ? await (
-            initialValue as () =>
-              | StoreState<Schema>
-              | Promise<StoreState<Schema>>
-          )()
-        : initialValue;
-    const state = await validateStoreState(params.definition, initial);
-
-    const instanceId = uuidv7();
-    this.stores.set(key, {
-      state: cloneStoreState(state),
-      instanceId,
-      version: 0,
-    });
-
-    return {
-      state: cloneStoreState(state),
-      instanceId,
-      version: 0,
-    };
+  protected createInstanceId(): string {
+    return uuidv7();
   }
 
-  async getStore<Schema extends StandardSchemaV1>(params: {
-    definition: StoreDefinition<Schema>;
+  protected async readStore(params: {
+    definition: StoreDefinition;
     id: string;
-  }): Promise<StoreSnapshot<StoreState<Schema>>> {
+  }): Promise<StoreSnapshot<unknown> | undefined> {
     const record = this.stores.get(
       this.storeKey(params.definition.name, params.id)
     );
+    return record ? this.toSnapshot(record) : undefined;
+  }
 
-    if (!record) {
-      throw new StoreNotFoundError(params.definition.name, params.id);
-    }
-
-    return {
-      state: cloneStoreState(record.state) as StoreState<Schema>,
-      instanceId: record.instanceId,
-      version: record.version,
-    };
+  protected insertStore(params: {
+    definition: StoreDefinition;
+    id: string;
+    snapshot: StoreSnapshot<unknown>;
+  }): Promise<StoreSnapshot<unknown>> {
+    return this.enqueueWrite(async () => {
+      const key = this.storeKey(params.definition.name, params.id);
+      const record = this.stores.get(key);
+      if (record) return this.toSnapshot(record);
+      this.stores.set(key, {
+        state: cloneStoreState(params.snapshot.state),
+        instanceId: params.snapshot.instanceId,
+        version: params.snapshot.version,
+      });
+      return cloneStoreState(params.snapshot);
+    });
   }
 
   protected async getAppliedStoreStep(params: {
@@ -150,27 +113,20 @@ export class MemoryStoreClient extends CasStoreClient {
 
       const key = this.storeKey(mutation.definition.name, mutation.id);
       const record = this.stores.get(key);
-      if (!record) {
-        throw new StoreNotFoundError(mutation.definition.name, mutation.id);
-      }
+      if (!record && !mutation.expected.created) return { status: "missing" };
       if (
-        record.instanceId !== mutation.expected.instanceId ||
-        record.version !== mutation.expected.version
+        record &&
+        (mutation.expected.created ||
+          record.instanceId !== mutation.expected.instanceId ||
+          record.version !== mutation.expected.version)
       ) {
-        return {
-          status: "conflict",
-          snapshot: {
-            state: cloneStoreState(record.state),
-            instanceId: record.instanceId,
-            version: record.version,
-          },
-        };
+        return { status: "conflict", snapshot: this.toSnapshot(record) };
       }
 
-      const version = record.version + 1;
+      const version = mutation.expected.version + 1;
       this.stores.set(key, {
         state: cloneStoreState(mutation.nextState),
-        instanceId: record.instanceId,
+        instanceId: mutation.expected.instanceId,
         version,
       });
 
@@ -223,49 +179,32 @@ export class MemoryStoreClient extends CasStoreClient {
     });
   }
 
-  async deleteStoreFrom(params: {
-    definition: StoreDefinition;
-    id: string;
-    snapshot: StoreSnapshot<unknown>;
-    stepId?: StoreStepId;
-  }): Promise<StoreDeleteFromResult> {
+  protected commitStoreDeletion(
+    deletion: StoreDeletion
+  ): Promise<StoreMutationCommitResult> {
     return this.enqueueWrite(async () => {
-      const ledgerKey = params.stepId
+      const ledgerKey = deletion.stepId
         ? this.appliedStepKey(
-            params.definition.name,
-            params.id,
-            params.stepId
+            deletion.definition.name,
+            deletion.id,
+            deletion.stepId
           )
         : undefined;
       if (ledgerKey) {
         const applied = this.appliedSteps.get(ledgerKey);
-        if (applied) return decodeStoreValue(applied) as StoreDeleteFromResult;
+        if (applied) {
+          return { status: "already-applied", result: decodeStoreValue(applied) };
+        }
       }
 
-      this.assertSnapshotHasInstanceId(params.snapshot);
-
-      const key = this.storeKey(params.definition.name, params.id);
+      const key = this.storeKey(deletion.definition.name, deletion.id);
       const record = this.stores.get(key);
-      if (!record) {
-        return {
-          deleted: false,
-          reason: "not-found",
-          expectedInstanceId: params.snapshot.instanceId,
-          expectedVersion: params.snapshot.version,
-        };
-      }
+      if (!record) return { status: "missing" };
       if (
-        record.instanceId !== params.snapshot.instanceId ||
-        record.version !== params.snapshot.version
+        record.instanceId !== deletion.expected.instanceId ||
+        record.version !== deletion.expected.version
       ) {
-        return {
-          deleted: false,
-          reason: "conflict",
-          expectedInstanceId: params.snapshot.instanceId,
-          actualInstanceId: record.instanceId,
-          expectedVersion: params.snapshot.version,
-          actualVersion: record.version,
-        };
+        return { status: "conflict", snapshot: this.toSnapshot(record) };
       }
 
       this.stores.delete(key);
@@ -274,9 +213,10 @@ export class MemoryStoreClient extends CasStoreClient {
           this.waiters.delete(waiterKey);
         }
       }
-      const result = { deleted: true as const };
-      if (ledgerKey) this.appliedSteps.set(ledgerKey, encodeStoreValue(result));
-      return result;
+      if (ledgerKey) {
+        this.appliedSteps.set(ledgerKey, encodeStoreValue(deletion.result));
+      }
+      return { status: "committed" };
     });
   }
 
@@ -367,11 +307,11 @@ export class MemoryStoreClient extends CasStoreClient {
     return `${storeName}:${storeId}:${executionId}:${stepKey}`;
   }
 
-  private assertSnapshotHasInstanceId(snapshot: { instanceId?: string }) {
-    if (!snapshot.instanceId) {
-      throw new Error(
-        "Store snapshot is missing instanceId; read a fresh snapshot"
-      );
-    }
+  private toSnapshot(record: StoreRecord): StoreSnapshot<unknown> {
+    return {
+      state: cloneStoreState(record.state),
+      instanceId: record.instanceId,
+      version: record.version,
+    };
   }
 }

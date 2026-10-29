@@ -1,7 +1,6 @@
 import {
   InfrastructureError,
   StepResponse,
-  StoreNotFoundError,
   StoreValidationError,
   WorkflowValueError,
   type ExecutionClient,
@@ -82,9 +81,7 @@ function isWorkflowFacingError(err: unknown) {
   return (
     err instanceof StoreValidationError ||
     err instanceof WorkflowValueError ||
-    err instanceof StoreNotFoundError ||
-    (err instanceof Error &&
-      (err.name === "StoreValidationError" || err.name === "StoreNotFoundError"))
+    (err instanceof Error && err.name === "StoreValidationError")
   );
 }
 

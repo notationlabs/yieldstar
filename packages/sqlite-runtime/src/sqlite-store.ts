@@ -8,15 +8,12 @@ import {
   CasStoreClient,
   decodeStoreValue,
   encodeStoreValue,
-  StoreNotFoundError,
   storePathsIntersect,
-  validateStoreState,
   type StandardSchemaV1,
   type StoreDefinition,
-  type StoreDeleteFromResult,
+  type StoreDeletion,
   type StorePath,
   type StoreSnapshot,
-  type StoreState,
   type StoreStepId,
   type StoreWaiter,
   type StoreMutation,
@@ -64,71 +61,35 @@ export class SqliteStoreClient extends CasStoreClient {
     this.storeWaitersDao = new StoreWaitersDao(params.db);
   }
 
-  async getOrCreateStore<Schema extends StandardSchemaV1>(params: {
-    definition: StoreDefinition<Schema>;
-    id: string;
-    initial?:
-      | StoreState<Schema>
-      | (() => StoreState<Schema> | Promise<StoreState<Schema>>);
-  }): Promise<StoreSnapshot<StoreState<Schema>>> {
-    const existing = this.getStoreRow(params.definition.name, params.id);
-
-    if (existing) {
-      return toSnapshot(existing);
-    }
-
-    if (!params.initial) {
-      throw new StoreNotFoundError(params.definition.name, params.id);
-    }
-
-    const initialValue = params.initial;
-    const initial =
-      typeof initialValue === "function"
-        ? await (
-            initialValue as () =>
-              | StoreState<Schema>
-              | Promise<StoreState<Schema>>
-          )()
-        : initialValue;
-    const state = await validateStoreState(params.definition, initial);
-
-    return runTransaction(this.db, () => {
-      const existingTx = this.getStoreRow(params.definition.name, params.id);
-      if (existingTx) {
-        return toSnapshot(existingTx);
-      }
-
-      const instanceId = uuidv7();
-      this.db
-        .query(
-          `INSERT INTO stores (instance_id, store_name, store_id, version, state)
-           VALUES ($instanceId, $storeName, $storeId, 0, $state)`
-        )
-        .run({
-          $instanceId: instanceId,
-          $storeName: params.definition.name,
-          $storeId: params.id,
-          $state: encodeStoreValue(state),
-        });
-      return {
-        state: cloneStoreState(state),
-        instanceId,
-        version: 0,
-      };
-    });
+  protected createInstanceId(): string {
+    return uuidv7();
   }
 
-  async getStore<Schema extends StandardSchemaV1>(params: {
-    definition: StoreDefinition<Schema>;
+  protected async readStore(params: {
+    definition: StoreDefinition;
     id: string;
-  }): Promise<StoreSnapshot<StoreState<Schema>>> {
+  }): Promise<StoreSnapshot<unknown> | undefined> {
     const row = this.getStoreRow(params.definition.name, params.id);
+    return row ? toSnapshot(row) : undefined;
+  }
 
-    if (!row) {
-      throw new StoreNotFoundError(params.definition.name, params.id);
-    }
-
-    return toSnapshot(row);
+  protected async insertStore(params: {
+    definition: StoreDefinition;
+    id: string;
+    snapshot: StoreSnapshot<unknown>;
+  }): Promise<StoreSnapshot<unknown>> {
+    return runTransaction(this.db, () => {
+      const row = this.getStoreRow(params.definition.name, params.id);
+      if (row) return toSnapshot(row);
+      this.insertStoreRow({
+        storeName: params.definition.name,
+        storeId: params.id,
+        instanceId: params.snapshot.instanceId,
+        version: params.snapshot.version,
+        state: params.snapshot.state,
+      });
+      return cloneStoreState(params.snapshot);
+    });
   }
 
   protected async getAppliedStoreStep(params: {
@@ -163,31 +124,41 @@ export class SqliteStoreClient extends CasStoreClient {
       }
 
       const row = this.getStoreRow(mutation.definition.name, mutation.id);
-      if (!row) {
-        throw new StoreNotFoundError(mutation.definition.name, mutation.id);
-      }
+      if (!row && !mutation.expected.created) return { status: "missing" };
       if (
-        row.instance_id !== mutation.expected.instanceId ||
-        row.version !== mutation.expected.version
+        row &&
+        (mutation.expected.created ||
+          row.instance_id !== mutation.expected.instanceId ||
+          row.version !== mutation.expected.version)
       ) {
         return { status: "conflict", snapshot: toSnapshot(row) };
       }
 
       const version = mutation.expected.version + 1;
-      const changed = this.db
-        .query(
-          `UPDATE stores
-           SET version = $version, state = $state
-           WHERE instance_id = $instanceId AND version = $expectedVersion`
-        )
-        .run({
-          $instanceId: mutation.expected.instanceId,
-          $expectedVersion: mutation.expected.version,
-          $version: version,
-          $state: encodeStoreValue(mutation.nextState),
+      if (mutation.expected.created) {
+        this.insertStoreRow({
+          storeName: mutation.definition.name,
+          storeId: mutation.id,
+          instanceId: mutation.expected.instanceId,
+          version,
+          state: mutation.nextState,
         });
-      if (Number(changed.changes) !== 1) {
-        throw new Error("Store changed during its mutation transaction");
+      } else {
+        const changed = this.db
+          .query(
+            `UPDATE stores
+             SET version = $version, state = $state
+             WHERE instance_id = $instanceId AND version = $expectedVersion`
+          )
+          .run({
+            $instanceId: mutation.expected.instanceId,
+            $expectedVersion: mutation.expected.version,
+            $version: version,
+            $state: encodeStoreValue(mutation.nextState),
+          });
+        if (Number(changed.changes) !== 1) {
+          throw new Error("Store changed during its mutation transaction");
+        }
       }
 
       if (mutation.stepId) {
@@ -246,63 +217,46 @@ export class SqliteStoreClient extends CasStoreClient {
     });
   }
 
-  async deleteStoreFrom(params: {
-    definition: StoreDefinition;
-    id: string;
-    snapshot: StoreSnapshot<unknown>;
-    stepId?: StoreStepId;
-  }): Promise<StoreDeleteFromResult> {
-    return runTransaction(this.db, (): StoreDeleteFromResult => {
-      if (params.stepId) {
+  protected async commitStoreDeletion(
+    deletion: StoreDeletion
+  ): Promise<StoreMutationCommitResult> {
+    return runTransaction(this.db, (): StoreMutationCommitResult => {
+      if (deletion.stepId) {
         const applied = this.getAppliedStepRow({
-          storeName: params.definition.name,
-          storeId: params.id,
-          stepId: params.stepId,
+          storeName: deletion.definition.name,
+          storeId: deletion.id,
+          stepId: deletion.stepId,
         });
         if (applied) {
-          return decodeStoreValue(applied.result) as StoreDeleteFromResult;
+          return {
+            status: "already-applied",
+            result: decodeStoreValue(applied.result),
+          };
         }
       }
 
-      this.assertSnapshotHasInstanceId(params.snapshot);
-
-      const row = this.getStoreRow(params.definition.name, params.id);
-      if (!row) {
-        return {
-          deleted: false,
-          reason: "not-found",
-          expectedInstanceId: params.snapshot.instanceId,
-          expectedVersion: params.snapshot.version,
-        };
-      }
+      const row = this.getStoreRow(deletion.definition.name, deletion.id);
+      if (!row) return { status: "missing" };
       if (
-        row.instance_id !== params.snapshot.instanceId ||
-        row.version !== params.snapshot.version
+        row.instance_id !== deletion.expected.instanceId ||
+        row.version !== deletion.expected.version
       ) {
-        return {
-          deleted: false,
-          reason: "conflict",
-          expectedInstanceId: params.snapshot.instanceId,
-          actualInstanceId: row.instance_id,
-          expectedVersion: params.snapshot.version,
-          actualVersion: row.version,
-        };
+        return { status: "conflict", snapshot: toSnapshot(row) };
       }
 
-      this.storeWaitersDao.deleteStoreWaiters(params.definition.name, params.id);
+      this.storeWaitersDao.deleteStoreWaiters(deletion.definition.name, deletion.id);
       this.db
         .query(`DELETE FROM stores WHERE instance_id = $instanceId`)
         .run({ $instanceId: row.instance_id });
-      const result = { deleted: true as const };
-      if (params.stepId) {
+      if (deletion.stepId) {
         this.insertAppliedStepRow({
-          storeName: params.definition.name,
-          storeId: params.id,
-          stepId: params.stepId,
-          result: encodeStoreValue(result),
+          storeName: deletion.definition.name,
+          storeId: deletion.id,
+          stepId: deletion.stepId,
+          result: encodeStoreValue(deletion.result),
         });
       }
-      return result;
+      return { status: "committed" };
     });
   }
 
@@ -434,12 +388,25 @@ export class SqliteStoreClient extends CasStoreClient {
     return executionIds;
   }
 
-  private assertSnapshotHasInstanceId(snapshot: { instanceId?: string }) {
-    if (!snapshot.instanceId) {
-      throw new Error(
-        "Store snapshot is missing instanceId; read a fresh snapshot"
-      );
-    }
+  private insertStoreRow(params: {
+    storeName: string;
+    storeId: string;
+    instanceId: string;
+    version: number;
+    state: unknown;
+  }) {
+    this.db
+      .query(
+        `INSERT INTO stores (instance_id, store_name, store_id, version, state)
+         VALUES ($instanceId, $storeName, $storeId, $version, $state)`
+      )
+      .run({
+        $instanceId: params.instanceId,
+        $storeName: params.storeName,
+        $storeId: params.storeId,
+        $version: params.version,
+        $state: encodeStoreValue(params.state),
+      });
   }
 }
 

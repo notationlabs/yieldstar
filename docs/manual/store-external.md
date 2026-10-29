@@ -18,6 +18,10 @@ const conversation = storeClient.store(ConversationStore, "conversation:123");
 
 Take the store client from the runtime rather than constructing one, because the runtime wires it to the execution records. When a write changes state that a suspended workflow is waiting on, the store client makes that workflow's execution due in the same transaction as the write. A running dispatcher then delivers it. See [Resident-process runtime](../runtimes/resident-process.md) for the full wiring.
 
+## Missing stores
+
+The handle's operations follow the same rule as workflow operations: `get`, `update`, `updateFrom` and `deleteFrom` on a missing store first create it from the definition's `initial(id)`, in the same write. So a webhook handler can write to a conversation before any workflow has used it, and `get` never fails because a store is missing. `deleteStore` is the exception, since it never creates a store.
+
 ## Reading
 
 ```ts

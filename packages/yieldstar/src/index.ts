@@ -19,6 +19,7 @@ export type {
   DurableStepFn,
   EffectDescriptor,
   EffectLookup,
+  StepRunner,
   StepRunOptions,
   WorkflowStore,
 } from "./internal/step-runner";

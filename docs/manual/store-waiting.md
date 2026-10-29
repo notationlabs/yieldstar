@@ -12,7 +12,7 @@ const message = yield* store.when((s) =>
 );
 ```
 
-If the selector already returns a truthy value, the workflow continues immediately. Otherwise the execution suspends. When a later write touches something the selector read, the workflow replays and the selector re-evaluates.
+If the selector already returns a truthy value, the workflow continues immediately. Otherwise the execution suspends. On a missing store, `when` first creates it from the definition's `initial`, and the selector runs against that state. When a later write touches something the selector read, the workflow replays and the selector re-evaluates.
 
 Inside a loop, pass an explicit key – the same call site is reached more than once, so the call-site key collides:
 
@@ -59,10 +59,7 @@ The selector and the claim run inside the _same_ store transaction, committing a
 
 ```ts
 export const agent = workflow(async function* (step, event) {
-  const store = yield* step.store(AgentStore, {
-    id: event.params.agentId,
-    initial: { messages: [], status: "idle" },
-  });
+  const store = step.store(AgentStore, { id: event.params.agentId });
 
   let turn = 0;
 

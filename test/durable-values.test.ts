@@ -3,7 +3,6 @@ import type { Logger } from "pino";
 import {
   ExecutionDispatcher,
   ReadOnlyMap,
-  StoreNotFoundError,
   StoreValidationError,
   WorkflowRunner,
 } from "@yieldstar/core";
@@ -515,7 +514,6 @@ describe("step errors", () => {
     ["WorkflowStartError", () => new WorkflowStartError("START_REQUEST_MISMATCH", "m"), WorkflowStartError],
     ["WorkflowValueError", () => new WorkflowValueError("INVALID_STEP_VALUE", "k", "m"), WorkflowValueError],
     ["StoreValidationError", () => new StoreValidationError("m"), StoreValidationError],
-    ["StoreNotFoundError", () => new StoreNotFoundError("s", "id"), StoreNotFoundError],
   ] as const)("%s is rethrown with its class", async (_name, make, errorClass) => {
     const { first, replay } = await acrossReplay((step) =>
       step.run("value", async () => {
@@ -580,11 +578,13 @@ describe("step errors", () => {
 
 describe("store values", () => {
   type Order = { lines: { sku: string }[]; note?: any };
-  const Orders = defineStore("durable-orders", testSchema<Order>());
+  const Orders = defineStore("durable-orders", testSchema<Order>(), {
+    initial: () => ({ lines: [] }),
+  });
 
   test("an update to a non-durable state throws INVALID_STEP_VALUE and leaves the store unchanged", async () => {
     const { first, replay, sdk } = await acrossReplay(async function* (step) {
-      const store = yield* step.store(Orders, { id: "o1", initial: { lines: [] } });
+      const store = step.store(Orders, { id: "o1" });
       return yield* store.update("value", (draft) => {
         draft.lines.push({ sku: "mug" });
         draft.note = new Date(0);
@@ -599,26 +599,27 @@ describe("store values", () => {
   });
 
   test("a non-durable initial state throws INVALID_STEP_VALUE and creates no store", async () => {
+    const MappedOrders = defineStore("mapped-orders", testSchema<Order>(), {
+      initial: () => ({ lines: [], note: nonDurable(new Map()) }),
+    });
     const { first, replay, sdk } = await acrossReplay(async function* (step) {
-      yield* step.store(Orders, {
-        id: "o2",
-        initial: { lines: [], note: nonDurable(new Map()) },
+      return yield* step.store(MappedOrders, { id: "o2" }).update("value", (draft) => {
+        draft.lines.push({ sku: "mug" });
       });
     });
     for (const run of [first, replay]) {
-      expect(thrownBy(run)).toMatchObject({
-        code: "INVALID_STEP_VALUE",
-        stepKey: "store:durable-orders:o2",
-      });
+      expect(thrownBy(run)).toBeInstanceOf(WorkflowValueError);
+      expect(thrownBy(run)).toMatchObject({ code: "INVALID_STEP_VALUE", stepKey: "value" });
     }
-    await expect(
-      sdk.storeClient.getStore({ definition: Orders, id: "o2" })
-    ).rejects.toBeInstanceOf(StoreNotFoundError);
+    expect(await sdk.storeClient.listStores(MappedOrders)).toEqual([]);
   });
 
   test("a take whose selection is not durable throws INVALID_STEP_VALUE and claims nothing", async () => {
     const { first, sdk } = await acrossReplay(async function* (step) {
-      const store = yield* step.store(Orders, { id: "o3", initial: { lines: [{ sku: "mug" }] } });
+      const store = step.store(Orders, { id: "o3" });
+      yield* store.update("seed", (draft) => {
+        draft.lines.push({ sku: "mug" });
+      });
       return yield* store.take(
         "value",
         (state) => state.lines.length > 0 && nonDurable(new Set(state.lines)),
@@ -629,12 +630,12 @@ describe("store values", () => {
     });
     expect(thrownBy(first)).toMatchObject({ code: "INVALID_STEP_VALUE", stepKey: "value" });
     const snapshot = await sdk.storeClient.getStore({ definition: Orders, id: "o3" });
-    expect(snapshot).toMatchObject({ version: 0, state: { lines: [{ sku: "mug" }] } });
+    expect(snapshot).toMatchObject({ version: 1, state: { lines: [{ sku: "mug" }] } });
   });
 
   test("a select result that is not durable throws INVALID_STEP_VALUE", async () => {
     const { first, replay } = await acrossReplay(async function* (step) {
-      const store = yield* step.store(Orders, { id: "o4", initial: { lines: [] } });
+      const store = step.store(Orders, { id: "o4" });
       return yield* store.select("value", () => nonDurable(new Date(0)));
     });
     for (const run of [first, replay]) {
@@ -644,17 +645,23 @@ describe("store values", () => {
 
   test("store state and store step results are typed as durable values", () => {
     // @ts-expect-error a Date is not a durable value
-    defineStore("dated", testSchema<{ at: Date }>());
+    defineStore("dated", testSchema<{ at: Date }>(), { initial: () => ({ at: new Date(0) }) });
     interface Cart {
       id: string;
       note?: string;
       lines: { sku: string; qty: number }[];
     }
-    const Carts = defineStore("carts", testSchema<Cart>());
+    const Carts = defineStore("carts", testSchema<Cart>(), {
+      initial: (id) => ({ id, lines: [] }),
+    });
     workflow(async function* (step) {
-      // @ts-expect-error a Date is not a durable value
-      yield* step.store({ name: "dated", schema: testSchema<{ at: Date }>() });
-      const cart = yield* step.store(Carts, { initial: { id: "c", lines: [] } });
+      step.store({
+        name: "dated",
+        // @ts-expect-error a Date is not a durable value
+        schema: testSchema<{ at: Date }>(),
+        initial: () => ({ at: new Date(0) }),
+      });
+      const cart = step.store(Carts);
       // @ts-expect-error a Date is not a durable value
       yield* cart.select("at", () => new Date());
       // @ts-expect-error a Set is not a durable value
@@ -681,7 +688,7 @@ describe("store values", () => {
 
   test("store state keeps undefined properties", async () => {
     const { first, replay } = await acrossReplay(async function* (step) {
-      const store = yield* step.store(Orders, { id: "o5", initial: { lines: [] } });
+      const store = step.store(Orders, { id: "o5" });
       yield* store.update("set-note", (draft) => {
         draft.note = undefined;
       });

@@ -90,14 +90,32 @@ Adapters MAY build on `prepareEffectBegin`, `prepareEffectSettle`, `prepareEffec
 
 ## Connector surface
 
-Connector authors SHOULD extend `CasStoreClient`. They implement the ordinary `StoreClient` persistence methods plus the two protected CAS primitives:
+Connector authors SHOULD extend `CasStoreClient`, which implements `getStore`, `updateStore`, `updateStoreFrom`, `takeFromStore` and `deleteStoreFrom`. They implement `listStores`, `deleteStore` and `registerWaiter` plus these protected primitives:
 
+- `readStore` returns the current detached snapshot, or `undefined` when the logical store does not exist. It never creates a store.
+- `insertStore` inserts a supplied version-zero snapshot unless the logical store exists, and returns the store's snapshot after the write: the supplied one, or the existing one when another writer created the store first.
 - `getAppliedStoreStep` reads a previously committed step receipt.
-- `commitStoreMutation` compares the expected instance and version, commits the next state, records an optional step receipt, and requests wakes for the waiters the commit satisfies, as one atomic action.
+- `commitStoreMutation` compares the expected instance and version, or inserts a created store, commits the next state, records an optional step receipt, and requests wakes for the waiters the commit satisfies, as one atomic action.
+- `commitStoreDeletion` compares the expected instance and version, deletes the store and its waiters, and records an optional step receipt, as one atomic action.
 
-A connector MUST treat `(definition.name, id)` as a logical store key. A physical store instance has an opaque, non-empty, UUID-compatible lowercase hexadecimal-and-hyphen `instanceId` and a monotonically increasing integer `version`, beginning at zero. Deleting and recreating a logical store MUST produce a new `instanceId` and reset its version to zero. Store states and returned results MUST be detached values: changing a value returned to or supplied by a caller MUST NOT mutate persisted state. A connector MUST persist store states and step receipts so that they read back exactly as `durableValueCodec` decodes them, for example with `encodeStoreValue` and `decodeStoreValue`: `undefined` properties keep their keys and errors keep their registered class. `validateStoreState` rejects a state that is not a durable value with `WorkflowValueError` (`INVALID_STEP_VALUE`) before any commit, so a rejected state MUST leave the store unchanged.
+A connector MAY override `createInstanceId`, which names a created instance; the default is `crypto.randomUUID()`.
 
-`getStore` MUST return the current detached snapshot and MUST reject when the logical store does not exist. `getOrCreateStore` MUST return the existing snapshot when present; otherwise it MUST require and schema-validate `initial`, create one version-zero instance, and return it. A shared-client backend MUST serialize concurrent creation so every caller observes the same created instance.
+A connector MUST treat `(definition.name, id)` as a logical store key. A physical store instance has an opaque, non-empty, UUID-compatible lowercase hexadecimal-and-hyphen `instanceId` and a monotonically increasing integer `version`, beginning at zero. Deleting and recreating a logical store MUST produce a new `instanceId` whose initial state is version zero. Store states and returned results MUST be detached values: changing a value returned to or supplied by a caller MUST NOT mutate persisted state. A connector MUST persist store states and step receipts so that they read back exactly as `durableValueCodec` decodes them, for example with `encodeStoreValue` and `decodeStoreValue`: `undefined` properties keep their keys and errors keep their registered class. `validateStoreState` rejects a state that is not a durable value with `WorkflowValueError` (`INVALID_STEP_VALUE`) before any commit, so a rejected state MUST leave the store unchanged.
+
+## Missing stores
+
+Every store definition declares `initial(id)`, the state a logical store starts with. There is no creation operation: `getStore`, `updateStore`, `updateStoreFrom`, `takeFromStore` and `deleteStoreFrom` first create a missing store from `definition.initial(id)`, in the same atomic write as the operation. `listStores`, `deleteStore` and `registerWaiter` never create a store.
+
+- `initial` MUST be evaluated, and its state schema-validated, only when the operation finds the store missing, and never while a storage transaction is held. A receipt hit returns before `initial` is evaluated.
+- Concurrent or repeated operations on a missing store MUST record exactly one initial state for each logical store key. Callers that lose the creation race operate on the winner's instance, so a losing initial state is discarded.
+- A created store is version zero of a new instance. An operation that creates and mutates a store in one write commits version one with the operation's state, so its result has `previousVersion` 0; `getStore` commits version zero.
+- An unmatched take on a missing store still creates it, so a waiter registered from its result observes an instance that exists. A conditional update or delete on a missing store creates it and returns a conflict with the new instance.
+- If `initial`, its validation, or the operation's callbacks throw, nothing is created.
+- A store deleted between operations is created again from `initial` by the next operation, as a new instance.
+
+`CasStoreClient` implements these rules. It evaluates `initial` outside any transaction and passes the result to `insertStore`, or to `commitStoreMutation` as an `expected` snapshot with `created: true`.
+
+## Listing and deletion
 
 `listStores` MUST return the logical IDs for one definition name in deterministic ascending text order; qualification verifies ordinal ordering for ASCII IDs. `deleteStore` MUST be idempotent. Both `deleteStore` and a successful `deleteStoreFrom` MUST remove the waiters of the deleted physical instance, so they cannot wake on writes to a recreated instance. Deletion silently drops those waiters without requesting a wake.
 
@@ -106,19 +124,22 @@ A connector MUST treat `(definition.name, id)` as a logical store key. A physica
 `commitStoreMutation` MUST linearize on both `expected.instanceId` and `expected.version`.
 
 - If both match, the connector MUST store `nextState`, increment the version by exactly one, atomically record the optional receipt and request the wakes of matching waiters, and return `committed`.
-- If either differs while the logical store still exists, it MUST make no change and return `conflict` with a current detached snapshot.
-- If the expected physical instance was deleted and no current instance exists, it MUST make no change and reject with a store-not-found error. `StoreMutationCommitResult` has no separate deleted outcome in this protocol version.
+- If `expected.created` is true and the logical store does not exist, the connector MUST insert it under `expected.instanceId` with `nextState` at version `expected.version + 1`, with the same receipt and wakes, and return `committed`.
+- If either differs while the logical store still exists, or `expected.created` is true and the logical store exists, it MUST make no change and return `conflict` with a current detached snapshot.
+- If `expected.created` is false and no current instance exists, it MUST make no change and return `missing`. `CasStoreClient` then reads again and creates the store from `initial`.
 - If the optional step receipt already exists, it MUST make no change and return `already-applied` with the recorded result. Receipt lookup takes precedence over the CAS comparison.
+
+`commitStoreDeletion` follows the same rules for the existing instance: `committed` after deleting it with its waiters and receipt, `conflict` when its instance or version differs, `missing` when it does not exist, and `already-applied` when its receipt exists. `insertStore` MUST be atomic with commits, so at most one insert or created commit succeeds for a logical store key.
 
 Concurrent successful mutations against one physical instance MUST form a total order with contiguous versions. `CasStoreClient` retries a normal update or matched take after a conflict. Consequently, updaters, selectors, and claims MUST be synchronous, deterministic, and side-effect-free: they MAY execute more than once before one public operation returns. Connectors MUST NOT hold a storage transaction while application callbacks execute.
 
-`updateStoreFrom` and `deleteStoreFrom` do not retry a new operation after a conflict. Their callbacks can still have run before a racing conflict is observed. Missing or stale instance IDs MUST never affect a recreated physical store.
+`updateStoreFrom` and `deleteStoreFrom` do not retry a new operation after a conflict. Their callbacks can still have run before a racing conflict is observed. Missing or stale instance IDs MUST never affect a recreated physical store. `StoreDeleteFromResult` has no not-found outcome: a missing store is created first, so the result is a conflict.
 
 ## Exactly-once step receipts
 
 A `StoreStepId` is scoped by `(storeName, storeId, executionId, stepKey)`. For a mutating update, a matched take, or a successful conditional delete with a step ID, the connector MUST commit the operation result receipt atomically with the mutation. A retry with the same identity MUST return the recorded result verbatim without executing application callbacks or changing the store version.
 
-Receipt lookup precedes snapshot existence, instance, and version checks for `updateStoreFrom` and `deleteStoreFrom` as well as for `commitStoreMutation`. Replaying a successful conditional delete therefore returns its receipt even after the logical store has been recreated.
+Receipt lookup precedes store creation and snapshot existence, instance, and version checks for every operation, as well as for `commitStoreMutation` and `commitStoreDeletion`. Replaying a committed operation therefore returns its receipt without creating the store, even after the logical store has been deleted or recreated, and a crash after a commit that created a store neither creates it again nor applies the operation twice.
 
 Receipt uniqueness MUST hold under concurrent duplicate submissions: at most one mutation commits and every submitter observes the same recorded result. Receipts are ledger entries for a logical store key, not a physical instance, and MUST remain authoritative after deletion and recreation. This prevents a retried workflow step from affecting a new instance.
 
@@ -150,9 +171,9 @@ Wakes follow the runtime guarantees above:
 
 A rejected public promise does not prove that no commit occurred. Exactly-once recovery is available only by repeating the call with the same step ID; otherwise the caller must read and reconcile.
 
-Validation failures and asynchronous updater or claim callbacks MUST leave state, receipts, and wakes unchanged.
+Validation failures, a throwing `initial`, and asynchronous updater or claim callbacks MUST leave state, receipts, and wakes unchanged, and create no store.
 
-Schema failures MUST surface as `StoreValidationError` (`validateStoreState` throws it for connectors that use it) and a missing store MUST surface as `StoreNotFoundError`, or as errors with those `name`s. Workflow code can catch these two. Every other error a store client throws is treated as an infrastructure error: the delivery ends without an outcome, its lease is released unacknowledged, and the runtime delivers it again after the redelivery delay.
+Schema failures MUST surface as `StoreValidationError` (`validateStoreState` throws it for connectors that use it), or as errors with that `name`. Workflow code can catch it. Every other error a store client throws is treated as an infrastructure error: the delivery ends without an outcome, its lease is released unacknowledged, and the runtime delivers it again after the redelivery delay.
 
 ## Running the suite
 

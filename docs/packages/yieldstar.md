@@ -20,6 +20,7 @@ import { createLocalSdk } from "yieldstar";
 import { createHttpSdkFactory } from "yieldstar";
 import type {
   WorkflowFn,
+  StepRunner,
   WorkflowStore,
   ExecutionRecord,
   ExecutionStatus,
@@ -109,12 +110,14 @@ Creates a local SDK client that admits executions into `runtime`. See [Local SDK
 
 Returns a factory for HTTP SDK clients. See [HTTP SDK](../manual/sdk-http.md).
 
-## `defineStore(name, schema)`
+## `defineStore(name, schema, { initial })`
 
-Defines a durable store type from a name and any Standard Schema whose output type is durable (`DurableStoreSchema<Schema>`). See [Durable Stores](../manual/stores.md).
+Defines a durable store type from a name, any Standard Schema whose output type is durable (`DurableStoreSchema<Schema>`), and `initial`, a required synchronous function that returns the state of a new store from its `id`. Every operation on a missing store creates it from `initial(id)`. See [Durable Stores](../manual/stores.md#creating-a-store).
 
 ```ts
-const ConversationStore = defineStore("conversation", schema);
+const ConversationStore = defineStore("conversation", schema, {
+  initial: (conversationId) => ({ messages: [], status: "idle" }),
+});
 ```
 
 ## Step runner
@@ -132,14 +135,14 @@ yield * step.delay("key", ms);
 yield * step.poll(opts, predicate);
 yield * step.poll("key", opts, predicate);
 
-yield * step.store(definition, { id, initial });
+const store = step.store(definition, { id }); // no yield*
 
 yield * step.start("key", { workflowId, params });
 
 yield * step.effect("key", { effectId, operation, input, lookup, perform, retryIn });
 ```
 
-`step.store` returns a `WorkflowStore` handle with `get`, `select`, `update`, `when`, and `take` – see [Durable Stores](../manual/stores.md) and [Waiting on State](../manual/store-waiting.md).
+`step.store` returns a `WorkflowStore` handle synchronously and records no step, so a loop or helper can request the same store again. `id` defaults to `event.executionId`. The handle has the readonly properties `definition`, `id` and `key`, and the durable operations `get`, `select`, `update`, `updateFrom`, `deleteFrom`, `when` and `take`, each of which creates a missing store from the definition's `initial` – see [Durable Stores](../manual/stores.md) and [Waiting on State](../manual/store-waiting.md). Helpers that take the step runner can type it as `StepRunner`.
 
 `step.start` starts another workflow as its own execution, once per step key, and returns `{ executionId }` – see [Steps](../manual/steps.md#stepstart).
 

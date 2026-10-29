@@ -1,9 +1,9 @@
 import { expect, test, vi } from "vitest";
-import type { StandardSchemaV1 } from "yieldstar";
+import type { StandardSchemaV1, StepRunner } from "yieldstar";
 import { testSchema } from "@yieldstar/test-utils";
 import { DEFAULT_LEASE_DURATION, waitForExecutionOutcome } from "@yieldstar/core";
 import { createSdk } from "./sdk";
-import { defineStore, workflow } from "yieldstar";
+import { WORKFLOW_RESULT_STEP_KEY, defineStore, workflow } from "yieldstar";
 import { setTimeout as sleep } from "node:timers/promises";
 
 type Message = {
@@ -20,7 +20,8 @@ type ConversationState = {
 
 const ConversationStore = defineStore(
   "conversation",
-  testSchema<ConversationState>()
+  testSchema<ConversationState>(),
+  { initial: () => ({ messages: [], status: "idle" }) }
 );
 
 const REPLAY_DELAY_MS = 10;
@@ -66,9 +67,7 @@ async function acrossReplayBoundary<T>(params: {
 
 test("workflow stores can be created, read, and updated", async () => {
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore);
 
     const initial = yield* store.get("initial");
 
@@ -113,10 +112,7 @@ test("workflow store updates are idempotent across replay", async () => {
   let runs = 0;
   const testWorkflow = workflow(async function* (step) {
     runs++;
-    const store = yield* step.store(ConversationStore, {
-      id: "replay",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "replay" });
 
     yield* store.update("append-once", (draft) => {
       draft.messages.push({
@@ -149,10 +145,7 @@ test("workflow store updates are idempotent across replay", async () => {
 
 test("workflow stores can conditionally update from a snapshot", async () => {
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "conditional",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "conditional" });
     const snapshot = yield* store.get("snapshot");
 
     yield* store.update("intervening-update", (draft) => {
@@ -178,10 +171,7 @@ test("workflow stores can conditionally update from a snapshot", async () => {
 
 test("external store updates wake when waiters", async () => {
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "external-wake",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "external-wake" });
 
     return yield* store.when("next-message", (state) =>
       state.messages.find((message) => !message.processed)
@@ -213,9 +203,7 @@ test("execution-local default store id is unique per execution", async () => {
   let secondExecutionId: string | undefined;
 
   const testWorkflow = workflow(async function* (step, event) {
-    const store = yield* step.store(ConversationStore, {
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore);
 
     if (event.executionId === "run-1") {
       firstExecutionId = store.id;
@@ -252,10 +240,7 @@ test("durable get and select replay stability", async () => {
   let runs = 0;
   const testWorkflow = workflow(async function* (step) {
     runs++;
-    const store = yield* step.store(ConversationStore, {
-      id: "replay-stability",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "replay-stability" });
 
     const valGet = yield* store.get("read-get");
     const valSelect = yield* store.select("read-select", (s) => {
@@ -296,25 +281,26 @@ test("schema validation on create and update", async () => {
     return undefined;
   });
 
-  const StrictStore = defineStore("strict-store", strictStateSchema);
+  const StrictStore = defineStore("strict-store", strictStateSchema, {
+    initial: () => ({ count: 0 }),
+  });
+
+  const InvalidInitialStore = defineStore("strict-invalid-initial", strictStateSchema, {
+    initial: () => ({ count: "not-a-number" }) as any,
+  });
 
   const testWorkflowInvalidCreate = workflow(async function* (step) {
-    yield* step.store(StrictStore, {
-      id: "strict-1",
-      initial: { count: "not-a-number" } as any,
-    });
+    yield* step.store(InvalidInitialStore, { id: "strict-1" }).get("read");
   });
 
   const sdk1 = createSdk({ workflow: testWorkflowInvalidCreate });
   await expect(
     sdk1.triggerAndWait({ workflowId: "workflow" })
   ).rejects.toThrow(/Invalid store state/);
+  expect(await sdk1.storeClient.listStores(InvalidInitialStore)).toEqual([]);
 
   const testWorkflowInvalidUpdate = workflow(async function* (step) {
-    const store = yield* step.store(StrictStore, {
-      id: "strict-2",
-      initial: { count: 0 },
-    });
+    const store = step.store(StrictStore, { id: "strict-2" });
 
     yield* store.update("bad-update", (draft) => {
       draft.count = "invalid" as any;
@@ -330,10 +316,7 @@ test("schema validation on create and update", async () => {
 test("when returns immediately when selector matches", async () => {
   let ranStep = false;
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "immediate-match",
-      initial: { messages: [], status: "working" },
-    });
+    const store = step.store(ConversationStore, { id: "immediate-match" });
 
     const status = yield* store.when("wait-working", (s) =>
       s.status === "working" ? s.status : false
@@ -344,6 +327,9 @@ test("when returns immediately when selector matches", async () => {
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
+  await sdk.store(ConversationStore, "immediate-match").update((draft) => {
+    draft.status = "working";
+  });
   const result = await sdk.triggerAndWait({ workflowId: "workflow" });
 
   expect(ranStep).toBe(true);
@@ -352,10 +338,7 @@ test("when returns immediately when selector matches", async () => {
 
 test("workflow update wakes another waiting workflow", async () => {
   const waiterWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "shared-wake",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "shared-wake" });
 
     return yield* store.when("wait-status", (s) =>
       s.status === "working" ? s.status : false
@@ -363,10 +346,7 @@ test("workflow update wakes another waiting workflow", async () => {
   });
 
   const updaterWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "shared-wake",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "shared-wake" });
 
     yield* store.update("set-status", (draft) => {
       draft.status = "working";
@@ -391,10 +371,7 @@ test("unrelated paths do not wake waiters", async () => {
   let wakeCount = 0;
 
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "unrelated-paths",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "unrelated-paths" });
 
     wakeCount++;
 
@@ -426,10 +403,7 @@ test("unrelated paths do not wake waiters", async () => {
 
 test("replacing an ancestor path wakes descendant waiters", async () => {
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "ancestor-wake",
-      initial: { messages: [{ id: "msg-1", content: "hello", processed: false }], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "ancestor-wake" });
 
     return yield* store.when("wait-descendant", (state) =>
       state.messages[0]?.processed ? "done" : false
@@ -437,6 +411,9 @@ test("replacing an ancestor path wakes descendant waiters", async () => {
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
+  await sdk.store(ConversationStore, "ancestor-wake").update((draft) => {
+    draft.messages.push({ id: "msg-1", content: "hello", processed: false });
+  });
   const resultPromise = sdk.triggerAndWait({ workflowId: "workflow" });
 
   await sleep(5);
@@ -450,10 +427,7 @@ test("replacing an ancestor path wakes descendant waiters", async () => {
 
 test("select runs against a clone so mutation cannot corrupt store state", async () => {
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "select-mutation",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "select-mutation" });
 
     const selected = yield* store.select("mutate-select", (state) => {
       // Mutating the selected state must not affect the stored state
@@ -478,13 +452,7 @@ test("select runs against a clone so mutation cannot corrupt store state", async
 
 test("take returns immediately and claims", async () => {
   const testWorkflow = workflow(async function* (step, event) {
-    const store = yield* step.store(ConversationStore, {
-      id: "take-immediate",
-      initial: {
-        messages: [{ id: "msg-1", content: "hello", processed: false }],
-        status: "idle",
-      },
-    });
+    const store = step.store(ConversationStore, { id: "take-immediate" });
 
     return yield* store.take(
       "take-next",
@@ -496,6 +464,9 @@ test("take returns immediately and claims", async () => {
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
+  await sdk.store(ConversationStore, "take-immediate").update((draft) => {
+    draft.messages.push({ id: "msg-1", content: "hello", processed: false });
+  });
   const result = await sdk.triggerAndWait({
     workflowId: "workflow",
     executionId: "taker-1",
@@ -511,15 +482,12 @@ test("take returns immediately and claims", async () => {
 
   const snapshot = await sdk.store(ConversationStore, "take-immediate").get();
   expect(snapshot.state.messages[0]!.claimedBy).toBe("taker-1");
-  expect(snapshot.version).toBe(1);
+  expect(snapshot.version).toBe(2);
 });
 
 test("take waits then claims on external update", async () => {
   const testWorkflow = workflow(async function* (step, event) {
-    const store = yield* step.store(ConversationStore, {
-      id: "take-wait",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "take-wait" });
 
     return yield* store.take(
       "take-next",
@@ -555,16 +523,7 @@ test("take waits then claims on external update", async () => {
 
 test("two concurrent takers never claim the same item", async () => {
   const testWorkflow = workflow(async function* (step, event) {
-    const store = yield* step.store(ConversationStore, {
-      id: "take-race",
-      initial: {
-        messages: [
-          { id: "msg-1", content: "one", processed: false },
-          { id: "msg-2", content: "two", processed: false },
-        ],
-        status: "idle",
-      },
-    });
+    const store = step.store(ConversationStore, { id: "take-race" });
 
     return yield* store.take(
       "take-next",
@@ -576,6 +535,12 @@ test("two concurrent takers never claim the same item", async () => {
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
+  await sdk.store(ConversationStore, "take-race").update((draft) => {
+    draft.messages.push(
+      { id: "msg-1", content: "one", processed: false },
+      { id: "msg-2", content: "two", processed: false }
+    );
+  });
 
   const [first, second] = await Promise.all([
     sdk.triggerAndWait({ workflowId: "workflow", executionId: "taker-a" }),
@@ -598,13 +563,7 @@ test("take replay idempotency", async () => {
 
   const testWorkflow = workflow(async function* (step, event) {
     runs++;
-    const store = yield* step.store(ConversationStore, {
-      id: "take-replay",
-      initial: {
-        messages: [{ id: "msg-1", content: "hello", processed: false }],
-        status: "idle",
-      },
-    });
+    const store = step.store(ConversationStore, { id: "take-replay" });
 
     const taken = yield* store.take(
       "take-next",
@@ -624,6 +583,9 @@ test("take replay idempotency", async () => {
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
+  await sdk.store(ConversationStore, "take-replay").update((draft) => {
+    draft.messages.push({ id: "msg-1", content: "hello", processed: false });
+  });
   const result = await acrossReplayBoundary({
     sdk,
     executionId: "taker-1",
@@ -644,8 +606,8 @@ test("take replay idempotency", async () => {
   expect(claimCalls).toBe(1);
 
   const snapshot = await sdk.store(ConversationStore, "take-replay").get();
-  // A single version bump: select + claim committed atomically, once
-  expect(snapshot.version).toBe(1);
+  // A single version bump after the seed: select + claim committed atomically, once
+  expect(snapshot.version).toBe(2);
 });
 
 test("claim validation failure leaves item unclaimed", async () => {
@@ -658,13 +620,12 @@ test("claim validation failure leaves item unclaimed", async () => {
     return undefined;
   });
 
-  const StrictStore = defineStore("strict-take-store", strictStateSchema);
+  const StrictStore = defineStore("strict-take-store", strictStateSchema, {
+    initial: () => ({ messages: [] }),
+  });
 
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(StrictStore, {
-      id: "take-invalid",
-      initial: { messages: [{ id: "msg-1" }] },
-    });
+    const store = step.store(StrictStore, { id: "take-invalid" });
 
     yield* store.take(
       "take-next",
@@ -676,24 +637,21 @@ test("claim validation failure leaves item unclaimed", async () => {
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
+  await sdk.store(StrictStore, "take-invalid").update((draft) => {
+    draft.messages.push({ id: "msg-1" });
+  });
   await expect(
     sdk.triggerAndWait({ workflowId: "workflow" })
   ).rejects.toThrow(/Invalid store state/);
 
   const snapshot = await sdk.store(StrictStore, "take-invalid").get();
   expect(snapshot.state.messages).toEqual([{ id: "msg-1" }]);
-  expect(snapshot.version).toBe(0);
+  expect(snapshot.version).toBe(1);
 });
 
 test("async claim rejected", async () => {
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "take-async-claim",
-      initial: {
-        messages: [{ id: "msg-1", content: "hello", processed: false }],
-        status: "idle",
-      },
-    });
+    const store = step.store(ConversationStore, { id: "take-async-claim" });
 
     yield* store.take(
       "take-next",
@@ -705,23 +663,23 @@ test("async claim rejected", async () => {
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
+  await sdk.store(ConversationStore, "take-async-claim").update((draft) => {
+    draft.messages.push({ id: "msg-1", content: "hello", processed: false });
+  });
   await expect(
     sdk.triggerAndWait({ workflowId: "workflow" })
   ).rejects.toThrow(/synchronous/);
 
   const snapshot = await sdk.store(ConversationStore, "take-async-claim").get();
   expect(snapshot.state.messages[0]!.claimedBy).toBeUndefined();
-  expect(snapshot.version).toBe(0);
+  expect(snapshot.version).toBe(1);
 });
 
 test("store update converges exactly-once when the heap write is lost", async () => {
   let workflowUpdaterRuns = 0;
 
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
-      id: "crash-gap",
-      initial: { messages: [], status: "idle" },
-    });
+    const store = step.store(ConversationStore, { id: "crash-gap" });
 
     return yield* store.update("append-once", (draft) => {
       workflowUpdaterRuns++;
@@ -737,13 +695,9 @@ test("store update converges exactly-once when the heap write is lost", async ()
 
   // Simulate a previous run that crashed AFTER the store commit but BEFORE
   // the heap write: the store has already applied this execution's
-  // "append-once" step (recorded in the applied-steps ledger), but the
-  // workflow heap has no record of it, so replay cache-misses.
-  await sdk.storeClient.getOrCreateStore({
-    definition: ConversationStore,
-    id: "crash-gap",
-    initial: { messages: [], status: "idle" },
-  });
+  // "append-once" step (recorded in the applied-steps ledger), creating the
+  // store as it did, but the workflow heap has no record of it, so replay
+  // cache-misses.
   const original = await sdk.storeClient.updateStore({
     definition: ConversationStore,
     id: "crash-gap",
@@ -768,7 +722,7 @@ test("store update converges exactly-once when the heap write is lost", async ()
   expect(workflowUpdaterRuns).toBe(0);
   expect(result).toEqual(original);
 
-  // The mutation was applied exactly once
+  // The store was created once and the mutation applied once
   const snapshot = await sdk.store(ConversationStore, "crash-gap").get();
   expect(snapshot.version).toBe(1);
   expect(snapshot.state.messages).toEqual([
@@ -785,7 +739,7 @@ test("updateFrom replay returns its committed result after the store advances", 
   };
 
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, {
+    const store = step.store(ConversationStore, {
       id: "conditional-crash-gap",
     });
 
@@ -800,10 +754,9 @@ test("updateFrom replay returns its committed result after the store advances", 
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
-  originalSnapshot = await sdk.storeClient.getOrCreateStore({
+  originalSnapshot = await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: "conditional-crash-gap",
-    initial: { messages: [], status: "idle" },
   });
 
   // Simulate the conditional store commit succeeding before the workflow
@@ -857,15 +810,14 @@ test("deleteFrom replay returns its committed result without deleting a new inst
   const executionId = "delete-crash-replay";
   const storeId = "delete-crash-gap";
   const testWorkflow = workflow(async function* (step) {
-    const store = yield* step.store(ConversationStore, { id: storeId });
+    const store = step.store(ConversationStore, { id: storeId });
     const snapshot = yield* store.get("delete-snapshot");
     return yield* store.deleteFrom("delete-store", snapshot);
   });
   const sdk = createSdk({ workflow: testWorkflow });
-  const snapshot = await sdk.storeClient.getOrCreateStore({
+  const snapshot = await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: storeId,
-    initial: { messages: [], status: "idle" },
   });
 
   // These earlier workflow steps were durably recorded before the deletion,
@@ -879,16 +831,6 @@ test("deleteFrom replay returns its committed result without deleting a new inst
   const [lease] = await sdk.runtime.executions.claimDue({
     limit: 1,
     duration: DEFAULT_LEASE_DURATION,
-  });
-  await sdk.heapClient.writeStep({
-    lease,
-    stepKey: `store:${ConversationStore.name}:${storeId}`,
-    stepAttempt: 0,
-    done: true,
-    stepResponseJson: JSON.stringify({
-      type: "step-result",
-      result: { storeName: ConversationStore.name, storeId },
-    }),
   });
   await sdk.heapClient.writeStep({
     lease,
@@ -909,10 +851,9 @@ test("deleteFrom replay returns its committed result without deleting a new inst
   });
   expect(committed).toEqual({ deleted: true });
 
-  const recreated = await sdk.storeClient.getOrCreateStore({
+  const recreated = await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: storeId,
-    initial: { messages: [], status: "working" },
   });
   expect(recreated.instanceId).not.toBe(snapshot.instanceId);
 
@@ -930,6 +871,198 @@ test("deleteFrom replay returns its committed result without deleting a new inst
     definition: ConversationStore,
     id: storeId,
   })).toEqual(recreated);
+});
+
+type Task = { id: string; title: string };
+type ProjectState = { projectId: string; tasks: Task[] };
+
+let projectInitialCalls = 0;
+const ProjectStore = defineStore("project", testSchema<ProjectState>(), {
+  initial: (projectId) => {
+    projectInitialCalls++;
+    return { projectId, tasks: [] };
+  },
+});
+
+async function* addTask(step: StepRunner, projectId: string, task: Task) {
+  const project = step.store(ProjectStore, { id: projectId });
+  return yield* project.update(`add:${task.id}`, (draft) => {
+    draft.tasks.push(task);
+  });
+}
+
+test("step.store returns a handle without recording a step or touching the store", async () => {
+  const testWorkflow = workflow(async function* (step) {
+    const first = step.store(ConversationStore, { id: "handle-only" });
+    const second = step.store(ConversationStore, { id: "handle-only" });
+    const local = step.store(ConversationStore);
+    // @ts-expect-error initial is declared on the store definition, not here
+    step.store(ConversationStore, { id: "handle-only", initial: { messages: [], status: "idle" } });
+    return {
+      first: first.key,
+      second: second.key,
+      local: local.key,
+      definition: first.definition === ConversationStore,
+    };
+  });
+
+  const sdk = createSdk({ workflow: testWorkflow });
+  const result = await sdk.triggerAndWait({
+    workflowId: "workflow",
+    executionId: "handles",
+  });
+
+  expect(result).toEqual({
+    first: { storeName: "conversation", storeId: "handle-only" },
+    second: { storeName: "conversation", storeId: "handle-only" },
+    local: { storeName: "conversation", storeId: "handles" },
+    definition: true,
+  });
+  expect(await sdk.storeClient.listStores(ConversationStore)).toEqual([]);
+  expect(Object.keys(sdk.heapClient.cache)).toEqual([
+    `handles:${WORKFLOW_RESULT_STEP_KEY}`,
+  ]);
+});
+
+test("a loop and a helper reopen the same store handle and the first operation creates it", async () => {
+  projectInitialCalls = 0;
+  let runs = 0;
+  const tasks: Task[] = [
+    { id: "a", title: "Plan" },
+    { id: "b", title: "Build" },
+    { id: "c", title: "Ship" },
+  ];
+  const testWorkflow = workflow(async function* (step) {
+    runs++;
+    const counts: number[] = [];
+    for (const task of tasks) {
+      const project = step.store(ProjectStore, { id: "p1" });
+      counts.push(yield* project.select(`count:${task.id}`, (state) => state.tasks.length));
+      yield* addTask(step, "p1", task);
+    }
+
+    yield* step.delay("replay-boundary", REPLAY_DELAY_MS);
+
+    const final = yield* step.store(ProjectStore, { id: "p1" }).get("final");
+    return { counts, final };
+  });
+
+  const sdk = createSdk({ workflow: testWorkflow });
+  const executionId = "reentrant-handles";
+  const result = await acrossReplayBoundary({
+    sdk,
+    executionId,
+    delayKey: "replay-boundary",
+    start: () => sdk.triggerAndWait({ workflowId: "workflow", executionId }),
+  });
+
+  expect(runs).toBe(2);
+  expect(result.counts).toEqual([0, 1, 2]);
+  expect(result.final).toMatchObject({
+    state: { projectId: "p1", tasks },
+    version: 3,
+  });
+  expect(projectInitialCalls).toBe(1);
+});
+
+test("two executions updating one missing store record one initial state and both updates", async () => {
+  const testWorkflow = workflow(async function* (step, event) {
+    return yield* addTask(step, "p-shared", {
+      id: event.executionId,
+      title: event.executionId,
+    });
+  });
+
+  const sdk = createSdk({ workflow: testWorkflow });
+  const [first, second] = await Promise.all([
+    sdk.triggerAndWait({ workflowId: "workflow", executionId: "writer-a" }),
+    sdk.triggerAndWait({ workflowId: "workflow", executionId: "writer-b" }),
+  ]);
+
+  expect([first.previousVersion, second.previousVersion].sort()).toEqual([0, 1]);
+  const snapshot = await sdk.store(ProjectStore, "p-shared").get();
+  expect(snapshot.version).toBe(2);
+  expect(snapshot.state.projectId).toBe("p-shared");
+  expect(snapshot.state.tasks.map((task) => task.id).sort()).toEqual([
+    "writer-a",
+    "writer-b",
+  ]);
+});
+
+test("a store deleted between deliveries is created again from initial by the next operation", async () => {
+  const testWorkflow = workflow(async function* (step) {
+    yield* addTask(step, "p-deleted", { id: "a", title: "Plan" });
+    const before = yield* step.store(ProjectStore, { id: "p-deleted" }).get("before");
+
+    yield* step.delay("replay-boundary", REPLAY_DELAY_MS);
+
+    yield* addTask(step, "p-deleted", { id: "b", title: "Build" });
+    const after = yield* step.store(ProjectStore, { id: "p-deleted" }).get("after");
+    return { before, after };
+  });
+
+  const sdk = createSdk({ workflow: testWorkflow });
+  const executionId = "deleted-between-deliveries";
+  const result = await acrossReplayBoundary({
+    sdk,
+    executionId,
+    delayKey: "replay-boundary",
+    start: () => sdk.triggerAndWait({ workflowId: "workflow", executionId }),
+    beforeReplay: () =>
+      sdk.storeClient.deleteStore({ definition: ProjectStore, id: "p-deleted" }),
+  });
+
+  expect(result.before).toMatchObject({
+    state: { projectId: "p-deleted", tasks: [{ id: "a", title: "Plan" }] },
+    version: 1,
+  });
+  expect(result.after).toMatchObject({
+    state: { projectId: "p-deleted", tasks: [{ id: "b", title: "Build" }] },
+    version: 1,
+  });
+  expect(result.after.instanceId).not.toBe(result.before.instanceId);
+});
+
+test("an initial state that throws reaches workflow code from every operation", async () => {
+  const UnseededStore = defineStore("unseeded", testSchema<{ n: number }>(), {
+    initial: (id) => {
+      throw new Error(`no seed for ${id}`);
+    },
+  });
+  let runs = 0;
+  const testWorkflow = workflow(async function* (step) {
+    runs++;
+    const store = step.store(UnseededStore, { id: "u1" });
+    const operations = {
+      get: () => store.get("get"),
+      select: () => store.select("select", (state) => state.n),
+      update: () => store.update("update", (draft) => void draft.n++),
+      when: () => store.when("when", (state) => state.n > 0),
+      take: () => store.take("take", (state) => state.n > 0, (draft) => void draft.n--),
+    };
+    const errors: Record<string, string> = {};
+    for (const [name, operation] of Object.entries(operations)) {
+      try {
+        yield* operation();
+      } catch (err) {
+        errors[name] = (err as Error).message;
+      }
+    }
+    return errors;
+  });
+
+  const sdk = createSdk({ workflow: testWorkflow });
+  const result = await sdk.triggerAndWait({ workflowId: "workflow" });
+
+  expect(runs).toBe(1);
+  expect(result).toEqual({
+    get: "no seed for u1",
+    select: "no seed for u1",
+    update: "no seed for u1",
+    when: "no seed for u1",
+    take: "no seed for u1",
+  });
+  expect(await sdk.storeClient.listStores(UnseededStore)).toEqual([]);
 });
 
 function strictSchema<T>(validator: (v: unknown) => string | undefined): StandardSchemaV1<unknown, T> {

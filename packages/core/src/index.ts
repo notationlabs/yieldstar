@@ -148,12 +148,13 @@ export type {
   StoreWaiter,
   StoreMutation,
   StoreMutationCommitResult,
+  StoreDeletion,
+  StoreReadSnapshot,
   TrackedStoreUpdater,
 } from "./base/store";
 export {
   StoreClient,
   CasStoreClient,
-  StoreNotFoundError,
   StoreValidationError,
   assertSynchronousClaim,
   assertSynchronousUpdater,

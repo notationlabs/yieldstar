@@ -15,15 +15,16 @@ const ConversationSchema = v.object({
   ),
 });
 
-const ConversationStore = defineStore("conversation", ConversationSchema);
+const ConversationStore = defineStore("conversation", ConversationSchema, {
+  initial: () => ({ messages: [] }),
+});
 
 export const storeWorkflow = workflow(async function* (
   step,
   event: WorkflowEvent<ConversationParams>
 ) {
-  const conversation = yield* step.store(ConversationStore, {
+  const conversation = step.store(ConversationStore, {
     id: event.params.conversationId,
-    initial: { messages: [] },
   });
 
   yield* conversation.update("append-message", (draft) => {
