@@ -28,7 +28,11 @@ export type WorkflowInvoker = {
    * worker exits before replying. Every fenced write the delivery makes
    * carries `options.lease`. Once `options.signal` aborts, the delivery runs
    * no more workflow code and makes no more fenced writes; it rejects with an
-   * `InfrastructureError` whose cause is the signal's reason.
+   * `InfrastructureError` whose cause is the signal's reason. An invoker that
+   * can stop a step function already running, as the worker invoker does by
+   * killing its worker, should do so and reject at once. The dispatcher
+   * abandons a delivery that has not settled within its `abortGracePeriod`
+   * of the abort, and frees its slot.
    *
    * A worker that exits before replying rejects with a `WorkerExitedError`:
    * the dispatcher then leaves the lease to expire, because the worker's last

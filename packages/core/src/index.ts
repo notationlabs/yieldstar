@@ -56,6 +56,7 @@ export {
 } from "./lib/execution-state";
 export type { DispatcherOptions } from "./lib/execution-dispatcher";
 export {
+  DEFAULT_ABORT_GRACE_PERIOD,
   DEFAULT_DISPATCHER_CONCURRENCY,
   ExecutionDispatcher,
 } from "./lib/execution-dispatcher";

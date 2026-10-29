@@ -7,7 +7,7 @@ import type {
   WorkflowRunner,
 } from "@yieldstar/core";
 import { ReadOnlyMap } from "@yieldstar/core";
-import { deserializeError, serializeError } from "serialize-error";
+import { serializeError } from "serialize-error";
 
 let context: EventContext;
 
@@ -24,20 +24,17 @@ export type WorkerMessage =
 
 /**
  * The message a parent sends its worker to start one delivery under its
- * lease. `aborted` is set when the delivery's signal had already aborted.
+ * lease. The parent stops a delivery whose lease is lost by killing the
+ * worker, so no abort message exists.
  */
 export type WorkerDelivery = {
   type: "deliver";
   event: Omit<WorkflowEvent, "context"> & { context: Map<any, any> };
   lease: ExecutionLease;
-  aborted?: { reason: unknown };
 };
 
-/** Aborts the worker's delivery: its lease was lost. */
-export type WorkerAbort = { type: "abort"; reason: unknown };
-
 /** Messages a parent sends its worker. */
-export type WorkerRequest = WorkerDelivery | WorkerAbort;
+export type WorkerRequest = WorkerDelivery;
 
 export type SerializedOutcome =
   | Exclude<WorkflowRunOutcome, { status: "failed" }>
@@ -64,15 +61,11 @@ export function createWorkflowWorker(
         );
         process.exit(WORKER_ORPHANED_EXIT_CODE);
       });
-      // One worker runs one delivery, so one controller serves it.
-      const controller = new AbortController();
+      // The parent kills the worker when the lease is lost, so the
+      // delivery's signal never aborts inside the worker.
+      const { signal } = new AbortController();
       process.on("message", async (message: WorkerRequest) => {
-        if (message.type === "abort") {
-          controller.abort(deserializeError(message.reason));
-          return;
-        }
-        const { event, lease, aborted } = message;
-        if (aborted) controller.abort(deserializeError(aborted.reason));
+        const { event, lease } = message;
         const workflowEvent: WorkflowEvent = {
           ...event,
           context: new ReadOnlyMap(event.context),
@@ -81,7 +74,7 @@ export function createWorkflowWorker(
         try {
           const outcome = await workflowRunner.run(workflowEvent, {
             lease,
-            signal: controller.signal,
+            signal,
             logger,
           });
           send({

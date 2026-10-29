@@ -594,7 +594,7 @@ test("a renewal that returns lost stops a worker's delivery before its next step
     cause: { name: "LeaseLostError", executionId: "worker-lease-lost" },
   });
   expect(existsSync(join(dir, "after-ran"))).toBe(false);
-  expect(readFileSync(join(dir, "writes"), "utf8")).toBe("before\n");
+  expect(readFileSync(join(dir, "writes"), "utf8")).toBe("worker-lease-lost before\n");
   expect(
     await runtime.heap.readStep({ executionId: "worker-lease-lost", stepKey: "slow" })
   ).toBeNull();
@@ -604,3 +604,222 @@ test("a renewal that returns lost stops a worker's delivery before its next step
     status: "running",
   });
 });
+
+// Abandoning a delivery that does not stop after its lease is lost
+
+test("frees the slot of an in-process delivery whose step function hangs after the lease is lost, and the hung step makes no write", async () => {
+  const runtime = new MemoryRuntime();
+  const hangStarted = deferred();
+  const hang = deferred();
+  const router = {
+    hangs: workflow(async function* (step) {
+      yield* step.run("before", () => "written");
+      yield* step.run("hang", async () => {
+        hangStarted.resolve();
+        await hang.promise;
+        return "finished long after the lease was lost";
+      });
+      return "unreachable";
+    }),
+    quick: workflow(async function* () {
+      return "quick";
+    }),
+  };
+  const runner = new WorkflowRunner(runtime, { router, logger });
+  const invoker = createTestInvoker({ runner, logger });
+  const deliver = vi.spyOn(invoker, "deliver");
+  const renew = runtime.executions.renew.bind(runtime.executions);
+  vi.spyOn(runtime.executions, "renew").mockImplementation(async (request) => {
+    if (request.lease.executionId !== "hung") return renew(request);
+    await hangStarted.promise;
+    return { status: "lost" };
+  });
+  const writeStep = vi.spyOn(runtime.heap, "writeStep");
+  const acknowledge = vi.spyOn(runtime.executions, "acknowledge");
+  const release = vi.spyOn(runtime.executions, "release");
+  const dispatcher = dispatcherFor(runtime, invoker, {
+    concurrency: 1,
+    leaseDuration: 1_000,
+    renewInterval: 10,
+    abortGracePeriod: 50,
+  });
+
+  await admit(runtime, "hung", "hangs");
+  await dispatcher.tick();
+  await hangStarted.promise;
+  await admit(runtime, "next", "quick");
+  dispatcher.start();
+
+  // The hung delivery's slot is freed, so the next execution is delivered.
+  await vi.waitFor(
+    async () => expect((await runtime.executions.get("next"))?.status).toBe("completed"),
+    { timeout: 2_000 }
+  );
+  expect(deliver.mock.calls.map(([event]) => event.executionId)).toEqual(["hung", "next"]);
+
+  // The hung step function finishes late; its write is stopped by the signal.
+  hang.resolve();
+  await expect(deliver.mock.results[0].value).rejects.toMatchObject({
+    name: "InfrastructureError",
+    cause: { name: "LeaseLostError", executionId: "hung" },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(
+    writeStep.mock.calls
+      .filter(([params]) => params.lease.executionId === "hung")
+      .map(([params]) => params.stepKey)
+  ).toEqual(["before"]);
+  expect(acknowledge.mock.calls.map(([request]) => request.lease.executionId)).toEqual(["next"]);
+  expect(release).not.toHaveBeenCalled();
+  expect(await runtime.executions.get("hung")).toMatchObject({ status: "running" });
+});
+
+for (const late of ["resolves", "rejects"] as const) {
+  test(`ignores an abandoned delivery that ${late} late: no acknowledgement, no release, no unhandled rejection`, async () => {
+    const runtime = new MemoryRuntime();
+    const started = deferred();
+    const gate = deferred();
+    // An invoker that ignores its signal entirely.
+    const { invoker } = stubInvoker(async () => {
+      started.resolve();
+      await gate.promise;
+      if (late === "rejects") throw new Error("late failure");
+      return { status: "completed", result: "late" };
+    });
+    vi.spyOn(runtime.executions, "renew").mockImplementation(async () => {
+      await started.promise;
+      return { status: "lost" };
+    });
+    const acknowledge = vi.spyOn(runtime.executions, "acknowledge");
+    const release = vi.spyOn(runtime.executions, "release");
+    const warnings: string[] = [];
+    const dispatcher = new ExecutionDispatcher(runtime, {
+      invoker,
+      logger: {
+        ...logger,
+        warn: (_: unknown, message: string) => warnings.push(message),
+      } as unknown as Logger,
+      pollInterval: 1,
+      keepAlive: false,
+      leaseDuration: 1_000,
+      renewInterval: 10,
+      abortGracePeriod: 20,
+    });
+    cleanups.push(() => dispatcher.stop());
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    cleanups.push(() => process.off("unhandledRejection", unhandled));
+
+    await admit(runtime, "abandoned");
+    await dispatcher.tick();
+    // drain settles once the delivery is abandoned, not when it finishes.
+    await dispatcher.drain();
+    expect(dispatcher.activeDeliveries).toBe(0);
+    expect(warnings).toContain(
+      "Delivery did not stop within the abort grace period after its lease was lost; abandoning it"
+    );
+
+    gate.resolve();
+    await vi.waitFor(() =>
+      expect(warnings.some((message) => message.startsWith("Abandoned delivery"))).toBe(true)
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(acknowledge).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    expect(await runtime.executions.get("abandoned")).toMatchObject({ status: "running" });
+  });
+}
+
+test("kills a worker whose step function hangs after the lease is lost, frees its slot at once, and the hung step makes no write", { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), "yieldstar-hung-worker-"));
+  const db = createSqliteDb({ path: join(dir, "shared.db"), wal: true });
+  let workerPid: number | undefined;
+  cleanups.push(() => {
+    if (workerPid && isAlive(workerPid)) process.kill(workerPid, "SIGKILL");
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const runtime = new SqliteRuntime(db);
+  const invoker = createWorkerInvoker({
+    workerPath: new URL("lease-lost-worker.mjs", fixtures).href,
+    logger,
+  });
+  const deliver = vi.spyOn(invoker, "deliver");
+  // The lease stays current in the database, so only the kill can stop the
+  // hung step's write: fencing alone would let it land once the step returns.
+  const renew = runtime.executions.renew.bind(runtime.executions);
+  vi.spyOn(runtime.executions, "renew").mockImplementation(async (request) => {
+    if (request.lease.executionId !== "hung-worker") return renew(request);
+    await vi.waitFor(() => expect(existsSync(join(dir, "slow-started"))).toBe(true), {
+      timeout: 5_000,
+      interval: 5,
+    });
+    workerPid = Number(readFileSync(join(dir, "pid"), "utf8"));
+    return { status: "lost" };
+  });
+  const acknowledge = vi.spyOn(runtime.executions, "acknowledge");
+  const release = vi.spyOn(runtime.executions, "release");
+  // A grace period far longer than the test: only the kill can free the slot.
+  const dispatcher = dispatcherFor(runtime, invoker, {
+    concurrency: 1,
+    leaseDuration: 5_000,
+    renewInterval: 10,
+    abortGracePeriod: 60_000,
+  });
+
+  const slowMs = 1_500;
+  await runtime.executions.admit({
+    executionId: "hung-worker",
+    workflowId: "lease-lost",
+    params: { dir, slowMs },
+    context: new Map(),
+  });
+  await runtime.executions.admit({
+    executionId: "next-worker",
+    workflowId: "quick",
+    params: { dir },
+    context: new Map(),
+  });
+  const started = Date.now();
+  dispatcher.start();
+
+  await vi.waitFor(
+    async () =>
+      expect((await runtime.executions.get("next-worker"))?.status).toBe("completed"),
+    { timeout: 5_000, interval: 10 }
+  );
+  // The slot was freed by the kill, before the hung step could have returned.
+  expect(Date.now() - started).toBeLessThan(slowMs);
+  await expect(deliver.mock.results[0].value).rejects.toMatchObject({
+    name: "InfrastructureError",
+    cause: { name: "LeaseLostError", executionId: "hung-worker" },
+  });
+  await expect(deliver.mock.results[0].value).rejects.not.toBeInstanceOf(WorkerExitedError);
+  expect(workerPid).toBeTypeOf("number");
+  await vi.waitFor(() => expect(isAlive(workerPid!)).toBe(false), { timeout: 2_000 });
+
+  // Wait past the point where the hung step would have returned and written.
+  await new Promise((r) => setTimeout(r, slowMs - (Date.now() - started) + 300));
+  const writes = readFileSync(join(dir, "writes"), "utf8").trim().split("\n");
+  expect(writes.filter((line) => line.startsWith("hung-worker "))).toEqual([
+    "hung-worker before",
+  ]);
+  expect(
+    await runtime.heap.readStep({ executionId: "hung-worker", stepKey: "slow" })
+  ).toBeNull();
+  expect(acknowledge.mock.calls.map(([request]) => request.lease.executionId)).toEqual([
+    "next-worker",
+  ]);
+  expect(release).not.toHaveBeenCalled();
+  expect(await runtime.executions.get("hung-worker")).toMatchObject({ status: "running" });
+});
+
+function isAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}

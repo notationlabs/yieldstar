@@ -13,6 +13,15 @@ import { DEFAULT_LEASE_DURATION } from "./execution-state";
 /** How many deliveries a dispatcher runs at once unless configured: 10. */
 export const DEFAULT_DISPATCHER_CONCURRENCY = 10;
 
+/**
+ * How long the dispatcher waits for a delivery to settle after aborting its
+ * signal, unless configured: 1 second.
+ */
+export const DEFAULT_ABORT_GRACE_PERIOD = 1_000;
+
+/** Marks a delivery the dispatcher stopped waiting for. */
+const ABANDONED = Symbol("abandoned");
+
 export interface DispatcherOptions {
   invoker: WorkflowInvoker;
   logger: Logger;
@@ -30,6 +39,14 @@ export interface DispatcherOptions {
    * @default leaseDuration / 3
    */
   renewInterval?: number;
+  /**
+   * Milliseconds to keep waiting for a delivery after its lease is lost and
+   * its signal aborts. After that the dispatcher abandons the delivery and
+   * frees its slot, even if the invoker cannot stop a step function that is
+   * still running.
+   * @default 1_000
+   */
+  abortGracePeriod?: number;
 }
 
 /**
@@ -42,11 +59,16 @@ export interface DispatcherOptions {
  * - It renews each lease every `renewInterval` while the delivery runs. If a
  *   renewal returns `lost`, another claim has taken over: the dispatcher stops
  *   renewing, aborts the delivery's signal so it runs no more workflow code,
- *   and neither acknowledges nor releases.
+ *   and neither acknowledges nor releases. If the delivery has not settled
+ *   `abortGracePeriod` after the abort, the dispatcher abandons it and frees
+ *   its slot. An abandoned delivery may keep running a step function, but its
+ *   signal and lease token stop every write it attempts.
  * - A delivery that rejects is not acknowledged. If the worker exited before
  *   replying, the lease is left to expire; any other rejection is a retry
  *   reply, and the lease is released. Either way the wakes stay pending and the
  *   execution is delivered again after the redelivery delay.
+ * - If reading the record, acknowledging or releasing throws, the lease is
+ *   left to expire rather than released.
  */
 export class ExecutionDispatcher {
   private runtime: Runtime;
@@ -57,6 +79,7 @@ export class ExecutionDispatcher {
   private concurrency: number;
   private leaseDuration: number;
   private renewInterval: number;
+  private abortGracePeriod: number;
   private running = false;
   private looping = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -73,6 +96,7 @@ export class ExecutionDispatcher {
     this.concurrency = options.concurrency ?? DEFAULT_DISPATCHER_CONCURRENCY;
     this.leaseDuration = options.leaseDuration ?? DEFAULT_LEASE_DURATION;
     this.renewInterval = options.renewInterval ?? this.leaseDuration / 3;
+    this.abortGracePeriod = options.abortGracePeriod ?? DEFAULT_ABORT_GRACE_PERIOD;
     if (!Number.isInteger(this.concurrency) || this.concurrency < 1) {
       throw new RangeError("concurrency must be a positive integer");
     }
@@ -81,6 +105,9 @@ export class ExecutionDispatcher {
     }
     if (!(this.renewInterval > 0 && this.renewInterval < this.leaseDuration)) {
       throw new RangeError("renewInterval must be positive and shorter than leaseDuration");
+    }
+    if (!(this.abortGracePeriod >= 0)) {
+      throw new RangeError("abortGracePeriod must not be negative");
     }
   }
 
@@ -185,16 +212,20 @@ export class ExecutionDispatcher {
         return;
       }
 
-      let outcome: WorkflowRunOutcome;
+      let outcome: WorkflowRunOutcome | typeof ABANDONED;
       try {
-        outcome = await this.invoker.deliver(
-          {
-            workflowId: record.workflowId,
-            executionId,
-            params: record.params,
-            context: record.context,
-          },
-          { lease, signal: renewal.signal }
+        outcome = await this.abandonAfterAbort(
+          this.invoker.deliver(
+            {
+              workflowId: record.workflowId,
+              executionId,
+              params: record.params,
+              context: record.context,
+            },
+            { lease, signal: renewal.signal }
+          ),
+          lease,
+          renewal.signal
         );
       } catch (err) {
         const current = await renewal.stop();
@@ -217,6 +248,8 @@ export class ExecutionDispatcher {
         return;
       }
 
+      // An abandoned delivery's lease was lost: there is nothing to end.
+      if (outcome === ABANDONED) return;
       const current = await renewal.stop();
       if (!current) return;
       const result = await executions.acknowledge({ lease: current, outcome });
@@ -226,10 +259,73 @@ export class ExecutionDispatcher {
       }
       this.emit(executionId, result);
     } catch (err) {
-      this.logger.error({ executionId, err }, "Failed to dispatch execution");
+      // Reading the record, acknowledging or releasing threw. Leave the lease
+      // to expire rather than trying to release it: expiry is safe, it counts
+      // as an unacknowledged delivery so the execution is delivered again
+      // after the redelivery delay, and the backend that just threw may be
+      // unreachable anyway.
+      this.logger.error(
+        { executionId, err },
+        "Failed to dispatch execution; the lease will expire and the execution will be redelivered"
+      );
     } finally {
       await renewal.stop();
     }
+  }
+
+  /**
+   * Settles with `delivery`, or with `ABANDONED` once `abortGracePeriod` has
+   * passed since `signal` aborted. An abandoned delivery's late outcome or
+   * rejection is logged and otherwise ignored, so it is never acknowledged or
+   * released and never surfaces as an unhandled rejection.
+   */
+  private abandonAfterAbort<T>(
+    delivery: Promise<T>,
+    lease: ExecutionLease,
+    signal: AbortSignal
+  ): Promise<T | typeof ABANDONED> {
+    return new Promise((resolve, reject) => {
+      let abandoned = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => {
+        timer = setTimeout(() => {
+          abandoned = true;
+          this.logger.warn(
+            { executionId: lease.executionId, token: lease.token },
+            "Delivery did not stop within the abort grace period after its lease was lost; abandoning it"
+          );
+          resolve(ABANDONED);
+        }, this.abortGracePeriod);
+        if (!this.keepAlive) timer.unref?.();
+      };
+      const settle = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+
+      delivery.then(
+        (value) => {
+          settle();
+          if (abandoned) {
+            this.logger.warn(
+              { executionId: lease.executionId, token: lease.token },
+              "Abandoned delivery settled late; its outcome is ignored"
+            );
+          } else resolve(value);
+        },
+        (err) => {
+          settle();
+          if (abandoned) {
+            this.logger.warn(
+              { executionId: lease.executionId, token: lease.token, err },
+              "Abandoned delivery rejected late; ignored"
+            );
+          } else reject(err);
+        }
+      );
+    });
   }
 
   /**

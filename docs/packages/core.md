@@ -150,8 +150,10 @@ Runtime adapter authors can import the storage-neutral state machine that `Sqlit
 The only component that delivers executions. It leases due executions, reads each event from its record, passes it to `invoker.deliver` with the lease, and acknowledges the outcome under that lease. A terminal execution that is claimed again returns its recorded outcome without running workflow code.
 
 - **Concurrency.** It runs up to `concurrency` deliveries at once, and claims new executions as slots free up without waiting for earlier deliveries to reach an outcome. Several dispatchers, in one process or several, can share one backend: each execution has at most one live lease.
-- **Renewal.** It renews each lease every `renewInterval` while the delivery runs, so a slow delivery keeps its lease. If a renewal returns `lost`, it stops renewing and does not acknowledge.
+- **Renewal.** It renews each lease every `renewInterval` while the delivery runs, so a slow delivery keeps its lease. If a renewal returns `lost`, it stops renewing, aborts the delivery's `signal`, and neither acknowledges nor releases.
+- **Abandonment.** If an aborted delivery has not settled `abortGracePeriod` after the abort, the dispatcher stops waiting for it and frees its slot. This covers in-process invokers, which cannot stop a step function that is already running. The abandoned delivery may keep running, but its signal and stale token block every write it attempts, and its late outcome or rejection is logged and ignored. The worker invoker kills its worker on abort, so its deliveries settle at once.
 - **Rejections.** A delivery that rejects is not acknowledged. If the worker exited before replying (`WorkerExitedError`), the dispatcher leaves the lease to expire. Any other rejection is a retry reply, and the dispatcher releases the lease. Either way the execution is delivered again after the redelivery delay.
+- **Backend errors.** If reading the record, acknowledging or releasing throws, the dispatcher logs the error and leaves the lease to expire rather than trying to release it. This is intended: expiry is safe, it counts as an unacknowledged delivery, so the execution is delivered again after the redelivery delay, and the backend that just threw may be unreachable anyway.
 
 ```ts
 import { ExecutionDispatcher } from "@yieldstar/core";
@@ -169,6 +171,7 @@ dispatcher.start();
 | `keepAlive`     | `boolean`         | `true`               | Whether the dispatcher's timers keep the process alive |
 | `leaseDuration` | `number`          | `30_000`             | Milliseconds each lease lasts unless renewed        |
 | `renewInterval` | `number`          | `leaseDuration / 3`  | Milliseconds between renewals; must be shorter than `leaseDuration` |
+| `abortGracePeriod` | `number`       | `1_000`              | Milliseconds to wait for a delivery after aborting it before abandoning it and freeing its slot |
 
 | Method    | Behavior                                                                                   |
 | --------- | ------------------------------------------------------------------------------------------ |
@@ -298,11 +301,14 @@ outside the connector's transaction and may run more than once.
 type WorkflowInvoker = {
   /** @deprecated The execution record is the source of truth for outcomes. */
   workflowEndEmitter: EventEmitter;
-  deliver(event: WorkflowEvent, lease: ExecutionLease): Promise<WorkflowRunOutcome>;
+  deliver(
+    event: WorkflowEvent,
+    options: { lease: ExecutionLease; signal: AbortSignal }
+  ): Promise<WorkflowRunOutcome>;
 };
 ```
 
-`deliver` runs one delivery under `lease` and resolves with its outcome. It rejects, without an outcome, when the delivery hits an infrastructure error or the worker exits before replying. A worker exit rejects with a `WorkerExitedError`, and the dispatcher leaves the lease to expire. The dispatcher treats every other rejection as a retry reply and releases the lease. The dispatcher still emits terminal outcomes on `workflowEndEmitter` as an in-process fast path; no guarantee depends on it.
+`deliver` runs one delivery under `lease` and resolves with its outcome. Once `signal` aborts, the delivery runs no more workflow code and makes no more fenced writes, and rejects with an `InfrastructureError` whose cause is the signal's reason. An invoker that can stop a running step function should, and reject at once: the worker invoker kills its worker. It rejects, without an outcome, when the delivery hits an infrastructure error or the worker exits before replying. A worker exit rejects with a `WorkerExitedError`, and the dispatcher leaves the lease to expire. The dispatcher treats every other rejection as a retry reply and releases the lease. The dispatcher still emits terminal outcomes on `workflowEndEmitter` as an in-process fast path; no guarantee depends on it.
 
 ## Step response classes
 

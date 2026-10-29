@@ -5,11 +5,11 @@ import type {
   WorkflowInvoker,
   WorkflowRunOutcome,
 } from "@yieldstar/core";
-import { WorkerExitedError } from "@yieldstar/core";
+import { InfrastructureError, WorkerExitedError } from "@yieldstar/core";
 import { EventEmitter } from "node:events";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { deserializeError, serializeError } from "serialize-error";
+import { deserializeError } from "serialize-error";
 import type { WorkerDelivery, WorkerMessage, WorkerRequest } from "./worker";
 
 /**
@@ -20,9 +20,10 @@ import type { WorkerDelivery, WorkerMessage, WorkerRequest } from "./worker";
  * `WorkerExitedError`, so the dispatcher leaves the lease to expire instead of
  * releasing it.
  *
- * When `options.signal` aborts, the invoker sends the worker an `abort`
- * message carrying the reason; the worker aborts its delivery's signal, and
- * its driver stops before the next step function or fenced write.
+ * When `options.signal` aborts, the invoker kills the worker with `SIGKILL`,
+ * stopping even a step function that is still running, and rejects at once
+ * with an `InfrastructureError` whose cause is the signal's reason. A signal
+ * that has already aborted rejects without forking a worker.
  *
  * The worker exits as soon as its IPC channel to this process closes, so a
  * worker whose runtime process has died makes no further fenced writes.
@@ -45,6 +46,10 @@ export function createWorkflowInvoker(params: {
         : workerPath;
 
       return new Promise<WorkflowRunOutcome>((resolve, reject) => {
+        if (signal.aborted) {
+          reject(new InfrastructureError(signal.reason));
+          return;
+        }
         logger.info({ executionId }, "Starting child process");
 
         const childProcess = fork(filePath, [], {
@@ -59,22 +64,29 @@ export function createWorkflowInvoker(params: {
             if (error) settle({ error });
           });
 
-        const onAbort = () => request({ type: "abort", reason: serializeError(signal.reason) });
+        // The lease was lost: kill the worker rather than ask it to stop, so
+        // a step function that never returns cannot keep it running.
+        const onAbort = () =>
+          settle({ error: new InfrastructureError(signal.reason) }, "SIGKILL");
 
-        const settle = (result: { outcome: WorkflowRunOutcome } | { error: Error }) => {
+        const settle = (
+          result: { outcome: WorkflowRunOutcome } | { error: Error },
+          killSignal: NodeJS.Signals = "SIGTERM"
+        ) => {
           clearTimeout(handshakeTimer);
           signal.removeEventListener("abort", onAbort);
           if (settled) return;
           settled = true;
+          logger.info({ executionId }, "Terminating child process");
+          childProcess.kill(killSignal);
           if ("error" in result) {
             logger.error({ executionId, err: result.error }, result.error.message);
             reject(result.error);
           } else {
             resolve(result.outcome);
           }
-          logger.info({ executionId }, "Terminating child process");
-          childProcess.kill();
         };
+        signal.addEventListener("abort", onAbort, { once: true });
 
         childProcess.on("error", (error) => settle({ error }));
 
@@ -115,12 +127,8 @@ export function createWorkflowInvoker(params: {
                 type: "deliver",
                 event: { ...event, context: new Map(event.context) },
                 lease,
-                aborted: signal.aborted
-                  ? { reason: serializeError(signal.reason) }
-                  : undefined,
               };
               request(delivery);
-              if (!signal.aborted) signal.addEventListener("abort", onAbort, { once: true });
               return;
             case "outcome": {
               const { outcome } = message;
