@@ -11,10 +11,14 @@
 - `createRoutes({ invoker, ... })` is now `createRoutes({ runtime, invoker?, ... })`. `POST /trigger` admits the execution and returns `409` when the execution ID is in use and `400` when the event cannot be stored without loss. `POST /events` returns `404` for an unknown execution.
 - Execution IDs are unique and never reused. Triggering with an ID already admitted throws `ExecutionAdmissionError` (`EXECUTION_ID_CONFLICT`). The HTTP SDK no longer generates IDs client-side; it reads the accepted ID from the trigger response.
 - Admission rejects `params` and `context` that do not round-trip through JSON exactly, such as `Date`s, class instances, `undefined` properties, `NaN`, and `bigint` (`INVALID_EXECUTION_EVENT`).
-- Infrastructure errors, such as the SQLite database throwing during a store step, no longer reach workflow `try/catch`. The delivery is not acknowledged and is redelivered after the redelivery timeout. Store validation and not-found errors, and errors thrown by updaters, selectors and claims, remain catchable.
+- Infrastructure errors, such as the SQLite database throwing during a store step, no longer reach workflow `try/catch`. The delivery is not acknowledged and is redelivered after the redelivery delay. Store validation and not-found errors, and errors thrown by updaters, selectors and claims, remain catchable.
 - Removed `StoreWaiter.event` and the SQLite `store_wake_outbox` table. `SqliteStoreClient` takes `{ db, executions? }` instead of a scheduler client.
 - `registerStoreClientConformance` factories return `{ runtime, createPeer?, restart?, dispose? }` instead of building a store client from a scheduler.
 - `MiddlewareEvent.executionId` is optional; it is absent when the runtime will choose the ID.
+- Executions are delivered under leases with fencing tokens (RFC 002), replacing the fixed redelivery timeout. `ExecutionDelivery` is replaced by `ExecutionLease` (`{ executionId, token, expiresAt }`). `claimDue` takes `{ limit, duration }` and returns leases earliest due first; `acknowledge` takes `{ lease, outcome }` and returns `{ status: "lost" }` for a stale lease. `ExecutionStatus` gains `running`, and `ExecutionRecord` gains `unacknowledgedDeliveries`.
+- `HeapClient.writeStep` takes `{ lease, stepKey, stepAttempt, done, stepResponseJson }` instead of an `executionId` and `stepDone`, and resolves with the record as stored or `{ status: "lost" }`. Rewriting an existing record no longer throws; it returns the existing record unchanged.
+- `WorkflowInvoker.deliver(event, lease)` and `WorkflowRunner.run(event, lease, logger?)` take the delivery's lease, and the worker IPC delivery message is `{ event, lease }`. `WorkflowGeneratorParams` carries the `lease`.
+- A delivery that ends without an outcome is redelivered after a redelivery delay that starts at 1 second and doubles with each consecutive unacknowledged delivery, up to 5 minutes, instead of after five minutes.
 - `StepDelay.resumeIn` and `WorkflowDelay.resumeIn` are renamed `wakeAt`. Delay and retry steps read their wake time from the runtime clock instead of `Date.now()`, and `WorkflowGeneratorParams` carries that `clock`.
 
 ### Added
@@ -26,6 +30,10 @@
 - Added `waitForExecutionOutcome` and the storage-neutral execution state machine (`prepareExecutionAdmission`, `claimExecution`, `acknowledgeExecution`, and related helpers) for runtime adapter authors.
 - Added `StoreValidationError` and `StoreNotFoundError`.
 - Re-exported `ExecutionAdmissionError` and the execution record types from `yieldstar`.
+- Added `ExecutionClient.renew` and `ExecutionClient.release`, `LeaseLost`, `isLeaseLost`, `LeaseLostError`, `StepConflictError`, `WorkerExitedError`, `DEFAULT_LEASE_DURATION`, `redeliveryDelay`, and the lease transitions (`renewExecutionLease`, `releaseExecutionLease`, `isLeaseCurrent`) to `@yieldstar/core`.
+- Added `concurrency` (default `10`), `leaseDuration` (default 30 seconds) and `renewInterval` (default a third of `leaseDuration`) options to `ExecutionDispatcher`, and its `activeDeliveries` count. The dispatcher claims new executions as slots free up, without waiting for earlier deliveries.
+- Added RFC 002's lease, redelivery-delay and fencing cases to `registerExecutionClientConformance`. Harnesses may return `createPeer` to run the lease races across two runtimes on one backend.
+- Added `WORKER_ORPHANED_EXIT_CODE` to `@yieldstar/worker-invoker`.
 
 ### Changed
 
@@ -33,6 +41,10 @@
 - Store waiters persist until the step that registered them records its result, instead of being consumed by a wake.
 - Any number of wakes for one execution, from delays, retries and store commits, collapse into one delivery at the earliest due time.
 - `triggerAndWait` and `POST /events` settle from the execution record, so they settle even if the process that ran the execution restarted.
+- Several dispatchers, in one process or in several processes sharing one SQLite file, can deliver executions at once. An execution has at most one live lease, and every heap step write, renewal, release and acknowledgement checks the lease's token atomically, so a stale holder's writes return `lost` and change nothing.
+- The dispatcher renews each lease while its delivery runs, so a slow delivery is no longer delivered a second time. A delivery that rejects releases its lease, except when the worker exits before replying, which leaves the lease to expire.
+- The driver ends a delivery as a retry when a step is already recorded with a different value; the next delivery replays the recorded value.
+- A forked worker exits as soon as its IPC channel to the runtime process closes, so it makes no further writes after that process dies.
 
 ## 0.5.0 - 2026-07-21
 

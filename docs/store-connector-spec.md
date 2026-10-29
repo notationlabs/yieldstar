@@ -1,6 +1,6 @@
 # YieldStar store connector conformance specification
 
-Status: publishable specification for the YieldStar connector protocol, revised for RFC 001 (execution records).
+Status: publishable specification for the YieldStar connector protocol, revised for RFC 001 (execution records) and RFC 002 (execution leases).
 
 This document defines the observable contract for a YieldStar store connector. The words MUST, MUST NOT, REQUIRED, SHOULD, SHOULD NOT, and MAY are normative.
 
@@ -8,7 +8,7 @@ This document defines the observable contract for a YieldStar store connector. T
 
 A connector is qualified by running `registerStoreClientConformance` from `@yieldstar/store-conformance` against a factory that creates a clean backend and returns a `Runtime` over it. A store connector is never qualified alone: its wakes are requests to the runtime's `ExecutionClient`, so the suite observes them as executions that `runtime.executions.claimDue()` returns. Passing the base suite qualifies the runtime for process-local use.
 
-A factory that returns `createPeer` declares that independent runtimes can concurrently access the same backend. The shared-client checks then become REQUIRED. A factory that returns `restart` declares durable storage of stores, waiters and wakes across process failure. The durable-wake checks then become REQUIRED.
+A factory that returns `createPeer` declares that independent runtimes can concurrently access the same backend, as separate runtime processes would. The shared-client checks then become REQUIRED, including the lease checks in which one runtime claims an execution and a peer races it for the same execution or claims it after the first lease expires. Several dispatchers, in one process or several, MAY share a backend declared this way. A factory that returns `restart` declares durable storage of stores, waiters and wakes across process failure. The durable-wake checks then become REQUIRED.
 
 Qualification applies to synchronous, transaction-capable drivers. Async remote drivers such as Turso and batch-only backends such as D1 require future protocol extensions and are not qualified by this version.
 
@@ -18,6 +18,7 @@ A `Runtime` bundles three clients: `executions` (`ExecutionClient`), `heap` (`He
 
 - **Follow-on writes.** Where this specification requires one write to accompany another, such as the wakes for a store commit, the second MUST be durable once the first commits and MUST be applied eventually. A runtime MAY make both in one transaction or use an outbox.
 - **Waiter deletion.** A waiter MUST be deleted atomically with the heap write that records its step's result. Waiters are therefore stored with step records. A store kept in another database reaches its waiters through the follow-on rule above.
+- **Fencing.** Heap step records and lease tokens MUST be checked in one place: a fenced heap write checks the lease token and writes in one atomic action. Other state MAY be kept elsewhere under the guarantees above.
 - **Clock.** Every client MUST read time from the runtime's clock (`RuntimeOptions.clock`, default `Date.now`), exposed as `Runtime.clock`. No client operation takes the current time as a parameter. Delay and retry steps read their wake times from the same clock.
 
 `SqliteRuntime` and `MemoryRuntime` keep every guarantee in single transactions.
@@ -27,12 +28,41 @@ The `ExecutionClient` contract that wakes rely on:
 - Execution IDs MUST be unique across the runtime and MUST never be reused, whatever the delivery outcome. `admit` returns `EXECUTION_ID_CONFLICT` for an ID in use, and `INVALID_EXECUTION_EVENT` for `params` or `context` that cannot round-trip exactly; it MUST NOT store a lossy copy.
 - Admission MUST create the record as `admitted` and make it due immediately, all-or-nothing.
 - A wake names an execution and a due time; it carries no copy of the event. `requestWake` for an unknown execution returns `EXECUTION_NOT_FOUND` and creates nothing; for a terminal execution it returns `ignored`.
-- Wakes not covered by a claimed delivery MUST merge into one due time, the earliest requested. `claimDue` MUST return an execution at most once per result, however many wakes it has, and MUST NOT return it again until it is acknowledged or the redelivery timeout passes.
+- Wakes not covered by a lease MUST merge into one due time, the earliest requested. `claimDue` MUST return an execution at most once per result, however many wakes it has.
 - Acknowledgement clears the wakes the delivery covered. The next due time is the earlier of the outcome's `wakeAt` and any wake requested after the claim. An unacknowledged delivery's wakes stay pending.
-- `completed` and `failed` are immutable. A later acknowledgement MUST return the first terminal outcome, and a failed outcome's error MUST keep at least its `name` and `message`.
-- Records and pending wakes MUST survive a restart.
+- `completed` and `failed` are immutable. A failed outcome's error MUST keep at least its `name` and `message`.
+- Records, pending wakes and leases MUST survive a restart.
 
-Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `requestExecutionWake`, `claimExecution`, `acknowledgeExecution`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/store-conformance` exercises these rules; this repository runs it against both bundled runtimes.
+### Leases
+
+`claimDue({ limit, duration })` grants a lease, `{ executionId, token, expiresAt }`, on each execution it returns.
+
+- `claimDue` MUST return at most `limit` leases, each for a due execution with no live lease, earliest due time first.
+- An execution MUST have at most one live lease at any time, across every runtime sharing the backend.
+- Each claim MUST give the execution a token greater than every earlier token for that execution.
+- The record's status MUST be `running` while a lease is live. When the lease ends without a terminal acknowledgement, the status returns to `suspended` if an earlier delivery was acknowledged as suspended, and to `admitted` otherwise.
+- `renew` with the current token MUST extend `expiresAt` to `duration` from now. A lease is lost only when a higher token is issued or the lease has been released or acknowledged. An expired lease that has not been claimed again stays current: its renewals and fenced writes succeed.
+- An expired lease makes the execution claimable again, once it is due and the redelivery delay has passed.
+- `release` with the current token MUST end the lease without acknowledging an outcome.
+- `acknowledge` with the current token MUST record the outcome and end the lease, all-or-nothing.
+
+### Redelivery delay
+
+- A delivery that ends by `release`, or by lease expiry followed by another claim, is unacknowledged and MUST add one to `unacknowledgedDeliveries`. Any acknowledgement MUST reset it to zero.
+- While `unacknowledgedDeliveries` is greater than zero, the execution MUST NOT be claimable until a non-zero redelivery delay has passed since the delivery ended. The delay MUST NOT decrease while `unacknowledgedDeliveries` grows. The bundled runtimes start at 1 second, double, and cap at 5 minutes (`redeliveryDelay`).
+
+### Fencing
+
+Every write that could conflict with the current holder's writes is fenced: `HeapClient.writeStep`, `renew`, `release` and `acknowledge`.
+
+- A fenced write MUST be accepted only if its token is current, and the check and the write MUST be atomic. A rejected fenced write MUST change nothing and MUST return `{ status: "lost" }`.
+- Safety MUST NOT depend on clocks. Clocks decide only when an execution becomes claimable again; tokens decide whose writes count.
+- `writeStep` MUST be idempotent for the current holder. Rewriting an existing step record MUST succeed without changing it, and MUST return the record as stored, so the driver can detect a different value and end the delivery as a retry.
+- Deleting a step's waiters is part of the fenced heap write that records its result: a rejected write MUST leave them in place.
+
+Store mutations with a step receipt, store creation, and wake requests are not fenced. A receipt or a store identity already makes each take effect once, whichever holder commits it, and a stale wake causes at most one extra delivery that replay absorbs. Fencing does not make `step.run` exactly-once: a stale holder may run a function's external side effects before its step write is rejected.
+
+Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/store-conformance` exercises these rules; this repository runs it against both bundled runtimes.
 
 ## Connector surface
 
@@ -98,8 +128,8 @@ A rejected public promise does not prove that no commit occurred. Exactly-once r
 
 Validation failures and asynchronous updater or claim callbacks MUST leave state, receipts, and wakes unchanged.
 
-Schema failures MUST surface as `StoreValidationError` (`validateStoreState` throws it for connectors that use it) and a missing store MUST surface as `StoreNotFoundError`, or as errors with those `name`s. Workflow code can catch these two. Every other error a store client throws is treated as an infrastructure error: the delivery ends without an outcome, is not acknowledged, and the runtime delivers it again after its redelivery timeout.
+Schema failures MUST surface as `StoreValidationError` (`validateStoreState` throws it for connectors that use it) and a missing store MUST surface as `StoreNotFoundError`, or as errors with those `name`s. Workflow code can catch these two. Every other error a store client throws is treated as an infrastructure error: the delivery ends without an outcome, its lease is released unacknowledged, and the runtime delivers it again after the redelivery delay.
 
 ## Running the suite
 
-See [`@yieldstar/store-conformance`](../packages/store-conformance/README.md) for the factory API and a minimal Vitest example. The YieldStar CI runs the same artifact against `MemoryRuntime` and `SqliteRuntime` under Bun and Node. SQLite declares shared-client and durable-restart capabilities; the in-memory runtime qualifies only for process-local use.
+See [`@yieldstar/store-conformance`](../packages/store-conformance/README.md) for the factory API and a minimal Vitest example. The YieldStar CI runs the same artifact against `MemoryRuntime` and `SqliteRuntime` under Bun and Node. SQLite declares shared-client and durable-restart capabilities, and also runs the execution suite over separate connections to one database file; the in-memory runtime qualifies only for process-local use.

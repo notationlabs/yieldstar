@@ -104,4 +104,4 @@ try {
 }
 ```
 
-An infrastructure error is not an outcome. The delivery is not acknowledged, the execution record keeps its status, and the runtime delivers the execution again after its redelivery timeout (five minutes by default). Completed steps replay from the heap, so the retry resumes where the failed delivery stopped.
+An infrastructure error is not an outcome. The delivery is not acknowledged, the execution record keeps its status, and the runtime delivers the execution again after a redelivery delay (1 second, doubling with each consecutive failed delivery, up to 5 minutes). Completed steps replay from the heap, so the retry resumes where the failed delivery stopped.
