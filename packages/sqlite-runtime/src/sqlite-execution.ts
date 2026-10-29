@@ -2,10 +2,13 @@ import {
   acknowledgeExecution,
   claimExecution,
   createExecutionState,
+  createStartedExecution,
   executionIdConflict,
   executionNotFound,
   isExecutionClaimable,
+  matchStartRequest,
   prepareExecutionAdmission,
+  prepareExecutionStart,
   releaseExecutionLease,
   renewExecutionLease,
   requestExecutionWake,
@@ -25,6 +28,7 @@ import {
   type WorkflowRunOutcome,
 } from "@yieldstar/core";
 import { ExecutionsDao } from "./dao/executions-dao";
+import { StartRequestsDao } from "./dao/start-requests-dao";
 import type { SqliteDriver } from "./sqlite-driver";
 import { runTransaction } from "./sqlite-transaction";
 
@@ -42,11 +46,13 @@ export type SqliteExecutionClientOptions = {
 export class SqliteExecutionClient implements ExecutionClient {
   private db: SqliteDriver;
   private executionsDao: ExecutionsDao;
+  private startRequestsDao: StartRequestsDao;
   private clock: () => number;
 
   constructor(db: SqliteDriver, options: SqliteExecutionClientOptions = {}) {
     this.db = db;
     this.executionsDao = new ExecutionsDao(db);
+    this.startRequestsDao = new StartRequestsDao(db);
     // Read Date.now lazily so fake timers installed later still apply.
     this.clock = options.clock ?? (() => Date.now());
   }
@@ -79,8 +85,37 @@ export class SqliteExecutionClient implements ExecutionClient {
     });
   }
 
-  async start(_request: ExecutionStartRequest): Promise<ExecutionStartResult> {
-    throw new Error("ExecutionClient.start is not implemented");
+  async start(request: ExecutionStartRequest): Promise<ExecutionStartResult> {
+    const prepared = prepareExecutionStart(request);
+    if (!prepared.ok) return prepared.result;
+    const { start } = prepared;
+
+    // The lookup, the target and the start request share one IMMEDIATE
+    // transaction, so concurrent starts with one request ID serialize and a
+    // new start commits all-or-nothing.
+    return runTransaction(this.db, () => {
+      const recorded = this.startRequestsDao.get(
+        start.callerExecutionId,
+        start.stepKey
+      );
+      if (recorded) return matchStartRequest(recorded, start);
+
+      const caller = this.executionsDao.getState(start.callerExecutionId);
+      if (!caller) {
+        throw new Error(
+          `Cannot start a workflow from execution "${start.callerExecutionId}": it does not exist`
+        );
+      }
+      let created = createStartedExecution({ start, caller, now: this.clock() });
+      while (!this.executionsDao.insertState(created.target)) {
+        created = createStartedExecution({ start, caller, now: this.clock() });
+      }
+      this.startRequestsDao.insert(created.startRequest);
+      return {
+        status: "accepted" as const,
+        executionId: created.target.executionId,
+      };
+    });
   }
 
   async get(executionId: string): Promise<ExecutionRecord | undefined> {
