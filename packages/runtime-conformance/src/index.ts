@@ -975,6 +975,37 @@ export function registerStoreClientConformance({
         }
       });
 
+      test("a falsy initial state is a stored state, not a missing store", async () => {
+        const harness = await create();
+        const { stores } = harness.runtime;
+        try {
+          for (const [index, falsy] of [0, "", false, null].entries()) {
+            let evaluations = 0;
+            const Falsy = defineStore(
+              `${name}-falsy-${index}-missing-conformance`,
+              schema<typeof falsy>(),
+              {
+                initial() {
+                  evaluations += 1;
+                  return falsy;
+                },
+              }
+            );
+            expect(await stores.getStore({ definition: Falsy, id: "falsy" })).toMatchObject({
+              state: falsy,
+              version: 0,
+            });
+            expect(await stores.getStore({ definition: Falsy, id: "falsy" })).toMatchObject({
+              state: falsy,
+              version: 0,
+            });
+            expect(evaluations).toBe(1);
+          }
+        } finally {
+          await harness.dispose?.();
+        }
+      });
+
       test("creates nothing when initial or the operation fails", async () => {
         const harness = await create();
         const { stores } = harness.runtime;
