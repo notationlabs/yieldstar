@@ -109,7 +109,9 @@ export function registerExecutionClientConformance({
   name,
   create,
 }: ExecutionConformanceOptions): void {
-  const Store = defineStore(`${name}-execution-conformance`, schema<MessagesState>());
+  const Store = defineStore(`${name}-execution-conformance`, schema<MessagesState>(), {
+    initial: () => ({ messages: [] }),
+  });
 
   async function setup(): Promise<TestContext> {
     const clock = { now: START };
@@ -730,10 +732,9 @@ export function registerExecutionClientConformance({
         runtime,
       }) => {
         await admitSuspended(runtime, "consumer");
-        const snapshot = await runtime.stores.getOrCreateStore({
+        const snapshot = await runtime.stores.getStore({
           definition: Store,
           id: "consumer",
-          initial: { messages: [] },
         });
         await runtime.stores.registerWaiter(
           waiter("consumer", snapshot.instanceId, snapshot.version)
@@ -748,10 +749,9 @@ export function registerExecutionClientConformance({
         clock,
       }) => {
         await admitSuspended(runtime, "recorded");
-        const snapshot = await runtime.stores.getOrCreateStore({
+        const snapshot = await runtime.stores.getStore({
           definition: Store,
           id: "recorded",
-          initial: { messages: [] },
         });
         const registered = waiter("recorded", snapshot.instanceId, snapshot.version);
         await runtime.stores.registerWaiter(registered);
@@ -1612,10 +1612,9 @@ export function registerExecutionClientConformance({
       it("keeps a waiter when a stale holder's step result would delete it", async (ctx) => {
         const { runtime } = ctx;
         await admitSuspended(runtime, "stale-waiter");
-        const snapshot = await runtime.stores.getOrCreateStore({
+        const snapshot = await runtime.stores.getStore({
           definition: Store,
           id: "stale-waiter",
-          initial: { messages: [] },
         });
         const registered = waiter("stale-waiter", snapshot.instanceId, snapshot.version);
         await runtime.stores.registerWaiter(registered);
@@ -1633,10 +1632,9 @@ export function registerExecutionClientConformance({
       it("applies a stale holder's idempotent store update once and returns the recorded result to the current holder", async (ctx) => {
         const { runtime } = ctx;
         await admit(runtime, "store-receipt");
-        await runtime.stores.getOrCreateStore({
+        await runtime.stores.getStore({
           definition: Store,
           id: "store-receipt",
-          initial: { messages: [] },
         });
         const { stale, current } = await reclaim(ctx, "store-receipt");
         const stepId = { executionId: "store-receipt", stepKey: "append" };
@@ -2091,10 +2089,9 @@ export function registerExecutionClientConformance({
 
       itAfterRestart("makes a store commit and the wakes it requires durable together", async ({ runtime, restart }) => {
         await admitSuspended(runtime, "committed");
-        const snapshot = await runtime.stores.getOrCreateStore({
+        const snapshot = await runtime.stores.getStore({
           definition: Store,
           id: "committed",
-          initial: { messages: [] },
         });
         await runtime.stores.registerWaiter(
           waiter("committed", snapshot.instanceId, snapshot.version)
@@ -2111,10 +2108,9 @@ export function registerExecutionClientConformance({
 
       itAfterRestart("keeps a registered waiter across a restart", async ({ runtime, restart }) => {
         await admitSuspended(runtime, "durable-waiter");
-        const snapshot = await runtime.stores.getOrCreateStore({
+        const snapshot = await runtime.stores.getStore({
           definition: Store,
           id: "durable-waiter",
-          initial: { messages: [] },
         });
         await runtime.stores.registerWaiter(
           waiter("durable-waiter", snapshot.instanceId, snapshot.version)
