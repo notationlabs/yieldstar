@@ -1,8 +1,11 @@
 import {
   DEFAULT_LEASE_DURATION,
   defineStore,
+  durableValueCodec,
   redeliveryDelay,
+  type DurableObject,
   type ExecutionLease,
+  type ExecutionStartResult,
   type Runtime,
   type StandardSchemaV1,
   type StoreWaiter,
@@ -27,6 +30,12 @@ export type ExecutionConformanceHarness = {
   createPeer?(): Runtime | Promise<Runtime>;
   /** Opens the same durable backend in a new runtime, as after a restart. */
   restart?(): Runtime | Promise<Runtime>;
+  /**
+   * Makes every new start on `runtime` fail after it begins writing but before
+   * it commits, until the returned function is called. Without it, the case
+   * for a failure before a start commits is skipped.
+   */
+  failStartCommits?(): (() => void | Promise<void>) | Promise<() => void | Promise<void>>;
   dispose?(): void | Promise<void>;
 };
 
@@ -82,7 +91,7 @@ class PaymentDeclinedError extends Error {
 
 /**
  * Registers the runtime-adapter suite for `ExecutionClient` and fenced heap
- * writes (RFC 001 and RFC 002).
+ * writes (RFC 001, RFC 002 and RFC 003).
  */
 export function registerExecutionClientConformance({
   name,
@@ -105,11 +114,14 @@ export function registerExecutionClientConformance({
     };
   }
 
-  function it(title: string, fn: (ctx: TestContext) => Promise<void>) {
-    test(title, async () => {
+  function it(
+    title: string,
+    fn: (ctx: TestContext, testContext: { skip(): void }) => Promise<void>
+  ) {
+    test(title, async (testContext) => {
       const ctx = await setup();
       try {
-        await fn(ctx);
+        await fn(ctx, testContext);
       } finally {
         await ctx.harness.dispose?.();
       }
@@ -144,6 +156,27 @@ export function registerExecutionClientConformance({
     });
     expect(admitted).toEqual({ status: "accepted", executionId });
     return executionId;
+  }
+
+  /** Starts `ship-order` with params naming the request, unless overridden. */
+  function startFrom(
+    runtime: Runtime,
+    callerExecutionId: string,
+    stepKey: string,
+    target: { workflowId?: string; params?: DurableObject } = {}
+  ) {
+    return runtime.executions.start({
+      requestId: { executionId: callerExecutionId, stepKey },
+      workflowId: target.workflowId ?? "ship-order",
+      params: "params" in target ? target.params : { callerExecutionId, stepKey },
+    });
+  }
+
+  function acceptedId(result: ExecutionStartResult) {
+    if (result.status !== "accepted") {
+      throw new Error(`start rejected: ${result.code}: ${result.message}`);
+    }
+    return result.executionId;
   }
 
   function claim(runtime: Runtime, limit = 100) {
@@ -1571,6 +1604,314 @@ export function registerExecutionClientConformance({
           })
         ).toEqual({ status: "ignored" });
         expect(await claim(runtime)).toEqual([]);
+      });
+    });
+
+    describe("start", () => {
+      it("leaves no trace when a new start fails before it commits", async ({
+        runtime,
+        harness,
+      }, testContext) => {
+        if (!harness.failStartCommits) {
+          testContext.skip();
+          return;
+        }
+        await admitSuspended(runtime, "caller");
+        const restore = await harness.failStartCommits();
+        try {
+          await expect(startFrom(runtime, "caller", "ship")).rejects.toThrow();
+        } finally {
+          await restore();
+        }
+        expect(await claim(runtime)).toEqual([]);
+
+        const started = await startFrom(runtime, "caller", "ship");
+        expect(started.status).toBe("accepted");
+        const targetId = acceptedId(started);
+        expect(await runtime.executions.get(targetId)).toMatchObject({
+          status: "admitted",
+          parent: { executionId: "caller", stepKey: "ship" },
+        });
+        expect(await claimedIds(runtime)).toEqual([targetId]);
+      });
+
+      it("returns the committed target when a start is repeated after a lost response", async ({
+        runtime,
+        harness,
+      }) => {
+        await admitSuspended(runtime, "caller");
+        const first = acceptedId(await startFrom(runtime, "caller", "ship"));
+        const peer = (await harness.createPeer?.()) ?? runtime;
+        expect(await startFrom(peer, "caller", "ship")).toEqual({
+          status: "accepted",
+          executionId: first,
+        });
+        expect(await startFrom(runtime, "caller", "ship")).toEqual({
+          status: "accepted",
+          executionId: first,
+        });
+        expect(await claimedIds(runtime)).toEqual([first]);
+      });
+
+      it("admits one target for two concurrent calls with one request ID", async ({
+        runtime,
+        harness,
+      }) => {
+        await admitSuspended(runtime, "caller");
+        const peer = (await harness.createPeer?.()) ?? runtime;
+        const [a, b] = await Promise.all([
+          startFrom(runtime, "caller", "ship"),
+          startFrom(peer, "caller", "ship"),
+        ]);
+        expect(a.status).toBe("accepted");
+        expect(b).toEqual(a);
+        expect(await claimedIds(runtime)).toEqual([acceptedId(a)]);
+      });
+
+      it("gives different request IDs different execution IDs", async ({ runtime }) => {
+        await admitSuspended(runtime, "caller-a");
+        await admitSuspended(runtime, "caller-b");
+        const ids = [
+          acceptedId(await startFrom(runtime, "caller-a", "ship")),
+          acceptedId(await startFrom(runtime, "caller-a", "bill")),
+          acceptedId(await startFrom(runtime, "caller-b", "ship")),
+        ];
+        expect(new Set([...ids, "caller-a", "caller-b"]).size).toBe(5);
+        expect(await claimedIds(runtime)).toEqual([...ids].sort());
+      });
+
+      it("admits the target due, with the caller as its parent", async ({ runtime, clock }) => {
+        await admitSuspended(runtime, "caller");
+        const targetId = acceptedId(
+          await runtime.executions.start({
+            requestId: { executionId: "caller", stepKey: "ship" },
+            workflowId: "ship-order",
+            params: { orderId: 42, items: [{ sku: "a", qty: 1 }] },
+          })
+        );
+        const target = await runtime.executions.get(targetId);
+        expect(target).toMatchObject({
+          executionId: targetId,
+          workflowId: "ship-order",
+          params: { orderId: 42, items: [{ sku: "a", qty: 1 }] },
+          status: "admitted",
+          admittedAt: clock.now,
+          parent: { executionId: "caller", stepKey: "ship" },
+        });
+        expect(await claimedIds(runtime)).toEqual([targetId]);
+
+        // Executions admitted directly have no parent.
+        expect(await runtime.executions.get("caller")).not.toHaveProperty("parent");
+
+        // Without params, the target is admitted with none.
+        const bare = acceptedId(await startFrom(runtime, "caller", "bare", { params: undefined }));
+        expect((await runtime.executions.get(bare))!.params).toBeUndefined();
+      });
+
+      it("admits the target with the caller's context", async ({ runtime }) => {
+        await runtime.executions.admit({
+          executionId: "caller",
+          workflowId: "charge-order",
+          params: undefined,
+          context: new Map<string | number, unknown>([
+            ["tenant", "acme"],
+            [7, { roles: ["admin"] }],
+          ]),
+        });
+        const targetId = acceptedId(await startFrom(runtime, "caller", "ship"));
+        const target = await runtime.executions.get(targetId);
+        expect([...target!.context.entries()]).toEqual([
+          ["tenant", "acme"],
+          [7, { roles: ["admin"] }],
+        ]);
+      });
+
+      it("returns the original target when a repeat differs only in context", async ({
+        runtime,
+      }) => {
+        await runtime.executions.admit({
+          executionId: "caller",
+          workflowId: "charge-order",
+          params: undefined,
+          context: new Map([["tenant", "acme"]]),
+        });
+        const request = {
+          requestId: { executionId: "caller", stepKey: "ship" },
+          workflowId: "ship-order",
+          params: { orderId: 42 },
+        };
+        const first = acceptedId(await runtime.executions.start(request));
+        // Context is not part of a start request; a stray one is ignored.
+        expect(
+          await runtime.executions.start({
+            ...request,
+            context: new Map([["tenant", "other"]]),
+          } as typeof request)
+        ).toEqual({ status: "accepted", executionId: first });
+        expect(
+          [...(await runtime.executions.get(first))!.context.entries()]
+        ).toEqual([["tenant", "acme"]]);
+      });
+
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+      const accessor = Object.defineProperty({}, "value", {
+        get: () => 1,
+        enumerable: true,
+      });
+      const hidden = Object.defineProperty({}, "value", { value: 1, enumerable: false });
+      const invalidParams: [string, unknown][] = [
+        ["a Date", { at: new Date(0) }],
+        ["an undefined property", { missing: undefined }],
+        ["a class instance", { point: new Point(1) }],
+        ["NaN", { n: NaN }],
+        ["Infinity", { n: Infinity }],
+        ["a bigint", { n: 10n }],
+        ["a function", { fn: () => 1 }],
+        ["a symbol", { s: Symbol("s") }],
+        ["a symbol key", { [Symbol("s")]: 1 }],
+        ["an accessor", { nested: accessor }],
+        ["a non-enumerable property", { nested: hidden }],
+        ["a Map", { map: new Map([["a", 1]]) }],
+        ["a sparse array", { list: [1, , 3] }],
+        ["a cycle", cyclic],
+        ["an array as params", [1, 2]],
+        ["null as params", null],
+        ["a string as params", "params"],
+        ["a class instance as params", new Point(1)],
+      ];
+      for (const [label, params] of invalidParams) {
+        it(`rejects ${label} with INVALID_START_PARAMETERS and admits nothing`, async ({
+          runtime,
+        }) => {
+          await admitSuspended(runtime, "caller");
+          const rejected = await runtime.executions.start({
+            requestId: { executionId: "caller", stepKey: "ship" },
+            workflowId: "ship-order",
+            params: params as DurableObject,
+          });
+          expect(rejected).toMatchObject({
+            status: "rejected",
+            code: "INVALID_START_PARAMETERS",
+          });
+          expect(rejected.status === "rejected" && typeof rejected.message).toBe("string");
+          expect(await claim(runtime)).toEqual([]);
+          // Nothing was recorded for the request ID.
+          expect((await startFrom(runtime, "caller", "ship")).status).toBe("accepted");
+        });
+      }
+
+      it("rejects an empty workflow ID with INVALID_START_PARAMETERS and admits nothing", async ({
+        runtime,
+      }) => {
+        await admitSuspended(runtime, "caller");
+        expect(await startFrom(runtime, "caller", "ship", { workflowId: "" })).toMatchObject({
+          status: "rejected",
+          code: "INVALID_START_PARAMETERS",
+        });
+        expect(await claim(runtime)).toEqual([]);
+        expect((await startFrom(runtime, "caller", "ship")).status).toBe("accepted");
+      });
+
+      it("matches parameters whose keys are in a different order", async ({ runtime }) => {
+        const a = { orderId: 42, address: { line1: "1 High St", city: "Leeds" }, zero: 0 };
+        const b = { zero: -0, address: { city: "Leeds", line1: "1 High St" }, orderId: 42 };
+        const encodedA = durableValueCodec.encode(a);
+        expect(encodedA.status).toBe("encoded");
+        expect(durableValueCodec.encode(b)).toEqual(encodedA);
+
+        await admitSuspended(runtime, "caller");
+        const first = acceptedId(await startFrom(runtime, "caller", "ship", { params: a }));
+        expect(await startFrom(runtime, "caller", "ship", { params: b })).toEqual({
+          status: "accepted",
+          executionId: first,
+        });
+        expect(await claimedIds(runtime)).toEqual([first]);
+      });
+
+      it("rejects a repeat that changes the workflow ID or parameters, leaving the original unchanged", async ({
+        runtime,
+        advance,
+      }) => {
+        await admitSuspended(runtime, "caller");
+        await admitSuspended(runtime, "caller-without-params");
+        const first = acceptedId(
+          await startFrom(runtime, "caller", "ship", { params: { orderId: 42 } })
+        );
+        const bare = acceptedId(
+          await startFrom(runtime, "caller-without-params", "ship", { params: undefined })
+        );
+        const before = await runtime.executions.get(first);
+        advance(10);
+
+        const repeats: [string, { workflowId?: string; params?: DurableObject }][] = [
+          ["caller", { workflowId: "ship-express", params: { orderId: 42 } }],
+          ["caller", { params: { orderId: 43 } }],
+          ["caller", { params: { orderId: 42, express: true } }],
+          ["caller", { params: undefined }],
+          // Missing parameters and an empty object do not match.
+          ["caller-without-params", { params: {} }],
+        ];
+        for (const [caller, target] of repeats) {
+          const mismatch = await startFrom(runtime, caller, "ship", target);
+          expect(mismatch).toMatchObject({
+            status: "rejected",
+            code: "START_REQUEST_MISMATCH",
+          });
+          expect(mismatch.status === "rejected" && typeof mismatch.message).toBe("string");
+        }
+
+        expect(await runtime.executions.get(first)).toEqual(before);
+        expect(await claimedIds(runtime)).toEqual([first, bare].sort());
+        // The original request still matches.
+        expect(
+          await startFrom(runtime, "caller", "ship", { params: { orderId: 42 } })
+        ).toEqual({ status: "accepted", executionId: first });
+      });
+
+      it("returns the original target after it is terminal, and still rejects a mismatch", async ({
+        runtime,
+      }) => {
+        await admitSuspended(runtime, "caller");
+        const first = acceptedId(await startFrom(runtime, "caller", "ship"));
+        const lease = await claimOne(runtime, first);
+        await runtime.executions.acknowledge({
+          lease,
+          outcome: { status: "completed", result: "shipped" },
+        });
+        expect((await runtime.executions.get(first))!.status).toBe("completed");
+
+        expect(await startFrom(runtime, "caller", "ship")).toEqual({
+          status: "accepted",
+          executionId: first,
+        });
+        expect(await startFrom(runtime, "caller", "ship", { workflowId: "ship-express" })).toMatchObject({
+          status: "rejected",
+          code: "START_REQUEST_MISMATCH",
+        });
+        expect(await claim(runtime)).toEqual([]);
+      });
+
+      itAfterRestart("keeps start requests and parent links across a restart", async ({
+        runtime,
+        restart,
+      }) => {
+        await admitSuspended(runtime, "caller");
+        const first = acceptedId(await startFrom(runtime, "caller", "ship"));
+        const record = await runtime.executions.get(first);
+
+        const restarted = await restart();
+        expect(await restarted.executions.get(first)).toEqual(record);
+        expect(record!.parent).toEqual({ executionId: "caller", stepKey: "ship" });
+        expect(await startFrom(restarted, "caller", "ship")).toEqual({
+          status: "accepted",
+          executionId: first,
+        });
+        expect(await startFrom(restarted, "caller", "ship", { workflowId: "ship-express" })).toMatchObject({
+          status: "rejected",
+          code: "START_REQUEST_MISMATCH",
+        });
+        expect(await claimedIds(restarted)).toEqual([first]);
       });
     });
 

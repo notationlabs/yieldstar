@@ -62,7 +62,17 @@ Every write that could conflict with the current holder's writes is fenced: `Hea
 
 Store mutations with a step receipt, store creation, and wake requests are not fenced. A receipt or a store identity already makes each take effect once, whichever holder commits it, and a stale wake causes at most one extra delivery that replay absorbs. Fencing does not make `step.run` exactly-once: a stale holder may run a function's external side effects before its step write is rejected.
 
-Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/store-conformance` exercises these rules; this repository runs it against both bundled runtimes.
+### Starts
+
+`start({ requestId, workflowId, params })` admits a target execution on behalf of the caller step named by `requestId` (`{ executionId, stepKey }`).
+
+- `start` MUST return `INVALID_START_PARAMETERS`, and admit nothing, for an empty workflow ID, for `params` that are not a plain object, and for `params` that `durableValueCodec` cannot encode.
+- A new start MUST admit the target and record the start request all-or-nothing. The target is `admitted` and due immediately, has the caller's `context`, and has `parent` set to `requestId`. The parent link is immutable; executions admitted with `admit` have none.
+- Target execution IDs MUST follow the admission uniqueness rules: two start requests never receive the same ID, and a target never reuses an ID in use.
+- A repeated request ID MUST return the first target's ID, without admitting another, when its workflow ID and canonical params match the recorded request, and `START_REQUEST_MISMATCH` otherwise, whatever the target's status. Missing params and `{}` do not match. Concurrent calls with one request ID MUST admit one target.
+- `start` is not fenced. Start-request records MUST survive a restart, and are kept until the caller is pruned.
+
+Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `prepareExecutionStart`, `matchStartRequest`, `createStartedExecution`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/store-conformance` exercises these rules; this repository runs it against both bundled runtimes.
 
 ## Connector surface
 
