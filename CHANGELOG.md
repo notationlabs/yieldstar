@@ -31,6 +31,7 @@
 - A delivery that ends without an outcome is redelivered after a redelivery delay that starts at 1 second and doubles with each consecutive unacknowledged delivery, up to 5 minutes, instead of after five minutes.
 - `StepDelay.resumeIn` and `WorkflowDelay.resumeIn` are renamed `wakeAt`. Delay and retry steps read their wake time from the runtime clock instead of `Date.now()`, and `WorkflowGeneratorParams` carries that `clock`.
 - `WorkflowGeneratorParams` carries an `executionClient`, which `WorkflowRunner` sets from its runtime's `executions`.
+- `WorkflowGeneratorParams` carries an `effectClient`, which `WorkflowRunner` sets from its runtime's `effects` (RFC 005). Code that builds `WorkflowGeneratorParams` by hand must pass one.
 
 ### Added
 
@@ -102,3 +103,7 @@
 - Retyped HTTP route handlers with standard `Request` and `Response` APIs while keeping the routes object compatible with `Bun.serve` and other Request-to-Response routers.
 - Replaced Bun-specific runtime utilities and targeted all package bundles at Node.
 - Replaced `Bun.randomUUIDv7()` with UUID v7 from the `uuid` package.
+- Added `step.effect(stepKey, { effectId, operation, input, lookup, perform, retryIn })` (RFC 005), which calls an external system under a stable effect ID. A new effect calls `perform`; a pending one calls `lookup` first and calls `perform` only on `not-found`. The result settles the effect before the step is recorded, so a replay after a crash reads it without an external call. An `unknown` lookup or a rejected callback watches the effect and suspends with `wakeAt = now + retryIn`, and a settlement elsewhere wakes the execution. `lookup` and `perform` are not called once the delivery's signal has aborted.
+- `step.effect` throws `WorkflowEffectError` (`INVALID_EFFECT_REQUEST` or `EFFECT_REQUEST_MISMATCH`) to workflow code, recorded so replay throws the same class and code. Client failures, malformed callback responses and client invariants record no step and reject the delivery with an `InfrastructureError` caused by `EffectDeliveryError` (`EFFECT_CLIENT_UNAVAILABLE`, `EFFECT_HANDLER_INVALID` or `EFFECT_RUNTIME_INVARIANT`). A conflicting settlement logs a warning and records the first result.
+- Added `EffectDeliveryError` and the `StepEffectWait` step response, recorded as an unfinished step, to `@yieldstar/core`. `WorkflowEffectError`, `EffectDeliveryError` and `EffectClientInvariantError` are registered error classes by default.
+- Re-exported `WorkflowEffectError`, `EffectDeliveryError`, `EffectClientInvariantError` and the `EffectRecord`, `WorkflowEffectErrorCode` and `EffectDeliveryErrorCode` types from `yieldstar`, and added the `EffectDescriptor` and `EffectLookup` types.

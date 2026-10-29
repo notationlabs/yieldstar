@@ -100,5 +100,5 @@ registerEffectClientConformance({
 });
 ```
 
-The suite covers the runtime adapter. RFC 003's workflow-driver and delivery cases for `step.start` are tested in the repository rather than here. RFC 002's dispatcher and worker cases, such as concurrency, releasing on a retry reply, a worker that exits without replying, and a worker whose runtime process dies, are properties of `ExecutionDispatcher` and the invoker rather than of an adapter; the repository tests them in `test/dispatcher.test.ts` and `test/worker-invoker.test.ts`.
+The suite covers the runtime adapter. RFC 003's workflow-driver and delivery cases for `step.start`, and RFC 005's for `step.effect`, are tested in the repository rather than here (`test/start.test.ts`, `test/effect.test.ts` and `test/effect-delivery.test.ts`). RFC 002's dispatcher and worker cases, such as concurrency, releasing on a retry reply, a worker that exits without replying, and a worker whose runtime process dies, are properties of `ExecutionDispatcher` and the invoker rather than of an adapter; the repository tests them in `test/dispatcher.test.ts` and `test/worker-invoker.test.ts`.
 
