@@ -20,7 +20,8 @@ type ConversationState = {
 
 const ConversationStore = defineStore(
   "conversation",
-  testSchema<ConversationState>()
+  testSchema<ConversationState>(),
+  { initial: () => ({ messages: [], status: "idle" }) }
 );
 
 const REPLAY_DELAY_MS = 10;
@@ -296,7 +297,9 @@ test("schema validation on create and update", async () => {
     return undefined;
   });
 
-  const StrictStore = defineStore("strict-store", strictStateSchema);
+  const StrictStore = defineStore("strict-store", strictStateSchema, {
+    initial: () => ({ count: 0 }),
+  });
 
   const testWorkflowInvalidCreate = workflow(async function* (step) {
     yield* step.store(StrictStore, {
@@ -658,7 +661,9 @@ test("claim validation failure leaves item unclaimed", async () => {
     return undefined;
   });
 
-  const StrictStore = defineStore("strict-take-store", strictStateSchema);
+  const StrictStore = defineStore("strict-take-store", strictStateSchema, {
+    initial: () => ({ messages: [] }),
+  });
 
   const testWorkflow = workflow(async function* (step) {
     const store = yield* step.store(StrictStore, {
@@ -739,10 +744,9 @@ test("store update converges exactly-once when the heap write is lost", async ()
   // the heap write: the store has already applied this execution's
   // "append-once" step (recorded in the applied-steps ledger), but the
   // workflow heap has no record of it, so replay cache-misses.
-  await sdk.storeClient.getOrCreateStore({
+  await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: "crash-gap",
-    initial: { messages: [], status: "idle" },
   });
   const original = await sdk.storeClient.updateStore({
     definition: ConversationStore,
@@ -800,10 +804,9 @@ test("updateFrom replay returns its committed result after the store advances", 
   });
 
   const sdk = createSdk({ workflow: testWorkflow });
-  originalSnapshot = await sdk.storeClient.getOrCreateStore({
+  originalSnapshot = await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: "conditional-crash-gap",
-    initial: { messages: [], status: "idle" },
   });
 
   // Simulate the conditional store commit succeeding before the workflow
@@ -862,10 +865,9 @@ test("deleteFrom replay returns its committed result without deleting a new inst
     return yield* store.deleteFrom("delete-store", snapshot);
   });
   const sdk = createSdk({ workflow: testWorkflow });
-  const snapshot = await sdk.storeClient.getOrCreateStore({
+  const snapshot = await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: storeId,
-    initial: { messages: [], status: "idle" },
   });
 
   // These earlier workflow steps were durably recorded before the deletion,
@@ -909,10 +911,9 @@ test("deleteFrom replay returns its committed result without deleting a new inst
   });
   expect(committed).toEqual({ deleted: true });
 
-  const recreated = await sdk.storeClient.getOrCreateStore({
+  const recreated = await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: storeId,
-    initial: { messages: [], status: "working" },
   });
   expect(recreated.instanceId).not.toBe(snapshot.instanceId);
 

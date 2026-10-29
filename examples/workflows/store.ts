@@ -15,7 +15,9 @@ const ConversationSchema = v.object({
   ),
 });
 
-const ConversationStore = defineStore("conversation", ConversationSchema);
+const ConversationStore = defineStore("conversation", ConversationSchema, {
+  initial: () => ({ messages: [] }),
+});
 
 export const storeWorkflow = workflow(async function* (
   step,

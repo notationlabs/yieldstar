@@ -192,7 +192,9 @@ test("delay and retry wake times read the runtime clock", async () => {
 // Outcomes
 
 test("a runtime call failing inside try/catch does not run the catch and is not acknowledged", async () => {
-  const Counter = defineStore("delivery-counter", testSchema<{ n: number }>());
+  const Counter = defineStore("delivery-counter", testSchema<{ n: number }>(), {
+    initial: () => ({ n: 0 }),
+  });
   let caught = false;
   const { runtime, deliver, sdk } = setup({
     guarded: workflow(async function* (step) {
@@ -229,7 +231,7 @@ test("store errors caused by workflow code still reach its catch", async () => {
       validate: (value: any) =>
         value.n > 0 ? { issues: [{ message: "too big" }] } : { value },
     },
-  });
+  }, { initial: () => ({ n: 0 }) });
   const { sdk, dispatcher } = setup({
     validated: workflow(async function* (step) {
       const counter = yield* step.store(Counter, { initial: { n: 0 } });

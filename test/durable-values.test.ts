@@ -580,7 +580,9 @@ describe("step errors", () => {
 
 describe("store values", () => {
   type Order = { lines: { sku: string }[]; note?: any };
-  const Orders = defineStore("durable-orders", testSchema<Order>());
+  const Orders = defineStore("durable-orders", testSchema<Order>(), {
+    initial: () => ({ lines: [] }),
+  });
 
   test("an update to a non-durable state throws INVALID_STEP_VALUE and leaves the store unchanged", async () => {
     const { first, replay, sdk } = await acrossReplay(async function* (step) {
@@ -644,13 +646,15 @@ describe("store values", () => {
 
   test("store state and store step results are typed as durable values", () => {
     // @ts-expect-error a Date is not a durable value
-    defineStore("dated", testSchema<{ at: Date }>());
+    defineStore("dated", testSchema<{ at: Date }>(), { initial: () => ({ at: new Date(0) }) });
     interface Cart {
       id: string;
       note?: string;
       lines: { sku: string; qty: number }[];
     }
-    const Carts = defineStore("carts", testSchema<Cart>());
+    const Carts = defineStore("carts", testSchema<Cart>(), {
+      initial: (id) => ({ id, lines: [] }),
+    });
     workflow(async function* (step) {
       // @ts-expect-error a Date is not a durable value
       yield* step.store({ name: "dated", schema: testSchema<{ at: Date }>() });

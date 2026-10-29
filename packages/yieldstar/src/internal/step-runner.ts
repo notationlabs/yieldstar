@@ -352,7 +352,7 @@ async function* storeStep<Schema extends StandardSchemaV1>(params: {
   WorkflowStore<StoreState<Schema>>,
   any
 > {
-  const { key, definition, id, event, initial } = params;
+  const { key, definition, id, event } = params;
 
   yield new StepKey(key);
 
@@ -365,23 +365,18 @@ async function* storeStep<Schema extends StandardSchemaV1>(params: {
 
   const created: RuntimeCallResult<unknown> = yield new StepRuntimeCall(
     ({ stores }) =>
-      stores.getOrCreateStore({
-        definition,
+      stores.getStore({
+        definition: {
+          ...definition,
+          initial: (storeId) => {
+            try {
+              return definition.initial(storeId);
+            } catch (err) {
+              throw new StepCallbackError(err);
+            }
+          },
+        },
         id,
-        initial:
-          typeof initial === "function"
-            ? async () => {
-                try {
-                  return await (
-                    initial as () =>
-                      | StoreState<Schema>
-                      | Promise<StoreState<Schema>>
-                  )();
-                } catch (err) {
-                  throw new StepCallbackError(err);
-                }
-              }
-            : initial,
       })
   );
 
