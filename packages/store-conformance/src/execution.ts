@@ -1436,6 +1436,29 @@ export function registerExecutionClientConformance({
         );
       });
 
+      it("stores scalar step values as the exact JSON written, so rewrites match and falsy values replay", async ({
+        runtime,
+      }) => {
+        await admit(runtime, "scalars");
+        const lease = await claimOne(runtime, "scalars");
+        for (const [stepKey, value] of [
+          ["zero", 0],
+          ["one", 1],
+          ["float", 1.5],
+          ["false", false],
+          ["null", null],
+          ["numeric-string", "1"],
+        ] as const) {
+          const record = {
+            stepResponseJson: JSON.stringify(value),
+            meta: { attempt: 0, done: true },
+          };
+          expect(await write(runtime, lease, stepKey, value)).toEqual(record);
+          expect(await write(runtime, lease, stepKey, value)).toEqual(record);
+          expect(await runtime.heap.readStep({ executionId: "scalars", stepKey })).toEqual(record);
+        }
+      });
+
       it("keeps an existing step record when the current holder writes a different value, and returns the recorded one", async ({
         runtime,
       }) => {

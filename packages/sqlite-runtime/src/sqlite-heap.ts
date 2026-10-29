@@ -38,7 +38,7 @@ export class SqliteHeapClient implements HeapClient {
       params.stepKey
     );
 
-    if (!result?.step_response) {
+    if (!result) {
       return null;
     }
 

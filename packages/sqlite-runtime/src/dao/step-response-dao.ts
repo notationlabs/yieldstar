@@ -23,7 +23,7 @@ export class StepResponsesDao {
         step_key TEXT NOT NULL,
         step_attempt INTEGER NOT NULL,
         step_done BOOL NOT NULL,
-        step_response JSONB,
+        step_response TEXT NOT NULL,
         PRIMARY KEY (execution_id, step_key, step_attempt)
       );
       CREATE INDEX IF NOT EXISTS idx_execution_step_attempt 
