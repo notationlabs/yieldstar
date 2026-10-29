@@ -184,11 +184,18 @@ export type DurableStoreSchema<Schema extends StandardSchemaV1> = IfDurable<
   >
 >;
 
-export function defineStore<Schema extends StandardSchemaV1>(
+/**
+ * `State` is inferred from the schema alone, so `initial` is checked against
+ * it and keeps literal types such as `status: "idle"`.
+ */
+export function defineStore<
+  Schema extends StandardSchemaV1<any, State>,
+  State = StoreState<Schema>,
+>(
   name: string,
-  schema: Schema & DurableStoreSchema<Schema>,
+  schema: Schema & StandardSchemaV1<any, State> & DurableStoreSchema<Schema>,
   options: {
-    initial: (id: string) => Durable<StoreState<Schema>>;
+    initial: (id: string) => NoInfer<Durable<State>>;
   }
 ): StoreDefinition<Schema> {
   return {
