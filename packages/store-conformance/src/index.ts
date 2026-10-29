@@ -7,6 +7,13 @@ import {
 } from "@yieldstar/core";
 import { describe, expect, test } from "vitest";
 
+export {
+  registerExecutionClientConformance,
+  type ExecutionConformanceHarness,
+  type ExecutionConformanceHarnessOptions,
+  type ExecutionConformanceOptions,
+} from "./execution";
+
 /**
  * A clean runtime under test. Store wakes are observed through its
  * `ExecutionClient`: a commit that satisfies a waiter makes the waiter's

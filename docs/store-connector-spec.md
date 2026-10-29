@@ -32,7 +32,7 @@ The `ExecutionClient` contract that wakes rely on:
 - `completed` and `failed` are immutable. A later acknowledgement MUST return the first terminal outcome, and a failed outcome's error MUST keep at least its `name` and `message`.
 - Records and pending wakes MUST survive a restart.
 
-Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `requestExecutionWake`, `claimExecution`, `acknowledgeExecution`, `nextClaimAt`) by applying each inside one atomic write. This repository's `test/execution-client-conformance.test.ts` exercises these rules against both bundled runtimes; it is not yet published as a package.
+Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `requestExecutionWake`, `claimExecution`, `acknowledgeExecution`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/store-conformance` exercises these rules; this repository runs it against both bundled runtimes.
 
 ## Connector surface
 

@@ -45,13 +45,23 @@ try {
   );
   await writeFile(
     join(directory, "store-conformance.test.ts"),
-    `import { registerStoreClientConformance } from "@yieldstar/store-conformance";
-import { MemoryStoreClient } from "@yieldstar/test-runtime";
+    `import {
+  registerExecutionClientConformance,
+  registerStoreClientConformance,
+} from "@yieldstar/store-conformance";
+import { MemoryRuntime } from "@yieldstar/test-runtime";
 
 registerStoreClientConformance({
   name: "installed-memory",
-  create(schedulerClient) {
-    return { client: new MemoryStoreClient({ schedulerClient }) };
+  create() {
+    return { runtime: new MemoryRuntime() };
+  },
+});
+
+registerExecutionClientConformance({
+  name: "installed-memory",
+  create(options) {
+    return { runtime: new MemoryRuntime(options) };
   },
 });
 `
@@ -60,6 +70,10 @@ registerStoreClientConformance({
     join(directory, "pnpm-workspace.yaml"),
     `allowBuilds:
   esbuild: true
+# test-runtime's packed manifest depends on @yieldstar/core by version, so pin
+# it to the local tarball rather than the published release.
+overrides:
+  "@yieldstar/core": "file:./yieldstar-core-0.5.0.tgz"
 minimumReleaseAgeExclude:
   - "@yieldstar/core@0.5.0"
   - "@yieldstar/store-conformance@0.5.0"

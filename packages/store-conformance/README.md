@@ -1,6 +1,6 @@
 # `@yieldstar/store-conformance`
 
-This package contains the runnable qualification suite for YieldStar store connectors. The normative protocol is documented in the [store connector conformance specification](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md).
+This package contains the runnable qualification suites for YieldStar runtimes: one for store connectors and one for the execution client. The normative protocol is documented in the [store connector conformance specification](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md).
 
 Install it with the test runner and core package:
 
@@ -49,3 +49,25 @@ Run the test with either supported runtime:
 ```sh
 vitest run store-conformance.test.ts
 ```
+
+## Execution client suite
+
+`registerExecutionClientConformance` checks a runtime's `ExecutionClient` against RFC 001: admission, wake merging, claims, acknowledgement and terminal outcomes. The suite passes a `clock` to `create`; build the runtime on it so the suite controls time. Return `restart` from a durable backend to enable the restart cases; without it they are skipped.
+
+```ts
+import { registerExecutionClientConformance } from "@yieldstar/store-conformance";
+import { MyRuntime } from "./my-runtime";
+
+registerExecutionClientConformance({
+  name: "my-runtime",
+  create({ clock }) {
+    const backend = createCleanBackend();
+    return {
+      runtime: new MyRuntime(backend, { clock }),
+      restart: () => new MyRuntime(backend.reopen(), { clock }),
+      dispose: () => backend.close(),
+    };
+  },
+});
+```
+

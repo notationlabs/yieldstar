@@ -22,6 +22,7 @@
 - Added `Runtime`, `ExecutionClient` (`admit`, `get`, `requestWake`, `claimDue`, `acknowledge`), `ExecutionRecord`, `ExecutionStatus`, `ExecutionOutcome`, `WorkflowRunOutcome`, `ExecutionAdmissionError`, and `InfrastructureError` to `@yieldstar/core`.
 - Added `SqliteRuntime(db, { clock? })` and `MemoryRuntime({ clock? })`, each exposing `clock`, `executions`, `heap`, and `stores`.
 - Added `ExecutionDispatcher(runtime, { invoker, logger, pollInterval?, keepAlive? })` with `start`, `stop`, `tick`, and `drain`. It is the only component that delivers executions, and it returns a finished execution's recorded outcome without running workflow code.
+- Added `registerExecutionClientConformance` to `@yieldstar/store-conformance`, covering RFC 001's `ExecutionClient` tables for any runtime.
 - Added `waitForExecutionOutcome` and the storage-neutral execution state machine (`prepareExecutionAdmission`, `claimExecution`, `acknowledgeExecution`, and related helpers) for runtime adapter authors.
 - Added `StoreValidationError` and `StoreNotFoundError`.
 - Re-exported `ExecutionAdmissionError` and the execution record types from `yieldstar`.
