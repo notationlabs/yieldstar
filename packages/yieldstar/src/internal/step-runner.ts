@@ -128,6 +128,9 @@ export function createStepRunner(params: {
     { executionId: string },
     StepResult | StepError
   > {
+    if (stepKey === "") {
+      throw new Error("step.start requires a non-empty step key");
+    }
     const request: ExecutionStartRequest = {
       requestId: { executionId: event.executionId, stepKey },
       workflowId: target.workflowId,

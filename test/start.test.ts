@@ -149,6 +149,25 @@ test("a start without params sends no params, which differs from an empty object
   expect(start.mock.calls[1]![0]).toHaveProperty("params", {});
 });
 
+test("an empty step key throws in workflow code without a client call", async () => {
+  const caught: string[] = [];
+  const { runtime, deliver } = setup({
+    unkeyed: workflow(async function* (step) {
+      try {
+        yield* step.start("", { workflowId: "target" });
+      } catch (err) {
+        caught.push((err as Error).message);
+      }
+    }),
+  });
+  const start = fakeStart();
+  vi.spyOn(runtime.executions, "start").mockImplementation(start);
+
+  await deliver("unkeyed");
+  expect(caught).toEqual(["step.start requires a non-empty step key"]);
+  expect(start).not.toHaveBeenCalled();
+});
+
 test("a rejected start is recorded and thrown as WorkflowStartError; replay restores the class and code without a client call", async () => {
   const caught: { isStartError: boolean; code: unknown; message: string }[] = [];
   const { runtime, deliver, advance, readStep } = setup({
