@@ -348,26 +348,25 @@ export type StepRunOptions<S extends StandardSchemaV1> = {
   schema: S;
 };
 
-// Each form has an async overload first: a sync overload would infer a
-// promise as the result. `NoInfer` keeps the durability check from widening or
-// narrowing the inferred result.
-function run<T>(
-  fn: () => Promise<T & Durable<NoInfer<T>>>
-): AsyncGenerator<StepResponse, T, StepResponse>;
+/**
+ * A step function whose result, or the value its promise resolves to, is a
+ * durable value. Checking the whole function type keeps the result's type as
+ * TypeScript infers it, and names the offending property in the error.
+ */
+export type DurableStepFn<F> = F extends () => infer R
+  ? () => R extends PromiseLike<infer U> ? PromiseLike<DurableUnion<U>> : DurableUnion<R>
+  : never;
 
-function run<T>(
-  fn: () => T & Durable<NoInfer<T>>
-): AsyncGenerator<StepResponse, T, StepResponse>;
+type DurableUnion<T> = T extends unknown ? Durable<T> : never;
 
-function run<T>(
+function run<F extends () => unknown>(
+  fn: F & DurableStepFn<F>
+): AsyncGenerator<StepResponse, Awaited<ReturnType<F>>, StepResponse>;
+
+function run<F extends () => unknown>(
   key: string,
-  fn: () => Promise<T & Durable<NoInfer<T>>>
-): AsyncGenerator<StepResponse, T, StepResponse>;
-
-function run<T>(
-  key: string,
-  fn: () => T & Durable<NoInfer<T>>
-): AsyncGenerator<StepResponse, T, StepResponse>;
+  fn: F & DurableStepFn<F>
+): AsyncGenerator<StepResponse, Awaited<ReturnType<F>>, StepResponse>;
 
 function run<S extends StandardSchemaV1>(
   fn: () => StepSchemaInput<S> | PromiseLike<StepSchemaInput<S>>,

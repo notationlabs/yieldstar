@@ -13,6 +13,7 @@ export { createWorkflow, workflow } from "./exports/workflow";
 export type { WorkflowFn } from "./exports/workflow";
 export { defineStore } from "./internal/step-runner";
 export type {
+  DurableStepFn,
   StepRunOptions,
   WorkflowStore,
 } from "./internal/step-runner";
