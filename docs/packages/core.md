@@ -43,7 +43,7 @@ const runner = new WorkflowRunner(runtime, { router, logger });
 | `options.router` | `WorkflowRouter` | Map of workflow IDs to generators |
 | `options.logger` | `Logger`         | Pino logger                       |
 
-`runner.run(event, logger?)` resolves with an outcome for everything workflow code can cause, and rejects only with an `InfrastructureError`:
+`runner.run(event, lease, logger?)` runs the delivery under `lease`, the `ExecutionLease` the dispatcher claimed. Every step write carries it. The method resolves with an outcome for everything workflow code can cause, and rejects only with an `InfrastructureError`:
 
 ```ts
 type WorkflowRunOutcome =
@@ -54,12 +54,17 @@ type WorkflowRunOutcome =
 
 An event whose `workflowId` has no registered workflow resolves as `failed`. A store wait resolves as `suspended` without `wakeAt`, because a store commit wakes it.
 
+Two step-write results also reject with an `InfrastructureError`, and both end the delivery without an outcome:
+
+- The write returns `lost` because another claim has taken over. The cause is a `LeaseLostError`.
+- The step is already recorded with a different value. The cause is a `StepConflictError`. The record stands, the delivery ends as a retry, and the next delivery replays the recorded value.
+
 ## `ExecutionRecord`
 
 The durable record of one execution. See [Execution records](../manual/workflows.md#execution-records).
 
 ```ts
-type ExecutionStatus = "admitted" | "suspended" | "completed" | "failed";
+type ExecutionStatus = "admitted" | "running" | "suspended" | "completed" | "failed";
 
 type ExecutionOutcome =
   | { status: "completed"; result: unknown }
@@ -74,12 +79,15 @@ interface ExecutionRecord {
   outcome?: ExecutionOutcome; // present only when completed or failed
   admittedAt: number;
   updatedAt: number;
+  unacknowledgedDeliveryCount: number; // consecutive deliveries that ended without an acknowledgement
 }
 ```
 
+`running` means the execution has a live lease. When the lease ends without a terminal acknowledgement, the status returns to `suspended` if an earlier delivery was acknowledged as suspended, and to `admitted` otherwise. Operators can read `unacknowledgedDeliveryCount` to find executions that keep failing.
+
 ## `ExecutionClient` (interface)
 
-Admits executions, holds their pending wakes, and records delivery outcomes.
+Admits executions, holds their pending wakes, leases due executions to dispatchers, and records delivery outcomes.
 
 ```ts
 interface ExecutionClient {
@@ -101,29 +109,51 @@ interface ExecutionClient {
     | { status: "rejected"; code: "EXECUTION_NOT_FOUND"; message: string }
   >;
 
-  claimDue(): Promise<ExecutionDelivery[]>; // ExecutionDelivery = { executionId, token }
+  claimDue(request: { limit: number; duration: number }): Promise<ExecutionLease[]>;
+
+  renew(request: {
+    lease: ExecutionLease;
+    duration: number;
+  }): Promise<{ status: "renewed"; lease: ExecutionLease } | LeaseLost>;
+
+  release(request: { lease: ExecutionLease }): Promise<{ status: "released" } | LeaseLost>;
 
   acknowledge(request: {
-    delivery: ExecutionDelivery;
+    lease: ExecutionLease;
     outcome: WorkflowRunOutcome;
-  }): Promise<{ status: "suspended" } | ExecutionOutcome>;
+  }): Promise<{ status: "suspended" } | ExecutionOutcome | LeaseLost>;
 }
+
+type ExecutionLease = { executionId: string; token: number; expiresAt: number };
+type LeaseLost = { status: "lost" };
 ```
 
 | Method        | Contract                                                                                                                                                                  |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `admit`       | Creates the record as `admitted` and makes it due now, all-or-nothing. Reserves a supplied ID unchanged or chooses one. Rejects a used ID with `EXECUTION_ID_CONFLICT`, and an event that cannot round-trip with `INVALID_EXECUTION_EVENT` |
 | `requestWake` | Carries wakes from outside a delivery, such as a store commit. Pending wakes merge into one due time: the earliest                                                       |
-| `claimDue`    | Returns executions due at or before the runtime clock, each at most once. A claimed execution is not returned again until it is acknowledged or the redelivery timeout passes |
-| `acknowledge` | Records the outcome and clears the wakes the delivery covered. The next due time is the earlier of the outcome's `wakeAt` and any wake requested after the claim. Terminal outcomes are immutable: a later acknowledgement returns the first one |
+| `claimDue`    | Leases up to `limit` executions that are due at or before the runtime clock and have no live lease, earliest due first. Each lease lasts `duration` ms and carries a token greater than every earlier token for that execution. An execution has at most one live lease at a time, across every client sharing the backend |
+| `renew`       | Extends the lease to `duration` ms from now. Returns `lost` once a higher token has been issued or the lease has ended. An expired lease that nobody has claimed again is still current |
+| `release`     | Ends the lease without an outcome. The delivery counts as unacknowledged, so the execution is claimable again after the redelivery delay |
+| `acknowledge` | Records the outcome and ends the lease, clearing the wakes the delivery covered. The next due time is the earlier of the outcome's `wakeAt` and any wake requested after the claim. A stale lease returns `lost` and changes nothing |
 
-`ExecutionAdmissionError` (`code: "EXECUTION_ID_CONFLICT" | "INVALID_EXECUTION_EVENT"`) is what the SDKs throw for a rejected admission. `InfrastructureError` wraps a runtime failure; `InfrastructureError.is(err)` recognises one even when several copies of `@yieldstar/core` are loaded.
+`renew`, `release`, `acknowledge` and `HeapClient.writeStep` are fenced: the adapter checks the lease's token and makes the write in one atomic step, and accepts the write only if the token is current. Clocks decide only when an execution becomes claimable again; tokens decide whose writes count. A holder that receives `lost` must stop, without acknowledging.
 
-Runtime adapter authors can import the storage-neutral state machine that `SqliteRuntime` and `MemoryRuntime` share: `prepareExecutionAdmission`, `createExecutionState`, `requestExecutionWake`, `claimExecution`, `acknowledgeExecution`, `nextClaimAt`, `isExecutionClaimable`, `toExecutionRecord`, and the event and outcome codecs. An adapter persists `ExecutionState` however it likes and applies each transition inside one atomic write. `REDELIVERY_TIMEOUT` is the fixed five-minute window an adapter passes to `claimExecution`.
+A lease ends without an acknowledgement when it is released, or when it expires and another claim takes over. Each such delivery adds one to `unacknowledgedDeliveryCount`, and any acknowledgement resets it to zero. While it is above zero, the execution waits a redelivery delay after the delivery ended before it can be claimed. The delay starts at 1 second and doubles with each unacknowledged delivery, up to 5 minutes (`redeliveryDelay(n)`).
+
+`ExecutionAdmissionError` (`code: "EXECUTION_ID_CONFLICT" | "INVALID_EXECUTION_EVENT"`) is what the SDKs throw for a rejected admission. `InfrastructureError` wraps a runtime failure; `InfrastructureError.is(err)` recognises one even when several copies of `@yieldstar/core` are loaded. `isLeaseLost(value)` recognises a `LeaseLost` result.
+
+Runtime adapter authors can import the storage-neutral state machine that `SqliteRuntime` and `MemoryRuntime` share: `prepareExecutionAdmission`, `createExecutionState`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`, `isExecutionClaimable`, `toExecutionRecord`, and the event and outcome codecs. An adapter persists `ExecutionState` however it likes and applies each transition inside one atomic write. A fenced heap write checks `isLeaseCurrent` in the same write. `DEFAULT_LEASE_DURATION` (30 seconds), `REDELIVERY_DELAY_BASE` and `REDELIVERY_DELAY_MAX` are the defaults.
 
 ## `ExecutionDispatcher`
 
-The only component that delivers executions. It claims due executions, reads each event from its record, passes it to `invoker.deliver`, and acknowledges the outcome. A terminal execution that is claimed again is acknowledged with its recorded outcome without running workflow code. A delivery that rejects is not acknowledged, so the runtime delivers it again after the redelivery timeout.
+The only component that delivers executions. It leases due executions, reads each event from its record, passes it to `invoker.deliver` with the lease, and acknowledges the outcome under that lease. A terminal execution that is claimed again returns its recorded outcome without running workflow code.
+
+- **Concurrency.** It runs up to `concurrency` deliveries at once, and claims new executions as slots free up without waiting for earlier deliveries to reach an outcome. Several dispatchers, in one process or several, can share one backend: each execution has at most one live lease.
+- **Renewal.** It renews each lease every `renewInterval` while the delivery runs, so a slow delivery keeps its lease. If a renewal returns `lost`, it stops renewing, aborts the delivery's `signal`, and neither acknowledges nor releases.
+- **Abandonment.** If an aborted delivery has not settled `abortGracePeriod` after the abort, the dispatcher stops waiting for it and frees its slot. This covers in-process invokers, which cannot stop a step function that is already running. The abandoned delivery may keep running, but its signal and stale token block every write it attempts, and its late outcome or rejection is logged and ignored. The worker invoker kills its worker on abort, so its deliveries settle at once.
+- **Rejections.** A delivery that rejects is not acknowledged. If the worker exited before replying (`WorkerExitedError`), the dispatcher leaves the lease to expire. Any other rejection is a retry reply, and the dispatcher releases the lease. Either way the execution is delivered again after the redelivery delay.
+- **Backend errors.** If reading the record, acknowledging or releasing throws, the dispatcher logs the error and leaves the lease to expire rather than trying to release it. This is intended: expiry is safe, it counts as an unacknowledged delivery, so the execution is delivered again after the redelivery delay, and the backend that just threw may be unreachable anyway.
 
 ```ts
 import { ExecutionDispatcher } from "@yieldstar/core";
@@ -132,18 +162,22 @@ const dispatcher = new ExecutionDispatcher(runtime, { invoker, logger });
 dispatcher.start();
 ```
 
-| Option         | Type              | Default | Description                                         |
-| -------------- | ----------------- | ------- | --------------------------------------------------- |
-| `invoker`      | `WorkflowInvoker` | –       | Runs each delivery                                  |
-| `logger`       | `Logger`          | –       | Pino logger                                         |
-| `pollInterval` | `number`          | `10`    | Milliseconds between claims when nothing was due    |
-| `keepAlive`    | `boolean`         | `true`  | Whether the polling timer keeps the process alive   |
+| Option          | Type              | Default              | Description                                         |
+| --------------- | ----------------- | -------------------- | --------------------------------------------------- |
+| `invoker`       | `WorkflowInvoker` | –                    | Runs each delivery                                  |
+| `logger`        | `Logger`          | –                    | Pino logger                                         |
+| `concurrency`   | `number`          | `10`                 | The maximum number of deliveries this dispatcher runs at once |
+| `pollInterval`  | `number`          | `10`                 | Milliseconds between claims when nothing was due    |
+| `keepAlive`     | `boolean`         | `true`               | Whether the dispatcher's timers keep the process alive |
+| `leaseDuration` | `number`          | `30_000`             | Milliseconds each lease lasts unless renewed        |
+| `renewInterval` | `number`          | `leaseDuration / 3`  | Milliseconds between renewals; must be shorter than `leaseDuration` |
+| `abortGracePeriod` | `number`       | `1_000`              | Milliseconds to wait for a delivery after aborting it before abandoning it and freeing its slot |
 
 | Method    | Behavior                                                                                   |
 | --------- | ------------------------------------------------------------------------------------------ |
 | `start()` | Starts the claim loop                                                                      |
 | `stop()`  | Stops claiming and waits for in-flight deliveries to settle                                |
-| `tick()`  | Claims once and starts those deliveries; resolves with the number claimed, without waiting |
+| `tick()`  | Claims once, up to the free slots, and starts those deliveries; resolves with the number claimed, without waiting |
 | `drain()` | Waits for every delivery started so far to settle                                          |
 
 ## `waitForExecutionOutcome`
@@ -161,13 +195,15 @@ abstract readStep(params: {
 }): Promise<HeapRecord | null>;
 
 abstract writeStep(params: {
-  executionId: string;
+  lease: ExecutionLease;
   stepKey: string;
   stepAttempt: number;
-  stepDone: boolean;
+  done: boolean;
   stepResponseJson: string;
-}): Promise<void>;
+}): Promise<HeapRecord | LeaseLost>;
 ```
+
+`readStep` returns the latest attempt. `writeStep` is fenced by `lease`: if the lease is not current, nothing changes and it returns `lost`. A `done` record deletes the step's store waiters in the same write. Records are keyed by execution, step key and attempt, and never change once written. Rewriting an existing record succeeds without changing it and resolves with the record as stored, so the caller can compare it with the value it wrote.
 
 ## `HeapRecord`
 
@@ -265,11 +301,14 @@ outside the connector's transaction and may run more than once.
 type WorkflowInvoker = {
   /** @deprecated The execution record is the source of truth for outcomes. */
   workflowEndEmitter: EventEmitter;
-  deliver(event: WorkflowEvent): Promise<WorkflowRunOutcome>;
+  deliver(
+    event: WorkflowEvent,
+    options: { lease: ExecutionLease; signal: AbortSignal }
+  ): Promise<WorkflowRunOutcome>;
 };
 ```
 
-`deliver` runs one delivery and resolves with its outcome. It rejects, without an outcome, when the delivery hits an infrastructure error or the worker exits before replying. The dispatcher still emits terminal outcomes on `workflowEndEmitter` as an in-process fast path; no guarantee depends on it.
+`deliver` runs one delivery under `lease` and resolves with its outcome. Once `signal` aborts, the delivery runs no more workflow code and makes no more fenced writes, and rejects with an `InfrastructureError` whose cause is the signal's reason. An invoker that can stop a running step function should, and reject at once: the worker invoker kills its worker. It rejects, without an outcome, when the delivery hits an infrastructure error or the worker exits before replying. A worker exit rejects with a `WorkerExitedError`, and the dispatcher leaves the lease to expire. The dispatcher treats every other rejection as a retry reply and releases the lease. The dispatcher still emits terminal outcomes on `workflowEndEmitter` as an in-process fast path; no guarantee depends on it.
 
 ## Step response classes
 

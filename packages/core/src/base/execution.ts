@@ -1,6 +1,11 @@
 import type { EventContext, EventParams } from "./event";
 
-export type ExecutionStatus = "admitted" | "suspended" | "completed" | "failed";
+export type ExecutionStatus =
+  | "admitted"
+  | "running"
+  | "suspended"
+  | "completed"
+  | "failed";
 
 export type ExecutionOutcome =
   | { status: "completed"; result: unknown }
@@ -11,6 +16,10 @@ export type ExecutionOutcome =
  * stores the event once; every delivery reads the event from here.
  *
  * - `admitted`: no delivery has been acknowledged yet.
+ * - `running`: the execution has a live lease. When the lease ends without a
+ *   terminal acknowledgement, the status returns to `suspended` if any
+ *   earlier delivery was acknowledged as suspended, and to `admitted`
+ *   otherwise.
  * - `suspended`: the latest acknowledged delivery suspended the workflow.
  * - `completed` and `failed` are terminal. `outcome` is present only in these
  *   states.
@@ -24,6 +33,8 @@ export interface ExecutionRecord {
   outcome?: ExecutionOutcome;
   admittedAt: number;
   updatedAt: number;
+  /** Consecutive deliveries that ended without an acknowledgement. */
+  unacknowledgedDeliveryCount: number;
 }
 
 export type ExecutionAdmissionErrorCode =
@@ -31,13 +42,33 @@ export type ExecutionAdmissionErrorCode =
   | "INVALID_EXECUTION_EVENT";
 
 /**
- * A claim on a due execution. `token` identifies the wakes the delivery
- * covers; its contents are opaque to callers.
+ * A lease on one execution, granted by `claimDue`. `token` is a fencing token:
+ * every claim of the execution issues a token greater than every earlier one,
+ * and only the current token's fenced writes are accepted. It also identifies
+ * the wakes the delivery covers. `expiresAt` is read from the runtime clock;
+ * clocks decide only when the execution becomes claimable again, never whose
+ * writes count.
  */
-export type ExecutionDelivery = {
+export type ExecutionLease = {
   executionId: string;
-  token: string;
+  token: number;
+  expiresAt: number;
 };
+
+/**
+ * Returned by a fenced write whose lease is no longer current: a higher token
+ * has been issued, or the lease has ended. The write changed nothing, and its
+ * holder must stop.
+ */
+export type LeaseLost = { status: "lost" };
+
+export function isLeaseLost(value: unknown): value is LeaseLost {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { status?: unknown }).status === "lost"
+  );
+}
 
 /**
  * What a delivery reports once its durable work is finished:
@@ -79,7 +110,14 @@ export type ExecutionWakeResult =
 
 export type ExecutionAcknowledgeResult =
   | { status: "suspended" }
-  | ExecutionOutcome;
+  | ExecutionOutcome
+  | LeaseLost;
+
+export type ExecutionRenewResult =
+  | { status: "renewed"; lease: ExecutionLease }
+  | LeaseLost;
+
+export type ExecutionReleaseResult = { status: "released" } | LeaseLost;
 
 export interface ExecutionClient {
   /**
@@ -100,20 +138,77 @@ export interface ExecutionClient {
   }): Promise<ExecutionWakeResult>;
 
   /**
-   * Claims executions whose due time is at or before the runtime clock. An
-   * execution appears at most once, and is not returned again until it is
-   * acknowledged or its redelivery timeout passes.
+   * Leases up to `limit` executions whose due time is at or before the runtime
+   * clock and that have no live lease, earliest due first. Each lease lasts
+   * `duration` milliseconds and carries a token greater than every earlier
+   * token for its execution. An execution has at most one live lease at a
+   * time, across every client sharing the backend.
    */
-  claimDue(): Promise<ExecutionDelivery[]>;
+  claimDue(request: {
+    limit: number;
+    duration: number;
+  }): Promise<ExecutionLease[]>;
 
   /**
-   * Records a delivery's outcome and clears the wakes it covered. Terminal
-   * outcomes are immutable: later acknowledgements return the first one.
+   * Extends a lease to `duration` milliseconds from now. Returns `lost` if a
+   * higher token has been issued or the lease has ended. An expired lease
+   * that has not been claimed again is still current.
+   */
+  renew(request: {
+    lease: ExecutionLease;
+    duration: number;
+  }): Promise<ExecutionRenewResult>;
+
+  /**
+   * Ends a lease without acknowledging an outcome. The delivery counts as
+   * unacknowledged, so the execution becomes claimable again only after the
+   * redelivery delay. Returns `lost` for a stale lease.
+   */
+  release(request: { lease: ExecutionLease }): Promise<ExecutionReleaseResult>;
+
+  /**
+   * Records a delivery's outcome and ends its lease, all-or-nothing. A
+   * `suspended` outcome clears the wakes the lease covered, leaving the
+   * execution due at the earliest of `wakeAt` and any wake requested since the
+   * claim. A stale lease returns `lost` and changes nothing.
    */
   acknowledge(request: {
-    delivery: ExecutionDelivery;
+    lease: ExecutionLease;
     outcome: WorkflowRunOutcome;
   }): Promise<ExecutionAcknowledgeResult>;
+}
+
+/**
+ * Thrown by the driver when a fenced write returns `lost`: another claim has
+ * taken over the execution, so this delivery must stop without acknowledging.
+ */
+export class LeaseLostError extends Error {
+  readonly executionId: string;
+
+  constructor(executionId: string) {
+    super(`Lease on execution "${executionId}" was lost`);
+    this.name = "LeaseLostError";
+    this.executionId = executionId;
+  }
+}
+
+/**
+ * Thrown by the driver when the current holder writes a step record that
+ * already exists with a different value. The recorded value stands: the
+ * delivery ends as a retry, and the next delivery replays the recorded value.
+ */
+export class StepConflictError extends Error {
+  readonly executionId: string;
+  readonly stepKey: string;
+
+  constructor(executionId: string, stepKey: string) {
+    super(
+      `Step "${stepKey}" of execution "${executionId}" is already recorded with a different value`
+    );
+    this.name = "StepConflictError";
+    this.executionId = executionId;
+    this.stepKey = stepKey;
+  }
 }
 
 export class ExecutionAdmissionError extends Error {

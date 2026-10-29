@@ -26,7 +26,7 @@ registerStoreClientConformance({
 });
 ```
 
-The base factory qualifies a process-local runtime. A backend that supports multiple clients should also return `createPeer`; a durable backend should additionally return `restart`. These capabilities activate the shared-client race and crash-recovery suites:
+The base factory qualifies a process-local runtime. A backend that supports multiple clients should also return `createPeer`, a runtime over the same backend as another process would open; a durable backend should additionally return `restart`. These capabilities activate the shared-client race and crash-recovery suites:
 
 ```ts
 create() {
@@ -52,7 +52,12 @@ vitest run store-conformance.test.ts
 
 ## Execution client suite
 
-`registerExecutionClientConformance` checks a runtime's `ExecutionClient` against RFC 001: admission, wake merging, claims, acknowledgement and terminal outcomes. The suite passes a `clock` to `create`; build the runtime on it so the suite controls time. Return `restart` from a durable backend to enable the restart cases; without it they are skipped.
+`registerExecutionClientConformance` checks a runtime's `ExecutionClient` and fenced heap writes against RFC 001 and RFC 002: admission, wake merging, claims, acknowledgement and terminal outcomes; leases, renewal, release and the `running` status; the redelivery delay and `unacknowledgedDeliveryCount`; and fencing of heap writes, renewals, releases and acknowledgements against a stale holder. The suite passes a `clock` to `create`; build every runtime on it so the suite controls time, including lease expiry.
+
+The harness has two optional capabilities:
+
+- `createPeer` returns another runtime over the same backend, as a second runtime process would. The suite uses it to race two clients for one execution and to reclaim an expired lease from a different client than the one that holds it. Return it whenever several processes can share the backend; without it those cases run both sides on `runtime`, which proves less.
+- `restart` reopens the same durable backend in a new runtime. It enables the restart cases; without it they are skipped.
 
 ```ts
 import { registerExecutionClientConformance } from "@yieldstar/store-conformance";
@@ -64,10 +69,14 @@ registerExecutionClientConformance({
     const backend = createCleanBackend();
     return {
       runtime: new MyRuntime(backend, { clock }),
+      // A separate connection, as another process would open.
+      createPeer: () => new MyRuntime(backend.connect(), { clock }),
       restart: () => new MyRuntime(backend.reopen(), { clock }),
       dispose: () => backend.close(),
     };
   },
 });
 ```
+
+The suite covers the runtime adapter. RFC 002's dispatcher and worker cases, such as concurrency, releasing on a retry reply, a worker that exits without replying, and a worker whose runtime process dies, are properties of `ExecutionDispatcher` and the invoker rather than of an adapter; the repository tests them in `test/dispatcher.test.ts` and `test/worker-invoker.test.ts`.
 

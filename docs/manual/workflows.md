@@ -80,12 +80,14 @@ interface ExecutionRecord {
   outcome?: { status: "completed"; result: unknown } | { status: "failed"; error: Error };
   admittedAt: number;
   updatedAt: number;
+  unacknowledgedDeliveryCount: number; // consecutive deliveries that ended without an outcome
 }
 ```
 
 | Status      | Meaning                                                              |
 | ----------- | -------------------------------------------------------------------- |
 | `admitted`  | No delivery has been acknowledged yet                                |
+| `running`   | A dispatcher holds a live lease on the execution and is delivering it |
 | `suspended` | The latest delivery paused on a delay, retry or store wait           |
 | `completed` | The workflow returned. `outcome.result` holds the return value       |
 | `failed`    | Workflow code threw an uncaught error. `outcome.error` holds it      |
@@ -94,7 +96,7 @@ interface ExecutionRecord {
 
 **Execution IDs are unique for the lifetime of the runtime.** A trigger may supply its own `executionId`, and the runtime reserves it unchanged; otherwise the runtime chooses one. Reusing an ID that was ever admitted, including one whose execution failed, is rejected with `EXECUTION_ID_CONFLICT`. This matters because the ID is how a replay finds its own recorded steps, so a reused ID would replay another execution's results.
 
-A record changes status only when a delivery is acknowledged with an outcome. If a delivery hits an infrastructure error (the database throws, the worker exits), the record keeps its status and the execution is delivered again after the runtime's redelivery timeout. Such errors never reach workflow code; see [Steps](./steps.md#errors).
+A record is `running` while a dispatcher holds a lease on it, and otherwise changes status only when a delivery is acknowledged with an outcome. If a delivery hits an infrastructure error (the database throws, the worker exits), it ends without an outcome: the record returns to its earlier status, `unacknowledgedDeliveryCount` goes up by one, and the execution is delivered again after a redelivery delay. The delay starts at 1 second and doubles with each consecutive unacknowledged delivery, and any acknowledgement resets the count. Such errors never reach workflow code; see [Steps](./steps.md#errors).
 
 ## Registering workflows
 

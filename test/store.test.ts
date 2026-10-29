@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import type { StandardSchemaV1 } from "yieldstar";
 import { testSchema } from "@yieldstar/test-utils";
+import { DEFAULT_LEASE_DURATION, waitForExecutionOutcome } from "@yieldstar/core";
 import { createSdk } from "./sdk";
 import { defineStore, workflow } from "yieldstar";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -27,13 +28,13 @@ const REPLAY_DELAY_MS = 10;
 /**
  * Runs an execution across a `step.delay` replay boundary deterministically.
  *
- * A delay only suspends the workflow if it hasn't already elapsed when the
- * workflow checks it, which a tiny real-time delay can't guarantee. So Date is
- * frozen (an hour in the past) until the execution has cached its delay step
- * and suspended; `beforeReplay` then runs while the execution is parked (with a
- * frozen clock the wake-up task stays invisible to the memory task queue), and
- * finally the real clock is restored, so the delay has definitely elapsed when
- * the wake-up replays the workflow.
+ * A tiny real-time delay may already have elapsed when the workflow checks it,
+ * so the workflow wouldn't suspend. Instead:
+ * 1. Freeze Date an hour in the past until the execution records its delay
+ *    step and suspends. The wake stays in the future, so nothing claims it.
+ * 2. Run `beforeReplay` while the execution is parked.
+ * 3. Restore the real clock, so the delay has elapsed when the wake replays
+ *    the workflow.
  */
 async function acrossReplayBoundary<T>(params: {
   sdk: ReturnType<typeof createSdk>;
@@ -867,22 +868,33 @@ test("deleteFrom replay returns its committed result without deleting a new inst
     initial: { messages: [], status: "idle" },
   });
 
-  // These earlier workflow steps were durably recorded before the deletion.
-  await sdk.heapClient.writeStep({
+  // These earlier workflow steps were durably recorded before the deletion,
+  // by a delivery that held the execution's lease.
+  await sdk.runtime.executions.admit({
+    workflowId: "workflow",
     executionId,
+    params: undefined,
+    context: new Map(),
+  });
+  const [lease] = await sdk.runtime.executions.claimDue({
+    limit: 1,
+    duration: DEFAULT_LEASE_DURATION,
+  });
+  await sdk.heapClient.writeStep({
+    lease,
     stepKey: `store:${ConversationStore.name}:${storeId}`,
     stepAttempt: 0,
-    stepDone: true,
+    done: true,
     stepResponseJson: JSON.stringify({
       type: "step-result",
       result: { storeName: ConversationStore.name, storeId },
     }),
   });
   await sdk.heapClient.writeStep({
-    executionId,
+    lease,
     stepKey: "delete-snapshot",
     stepAttempt: 0,
-    stepDone: true,
+    done: true,
     stepResponseJson: JSON.stringify({
       type: "step-result",
       result: snapshot,
@@ -904,11 +916,16 @@ test("deleteFrom replay returns its committed result without deleting a new inst
   });
   expect(recreated.instanceId).not.toBe(snapshot.instanceId);
 
-  const replayed = await sdk.triggerAndWait({
-    workflowId: "workflow",
-    executionId,
+  // End that delivery before it records the deletion; the next one replays.
+  await sdk.runtime.executions.acknowledge({
+    lease,
+    outcome: { status: "suspended", wakeAt: sdk.runtime.clock() },
   });
-  expect(replayed).toEqual({ deleted: true });
+  sdk.dispatcher.start();
+  const replayed = await waitForExecutionOutcome(sdk.runtime.executions, executionId, {
+    pollInterval: 1,
+  });
+  expect(replayed).toEqual({ status: "completed", result: { deleted: true } });
   expect(await sdk.storeClient.getStore({
     definition: ConversationStore,
     id: storeId,

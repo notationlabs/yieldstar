@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { EventParams, WorkflowEvent, EventContext } from "./event";
+import type { ExecutionLease } from "./execution";
 import { HeapClient } from "./heap";
 import { StoreClient } from "./store";
 import { StepResponse, WorkflowResult } from "./step";
@@ -9,6 +10,13 @@ export type WorkflowGeneratorParams<
   Context extends EventContext
 > = {
   event: WorkflowEvent<Params, Context>;
+  /** Every heap step write is fenced by this lease. */
+  lease: ExecutionLease;
+  /**
+   * Aborted when the delivery must stop. The driver checks it before each
+   * step function and each fenced write.
+   */
+  signal: AbortSignal;
   heapClient: HeapClient;
   storeClient: StoreClient;
   /** The runtime clock. Delay and retry wake times are read from it. */

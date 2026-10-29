@@ -2,19 +2,23 @@ import {
   acknowledgeExecution,
   claimExecution,
   createExecutionState,
-  REDELIVERY_TIMEOUT,
   executionIdConflict,
   executionNotFound,
   isExecutionClaimable,
   prepareExecutionAdmission,
+  releaseExecutionLease,
+  renewExecutionLease,
   requestExecutionWake,
   toExecutionRecord,
   type ExecutionAcknowledgeResult,
   type ExecutionAdmissionRequest,
   type ExecutionAdmissionResult,
   type ExecutionClient,
-  type ExecutionDelivery,
+  type ExecutionLease,
   type ExecutionRecord,
+  type ExecutionReleaseResult,
+  type ExecutionRenewResult,
+  type ExecutionState,
   type ExecutionWakeResult,
   type WorkflowRunOutcome,
 } from "@yieldstar/core";
@@ -75,7 +79,7 @@ export class SqliteExecutionClient implements ExecutionClient {
 
   async get(executionId: string): Promise<ExecutionRecord | undefined> {
     const state = this.executionsDao.getState(executionId);
-    return state ? toExecutionRecord(state) : undefined;
+    return state ? toExecutionRecord(state, this.clock()) : undefined;
   }
 
   async requestWake(request: {
@@ -94,51 +98,87 @@ export class SqliteExecutionClient implements ExecutionClient {
     });
   }
 
-  async claimDue(): Promise<ExecutionDelivery[]> {
+  async claimDue(request: {
+    limit: number;
+    duration: number;
+  }): Promise<ExecutionLease[]> {
+    if (request.limit <= 0) return [];
+    // The IMMEDIATE transaction holds the write lock, so concurrent claims from
+    // any process sharing the file see each other's leases.
     return runTransaction(this.db, () => {
       const now = this.clock();
-      const deliveries: ExecutionDelivery[] = [];
+      const leases: ExecutionLease[] = [];
 
-      for (const executionId of this.executionsDao.getClaimableIds(now)) {
+      for (const executionId of this.executionsDao.getClaimableIds(
+        now,
+        request.limit
+      )) {
         const state = this.executionsDao.getState(executionId);
         if (!state || !isExecutionClaimable(state, now)) continue;
 
-        const token = crypto.randomUUID();
-        this.executionsDao.updateState(
-          claimExecution(state, {
-            now,
-            token,
-            redeliveryTimeout: REDELIVERY_TIMEOUT,
-          })
-        );
-        deliveries.push({ executionId, token });
+        const claimed = claimExecution(state, {
+          now,
+          duration: request.duration,
+        });
+        this.executionsDao.updateState(claimed.state);
+        leases.push(claimed.lease);
       }
 
-      return deliveries;
+      return leases;
     });
   }
 
+  async renew(request: {
+    lease: ExecutionLease;
+    duration: number;
+  }): Promise<ExecutionRenewResult> {
+    return this.transition(request.lease, (state) =>
+      renewExecutionLease(state, {
+        lease: request.lease,
+        duration: request.duration,
+        now: this.clock(),
+      })
+    );
+  }
+
+  async release(request: {
+    lease: ExecutionLease;
+  }): Promise<ExecutionReleaseResult> {
+    return this.transition(request.lease, (state) =>
+      releaseExecutionLease(state, { lease: request.lease, now: this.clock() })
+    );
+  }
+
   async acknowledge(request: {
-    delivery: ExecutionDelivery;
+    lease: ExecutionLease;
     outcome: WorkflowRunOutcome;
   }): Promise<ExecutionAcknowledgeResult> {
-    return runTransaction(this.db, () => {
-      const executionId = request.delivery.executionId;
-      const state = this.executionsDao.getState(executionId);
-      if (!state) {
-        throw new Error(executionNotFound(executionId).message);
-      }
-
-      const acknowledged = acknowledgeExecution(state, {
-        delivery: request.delivery,
+    return this.transition(request.lease, (state) =>
+      acknowledgeExecution(state, {
+        lease: request.lease,
         outcome: request.outcome,
         now: this.clock(),
-      });
-      if (acknowledged.state !== state) {
-        this.executionsDao.updateState(acknowledged.state);
-      }
-      return acknowledged.result;
-    });
+      })
+    );
+  }
+
+  /**
+   * Applies a fenced transition in one transaction. The transition checks the
+   * lease against the stored token, so the check and the write are atomic.
+   */
+  private transition<R>(
+    lease: ExecutionLease,
+    fn: (state: ExecutionState) => { state: ExecutionState; result: R }
+  ): Promise<R | { status: "lost" }> {
+    return Promise.resolve(
+      runTransaction(this.db, () => {
+        const state = this.executionsDao.getState(lease.executionId);
+        if (!state) return { status: "lost" as const };
+        const next = fn(state);
+        if (next.state !== state) this.executionsDao.updateState(next.state);
+        return next.result;
+      })
+    );
   }
 
   /**

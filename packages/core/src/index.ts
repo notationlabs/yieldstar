@@ -1,5 +1,6 @@
 export type { HeapClient, HeapRecord } from "./base/heap";
-export type { WorkflowInvoker } from "./base/invoker";
+export type { DeliveryOptions, WorkflowInvoker } from "./base/invoker";
+export { WorkerExitedError } from "./base/invoker";
 export type { RuntimeOptions } from "./base/runtime";
 export { Runtime } from "./base/runtime";
 export type {
@@ -8,21 +9,29 @@ export type {
   ExecutionAdmissionRequest,
   ExecutionAdmissionResult,
   ExecutionClient,
-  ExecutionDelivery,
+  ExecutionLease,
   ExecutionOutcome,
   ExecutionRecord,
+  ExecutionReleaseResult,
+  ExecutionRenewResult,
   ExecutionStatus,
   ExecutionWakeResult,
+  LeaseLost,
   WorkflowRunOutcome,
 } from "./base/execution";
 export {
   ExecutionAdmissionError,
   InfrastructureError,
+  LeaseLostError,
+  StepConflictError,
+  isLeaseLost,
   isTerminalExecutionStatus,
 } from "./base/execution";
 export type { ExecutionState } from "./lib/execution-state";
 export {
-  REDELIVERY_TIMEOUT,
+  DEFAULT_LEASE_DURATION,
+  REDELIVERY_DELAY_BASE,
+  REDELIVERY_DELAY_MAX,
   ExecutionEventEncodingError,
   acknowledgeExecution,
   claimExecution,
@@ -33,13 +42,24 @@ export {
   encodeExecutionOutcome,
   executionIdConflict,
   executionNotFound,
+  executionStatusAt,
   isExecutionClaimable,
+  isLeaseCurrent,
   nextClaimAt,
   prepareExecutionAdmission,
+  redeliveryDelay,
+  releaseExecutionLease,
+  renewExecutionLease,
   requestExecutionWake,
   toExecutionRecord,
+  unacknowledgedDeliveryCountAt,
 } from "./lib/execution-state";
-export { ExecutionDispatcher } from "./lib/execution-dispatcher";
+export type { DispatcherOptions } from "./lib/execution-dispatcher";
+export {
+  DEFAULT_ABORT_GRACE_PERIOD,
+  DEFAULT_DISPATCHER_CONCURRENCY,
+  ExecutionDispatcher,
+} from "./lib/execution-dispatcher";
 export { waitForExecutionOutcome } from "./lib/wait-for-outcome";
 export type { StandardSchemaV1 } from "@standard-schema/spec";
 export type {

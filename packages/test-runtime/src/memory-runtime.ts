@@ -16,7 +16,7 @@ export class MemoryRuntime extends Runtime {
     this.executions = new MemoryExecutionClient({ clock: this.clock });
     this.stores = new MemoryStoreClient({ executions: this.executions });
     this.heap = new MemoryHeapClient({
-      // A waiter is deleted in the same synchronous write as its step's result.
+      isLeaseCurrent: (lease) => this.executions.isLeaseCurrent(lease),
       onStepDone: (step) => this.stores.deleteWaitersForStep(step),
     });
   }

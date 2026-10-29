@@ -5,7 +5,7 @@ The resident-process runtime keeps coordination inside the application that owns
 The long-lived process owns four pieces:
 
 - A `SqliteRuntime` over a `SqliteDriver` connection selected through the Bun or Node connector.
-- An `ExecutionDispatcher` that claims due executions, delivers each through the invoker, and acknowledges the outcome on the execution record.
+- An `ExecutionDispatcher` that leases due executions, delivers up to 10 at once through the invoker, renews each lease while its delivery runs, and acknowledges the outcome on the execution record.
 - A `WorkflowInvoker` that forks a fresh child process for each delivery.
 - A local SDK or HTTP routes that admit executions and read their outcomes from the record.
 
@@ -32,11 +32,18 @@ For Node, change the import to `@yieldstar/sqlite-runtime/node`. No other runtim
 | A trigger reuses an execution ID                     | Admission is rejected with `EXECUTION_ID_CONFLICT`; the HTTP route returns `409`             |
 | A timer and a store commit wake the same execution   | The wakes merge on the record; the execution is delivered once, at the earlier time          |
 | A finished execution is claimed again                | The dispatcher returns the recorded outcome without forking a worker                         |
-| The worker throws an infrastructure error or exits   | The delivery is not acknowledged, and the execution is delivered again after the five-minute redelivery timeout |
+| A delivery runs for longer than its lease            | The dispatcher renews the 30-second lease every 10 seconds, so a slow delivery keeps it      |
+| The worker reports an infrastructure error           | The lease is released unacknowledged, and the execution is delivered again after the redelivery delay (1 second, doubling with each unacknowledged delivery) |
+| The worker exits before replying                     | The lease is left to expire, and the execution is delivered again after the redelivery delay |
+| The app process dies during a delivery               | The worker exits as soon as its IPC channel closes; the lease expires and another dispatcher can claim the execution |
+| A renewal finds another claim has taken over         | The dispatcher aborts the delivery and the worker invoker kills the worker, even mid-step; the slot frees at once, and the lease is neither released nor acknowledged |
+| A paused worker resumes after another claim          | Its step writes and acknowledgement carry a stale token and are rejected                     |
 | The app restarts                                     | `admitted` and `suspended` records and their pending wakes are still in the file, and the next dispatcher delivers them |
 | A store commit lands                                 | The wakes for the waiters it satisfies commit in the same transaction                        |
 
-**Keep deliveries shorter than the five-minute redelivery timeout.** The runtime cannot tell a slow delivery from a lost one, so a delivery that runs past the timeout is claimed and delivered again while the first is still running. The timeout is fixed; execution leases (RFC 002) will replace it.
+**Leases decide when another dispatcher may take over; tokens decide whose writes count.** Each delivery runs under a lease that the dispatcher renews while the delivery runs. If the dispatcher stops renewing, because its process died or froze, the lease expires and another dispatcher can claim the execution with a higher token. Every step write and acknowledgement checks the token in the same SQLite transaction, so a worker that falls behind can no longer record anything. If a renewal finds that another claim has taken over, the dispatcher aborts the delivery's `signal`, and the worker invoker kills the worker, so even a step function that never returns stops at once. Several app processes can therefore share one database file, each running a dispatcher. A dispatcher runs up to `concurrency` deliveries at once (10 by default).
+
+Fencing does not make `step.run` exactly-once. A frozen worker may still run a step's side effects before its write is rejected, and a step function that is already running when the lease is lost may have done part of its work before the worker is killed.
 
 ## Connector choice
 

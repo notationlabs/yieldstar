@@ -1,10 +1,13 @@
 import type { EventContext, EventParams } from "../base/event";
 import type {
   ExecutionAcknowledgeResult,
-  ExecutionDelivery,
+  ExecutionLease,
   ExecutionOutcome,
   ExecutionRecord,
+  ExecutionReleaseResult,
+  ExecutionRenewResult,
   ExecutionStatus,
+  LeaseLost,
   WorkflowRunOutcome,
 } from "../base/execution";
 import { isTerminalExecutionStatus } from "../base/execution";
@@ -14,35 +17,69 @@ import { ReadOnlyMap } from "../utils/map";
  * Storage-neutral state of one execution record, with the event and outcome
  * already encoded. Runtime adapters persist these fields however they like and
  * apply the transitions below inside one atomic write, so every adapter keeps
- * the same wake and acknowledgement semantics.
+ * the same lease, wake and acknowledgement semantics.
  *
- * Pending wakes are split in two:
- * - `dueAt` merges wakes not covered by a claimed delivery;
- * - `claimedDueAt` holds the wakes a claimed delivery covers. They stay
- *   pending until that delivery is acknowledged, so an unacknowledged
- *   delivery is redelivered once `claimExpiresAt` passes.
+ * Lease transitions (claim, renew, release) do not change `updatedAt`.
  */
 export type ExecutionState = {
   executionId: string;
   workflowId: string;
   params: string;
   context: string;
-  status: ExecutionStatus;
+  /**
+   * The status the execution rests in when it has no live lease. The record's
+   * `running` status is derived from the lease and the clock by
+   * `executionStatusAt`, so an expired lease reads as ended without a write.
+   */
+  status: Exclude<ExecutionStatus, "running">;
   outcome: string | null;
   admittedAt: number;
   updatedAt: number;
+  /** The earliest of the wakes not covered by a lease. */
   dueAt: number | null;
-  claimToken: string | null;
+  /**
+   * The wakes the current lease covers. They stay pending until that lease is
+   * acknowledged, so a lease that is released or expires leaves them due.
+   */
   claimedDueAt: number | null;
-  claimExpiresAt: number | null;
+  /** The highest token issued for this execution (0 before the first claim). */
+  leaseToken: number;
+  /**
+   * Non-null while the lease with `leaseToken` is held, that is, claimed and
+   * not yet released or acknowledged. A held lease stays current after it
+   * expires, until a later claim issues a higher token.
+   */
+  leaseExpiresAt: number | null;
+  /**
+   * Consecutive leases that ended by release or by expiry and a later claim.
+   * It does not include a held lease that has expired;
+   * `unacknowledgedDeliveryCountAt` adds that one.
+   */
+  unacknowledgedDeliveryCount: number;
+  /**
+   * When a released execution may be claimed again. A held lease's delay is
+   * measured from `leaseExpiresAt` instead.
+   */
+  redeliverAt: number | null;
 };
 
+export const DEFAULT_LEASE_DURATION = 30_000;
+
+/** The redelivery delay after one unacknowledged delivery. */
+export const REDELIVERY_DELAY_BASE = 1_000;
+
+export const REDELIVERY_DELAY_MAX = 300_000;
+
 /**
- * How long a claimed delivery may go unacknowledged before it is delivered
- * again: five minutes, matching the former task queue's visibility window.
- * Fixed until RFC 002's leases replace it.
+ * How long an execution waits after a delivery ends unacknowledged before it
+ * can be claimed again. Starts at `REDELIVERY_DELAY_BASE` and doubles with
+ * each consecutive unacknowledged delivery, up to `REDELIVERY_DELAY_MAX`.
  */
-export const REDELIVERY_TIMEOUT = 300_000;
+export function redeliveryDelay(unacknowledgedDeliveryCount: number): number {
+  if (unacknowledgedDeliveryCount <= 0) return 0;
+  const exponent = Math.min(unacknowledgedDeliveryCount - 1, 30);
+  return Math.min(REDELIVERY_DELAY_BASE * 2 ** exponent, REDELIVERY_DELAY_MAX);
+}
 
 export class ExecutionEventEncodingError extends Error {
   constructor(message: string) {
@@ -115,7 +152,6 @@ export function decodeExecutionOutcome(encoded: string): ExecutionOutcome {
   return { status: "failed", error: decodeError(parsed.error) };
 }
 
-/** Keeps at least `name` and `message`, plus `stack` and a string `code`. */
 function encodeError(error: unknown) {
   const err = error instanceof Error ? error : new Error(String(error));
   const code = (err as { code?: unknown }).code;
@@ -157,46 +193,103 @@ export function createExecutionState(params: {
     outcome: null,
     admittedAt: params.now,
     updatedAt: params.now,
-    // Admission makes the execution due immediately.
     dueAt: params.now,
-    claimToken: null,
     claimedDueAt: null,
-    claimExpiresAt: null,
+    leaseToken: 0,
+    leaseExpiresAt: null,
+    unacknowledgedDeliveryCount: 0,
+    redeliverAt: null,
   };
 }
 
-export function toExecutionRecord(state: ExecutionState): ExecutionRecord {
+/** Whether a lease is held and has expired. Such a lease is still current. */
+function hasExpiredLease(state: ExecutionState, now: number) {
+  return state.leaseExpiresAt !== null && state.leaseExpiresAt <= now;
+}
+
+/** The record's status at `now`: `running` while a lease is live. */
+export function executionStatusAt(
+  state: ExecutionState,
+  now: number
+): ExecutionStatus {
+  if (state.leaseExpiresAt !== null && state.leaseExpiresAt > now) {
+    return "running";
+  }
+  return state.status;
+}
+
+/**
+ * Consecutive unacknowledged deliveries at `now`, counting a held lease that
+ * has expired as ended.
+ */
+export function unacknowledgedDeliveryCountAt(state: ExecutionState, now: number) {
+  return state.unacknowledgedDeliveryCount + (hasExpiredLease(state, now) ? 1 : 0);
+}
+
+export function toExecutionRecord(
+  state: ExecutionState,
+  now: number
+): ExecutionRecord {
   const event = decodeExecutionEvent(state);
   return {
     executionId: state.executionId,
     workflowId: state.workflowId,
     params: event.params,
     context: event.context,
-    status: state.status,
+    status: executionStatusAt(state, now),
     ...(state.outcome !== null
       ? { outcome: decodeExecutionOutcome(state.outcome) }
       : {}),
     admittedAt: state.admittedAt,
     updatedAt: state.updatedAt,
+    unacknowledgedDeliveryCount: unacknowledgedDeliveryCountAt(state, now),
   };
 }
 
 /**
  * The earliest time `claimDue` may return this execution, or null when it has
- * nothing pending. Adapters can index this value to find due executions.
+ * nothing pending. It depends only on the state, not on the clock, so
+ * adapters can persist and index it to find due executions.
  */
 export function nextClaimAt(state: ExecutionState): number | null {
   if (isTerminalExecutionStatus(state.status)) return null;
-  // A claimed delivery covers wakes that were due when it was claimed, so it
-  // becomes claimable again exactly when its redelivery timeout passes.
-  if (state.claimToken !== null) return state.claimExpiresAt;
-  return state.dueAt;
+  if (state.leaseExpiresAt !== null) {
+    // A held lease covers the wakes that were due when it was claimed. Once it
+    // expires, it counts as unacknowledged, and the redelivery delay runs
+    // from its expiry.
+    const due = earliest(state.dueAt, state.claimedDueAt);
+    if (due === null) return null;
+    return Math.max(
+      due,
+      state.leaseExpiresAt + redeliveryDelay(state.unacknowledgedDeliveryCount + 1)
+    );
+  }
+  if (state.dueAt === null) return null;
+  return state.redeliverAt === null
+    ? state.dueAt
+    : Math.max(state.dueAt, state.redeliverAt);
 }
 
 export function isExecutionClaimable(state: ExecutionState, now: number) {
   const at = nextClaimAt(state);
   return at !== null && at <= now;
 }
+
+/**
+ * Whether `lease` is the execution's current lease: its token is the highest
+ * issued and the lease has not been released or acknowledged. Expiry alone
+ * does not end it. Adapters check this in the same atomic write as every
+ * fenced write.
+ */
+export function isLeaseCurrent(state: ExecutionState, lease: ExecutionLease) {
+  return (
+    state.executionId === lease.executionId &&
+    state.leaseExpiresAt !== null &&
+    state.leaseToken === lease.token
+  );
+}
+
+const LOST: LeaseLost = { status: "lost" };
 
 /** Returns null when the execution is terminal and the wake is ignored. */
 export function requestExecutionWake(
@@ -208,33 +301,95 @@ export function requestExecutionWake(
   return { ...state, dueAt: earliest(state.dueAt, wakeAt), updatedAt: now };
 }
 
+/**
+ * Leases a claimable execution with the next token. Adapters check
+ * `isExecutionClaimable` first, in the same atomic write.
+ */
 export function claimExecution(
   state: ExecutionState,
-  params: { now: number; token: string; redeliveryTimeout: number }
-): ExecutionState {
+  params: { now: number; duration: number }
+): { state: ExecutionState; lease: ExecutionLease } {
+  const lease: ExecutionLease = {
+    executionId: state.executionId,
+    token: state.leaseToken + 1,
+    expiresAt: params.now + params.duration,
+  };
   return {
-    ...state,
-    // Redelivering an expired claim covers its wakes plus any merged since.
-    claimedDueAt: earliest(state.dueAt, state.claimedDueAt),
-    dueAt: null,
-    claimToken: params.token,
-    claimExpiresAt: params.now + params.redeliveryTimeout,
+    state: {
+      ...state,
+      // Claiming over an expired lease ends it unacknowledged.
+      unacknowledgedDeliveryCount:
+        state.unacknowledgedDeliveryCount + (state.leaseExpiresAt !== null ? 1 : 0),
+      // The lease covers the wakes due now, plus any an expired lease covered.
+      claimedDueAt: earliest(state.dueAt, state.claimedDueAt),
+      dueAt: null,
+      leaseToken: lease.token,
+      leaseExpiresAt: lease.expiresAt,
+      redeliverAt: null,
+    },
+    lease,
+  };
+}
+
+export function renewExecutionLease(
+  state: ExecutionState,
+  params: { lease: ExecutionLease; duration: number; now: number }
+): { state: ExecutionState; result: ExecutionRenewResult } {
+  if (!isLeaseCurrent(state, params.lease)) return { state, result: LOST };
+  const lease: ExecutionLease = {
+    ...params.lease,
+    expiresAt: params.now + params.duration,
+  };
+  return {
+    state: { ...state, leaseExpiresAt: lease.expiresAt },
+    result: { status: "renewed", lease },
+  };
+}
+
+export function releaseExecutionLease(
+  state: ExecutionState,
+  params: { lease: ExecutionLease; now: number }
+): { state: ExecutionState; result: ExecutionReleaseResult } {
+  if (!isLeaseCurrent(state, params.lease)) return { state, result: LOST };
+  const unacknowledgedDeliveryCount = state.unacknowledgedDeliveryCount + 1;
+  return {
+    state: {
+      ...state,
+      // The wakes the lease covered stay pending.
+      dueAt: earliest(state.dueAt, state.claimedDueAt),
+      claimedDueAt: null,
+      leaseExpiresAt: null,
+      unacknowledgedDeliveryCount,
+      redeliverAt: params.now + redeliveryDelay(unacknowledgedDeliveryCount),
+    },
+    result: { status: "released" },
   };
 }
 
 export function acknowledgeExecution(
   state: ExecutionState,
   params: {
-    delivery: ExecutionDelivery;
+    lease: ExecutionLease;
     outcome: WorkflowRunOutcome;
     now: number;
   }
 ): { state: ExecutionState; result: ExecutionAcknowledgeResult } {
+  if (!isLeaseCurrent(state, params.lease)) return { state, result: LOST };
+
+  // A held lease is never on a terminal record, but keep the first outcome
+  // regardless: terminal outcomes are immutable.
   if (isTerminalExecutionStatus(state.status)) {
     return { state, result: decodeExecutionOutcome(state.outcome!) };
   }
 
   const { outcome, now } = params;
+  const ended = {
+    claimedDueAt: null,
+    leaseExpiresAt: null,
+    unacknowledgedDeliveryCount: 0,
+    redeliverAt: null,
+    updatedAt: now,
+  };
 
   if (outcome.status !== "suspended") {
     const terminal: ExecutionOutcome =
@@ -246,35 +401,24 @@ export function acknowledgeExecution(
       // Reaching a terminal status clears every pending wake.
       state: {
         ...state,
+        ...ended,
         status: terminal.status,
         outcome: encoded,
-        updatedAt: now,
         dueAt: null,
-        claimToken: null,
-        claimedDueAt: null,
-        claimExpiresAt: null,
       },
       result: decodeExecutionOutcome(encoded),
     };
   }
 
-  const dueAt = earliest(state.dueAt, outcome.wakeAt ?? null);
-  const ownsClaim = state.claimToken === params.delivery.token;
-
   return {
-    state: ownsClaim
-      ? {
-          ...state,
-          status: "suspended",
-          updatedAt: now,
-          dueAt,
-          claimToken: null,
-          claimedDueAt: null,
-          claimExpiresAt: null,
-        }
-      : // A stale delivery (its claim expired and was redelivered) records its
-        // suspension without clearing wakes another delivery now covers.
-        { ...state, status: "suspended", updatedAt: now, dueAt },
+    // The wakes the lease covered are cleared; wakes requested since the
+    // claim stay pending, merged with the outcome's `wakeAt`.
+    state: {
+      ...state,
+      ...ended,
+      status: "suspended",
+      dueAt: earliest(state.dueAt, outcome.wakeAt ?? null),
+    },
     result: { status: "suspended" },
   };
 }
