@@ -20,6 +20,7 @@
 - `WorkflowInvoker.deliver(event, { lease, signal })` and `WorkflowRunner.run(event, { lease, signal, logger? })` take a `DeliveryOptions` object with the delivery's lease and an `AbortSignal`. `WorkflowGeneratorParams` carries the `lease` and `signal`. The worker IPC protocol sends `{ type: "deliver", event, lease }` to start a delivery; there is no abort message, because the worker invoker kills a worker whose lease is lost.
 - A delivery that ends without an outcome is redelivered after a redelivery delay that starts at 1 second and doubles with each consecutive unacknowledged delivery, up to 5 minutes, instead of after five minutes.
 - `StepDelay.resumeIn` and `WorkflowDelay.resumeIn` are renamed `wakeAt`. Delay and retry steps read their wake time from the runtime clock instead of `Date.now()`, and `WorkflowGeneratorParams` carries that `clock`.
+- `WorkflowGeneratorParams` carries an `executionClient`, which `WorkflowRunner` sets from its runtime's `executions`.
 
 ### Added
 
@@ -34,6 +35,8 @@
 - Added `concurrency` (default `10`), `leaseDuration` (default 30 seconds), `renewInterval` (default a third of `leaseDuration`) and `abortGracePeriod` (default 1 second, `DEFAULT_ABORT_GRACE_PERIOD`) options to `ExecutionDispatcher`, and its `activeDeliveries` count. The dispatcher claims new executions as slots free up, without waiting for earlier deliveries.
 - Added RFC 002's lease, redelivery-delay and fencing cases to `registerExecutionClientConformance`. Harnesses may return `createPeer` to run the lease races across two runtimes on one backend.
 - Added `WORKER_ORPHANED_EXIT_CODE` to `@yieldstar/worker-invoker`.
+- Added `step.start(stepKey, { workflowId, params? })` (RFC 003), which starts another workflow as a durable step and returns `{ executionId }`. Replays and repeated attempts return the first target instead of starting another. A rejected start throws `WorkflowStartError` (`INVALID_START_PARAMETERS` or `START_REQUEST_MISMATCH`), and replay restores its class and code.
+- Re-exported `WorkflowStartError` and the `DurableObject`, `DurableValue`, `ExecutionParent` and `WorkflowStartErrorCode` types from `yieldstar`.
 
 ### Changed
 

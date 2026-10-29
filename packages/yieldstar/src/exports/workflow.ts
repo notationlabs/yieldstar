@@ -60,6 +60,7 @@ export function workflow<
     signal,
     heapClient,
     storeClient,
+    executionClient,
     clock,
     logger,
   }) {
@@ -140,6 +141,7 @@ export function workflow<
           stopIfAborted(signal);
           const callResult = await executeRuntimeCall(stepResponse, {
             stores: storeClient,
+            executions: executionClient,
           });
           iteratorResult = await workflowIterator.next(callResult);
           stepResponse = iteratorResult.value;

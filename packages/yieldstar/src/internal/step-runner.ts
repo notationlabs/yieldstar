@@ -4,6 +4,10 @@ import {
   cloneStoreState,
   defineStore,
   type Draft,
+  type DurableObject,
+  type ExecutionStartRequest,
+  type ExecutionStartResult,
+  InfrastructureError,
   type StandardSchemaV1,
   StepResponse,
   StepKey,
@@ -23,6 +27,7 @@ import {
   type StoreUpdateResult,
   type StoreWaiter,
   trackStoreSelector,
+  WorkflowStartError,
 } from "@yieldstar/core";
 import { RetryableError } from "../exports/errors";
 import { getCallSiteHash } from "./utils";
@@ -109,7 +114,76 @@ export function createStepRunner(params: {
     });
   }
 
-  return { run, delay: createDelay(clock), poll, store };
+  /**
+   * Starts another workflow as a durable step and returns its execution ID.
+   * The start is identified by this execution's ID and `stepKey`, so every
+   * replay of the step names the same target. A rejected start throws a
+   * `WorkflowStartError`.
+   */
+  function start(
+    stepKey: string,
+    target: { workflowId: string; params?: DurableObject }
+  ): AsyncGenerator<
+    StepResponse,
+    { executionId: string },
+    StepResult | StepError
+  > {
+    const request: ExecutionStartRequest = {
+      requestId: { executionId: event.executionId, stepKey },
+      workflowId: target.workflowId,
+    };
+    // A missing params and an empty object are different requests.
+    if (target.params !== undefined) request.params = target.params;
+    return startStep(stepKey, request);
+  }
+
+  return { run, delay: createDelay(clock), poll, store, start };
+}
+
+async function* startStep(
+  key: string,
+  request: ExecutionStartRequest
+): AsyncGenerator<StepResponse, { executionId: string }, any> {
+  yield new StepKey(key);
+
+  const cached = yield new StepCacheCheck();
+
+  if (cached) {
+    yield cached;
+    if (cached instanceof StepError) {
+      // unreachable – consumer calls throw() on the generator first
+      throw cached.err;
+    }
+    return cached.result;
+  }
+
+  const started: RuntimeCallResult<ExecutionStartResult> =
+    yield new StepRuntimeCall(async ({ executions }) => {
+      // The client's failures are never the workflow's to catch: whatever it
+      // throws, the delivery ends and the next attempt calls it again.
+      try {
+        return await executions.start(request);
+      } catch (err) {
+        throw InfrastructureError.is(err) ? err : new InfrastructureError(err);
+      }
+    });
+
+  if (!started.ok) {
+    throw new Error("ExecutionClient.start failed without an infrastructure error");
+  }
+
+  const outcome = started.value;
+
+  if (outcome.status === "rejected") {
+    const err = new WorkflowStartError(outcome.code, outcome.message);
+    yield new StepError(err);
+    // unreachable – consumer calls throw() on the generator first
+    throw err;
+  }
+
+  const result = { executionId: outcome.executionId };
+  yield new StepResult(result);
+  return result;
 }
 
 async function* storeStep<Schema extends StandardSchemaV1>(params: {

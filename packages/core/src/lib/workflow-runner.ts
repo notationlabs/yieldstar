@@ -91,6 +91,7 @@ export class WorkflowRunner<
       signal,
       heapClient: this.runtime.heap,
       storeClient: this.runtime.stores,
+      executionClient: this.runtime.executions,
       clock: this.runtime.clock,
       logger,
     });
