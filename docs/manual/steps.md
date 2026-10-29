@@ -52,7 +52,7 @@ const reservation = yield* step.run("reserve-stock", async () => ({
 // Throws WorkflowValueError with code "INVALID_STEP_VALUE" and stepKey "reserve-stock"
 ```
 
-The rejection is recorded as the step's error, so replay throws the same `WorkflowValueError`, and workflow code can catch it like any other step error. This is important because the mistake surfaces in the first test run, rather than on a replay hours later. TypeScript catches most of these values earlier: `step.run` checks its function's result with the `Durable<T>` type, so `new Date()` in the example above is a type error.
+The rejection is recorded as the step's error, so replay throws the same `WorkflowValueError`, and workflow code can catch it like any other step error. This is important because the mistake surfaces in the first test run, rather than on a replay hours later. TypeScript catches most of these values earlier with the `Durable<T>` type, so `new Date()` in the example above is a type error. Every API that records a value checks it: `step.run` results, workflow params and results, `step.start` params, store state (through the store's schema output) and the values `select`, `when` and `take` return. Interfaces, optional properties and unions with `undefined` are accepted. A value typed `any` is not checked, and one typed `unknown` is rejected until it is narrowed, since it may hold anything; the runtime still checks both.
 
 Workflow code never receives the object the step function returned. On the first run, `step.run` encodes the result, decodes it again, and returns the decoded copy, which is the same value replay reads from the record:
 
@@ -157,7 +157,7 @@ const target = yield* step.start("ship", {
 
 The start is identified by the calling execution's ID and the step key. If a delivery stops after the target is started but before the step is recorded, the next delivery sends the same request and receives the same target, so the workflow is never started twice. The target's execution record links back to the caller and its step as `parent`, and inherits the caller's `context`.
 
-`params` must be a durable value (see [Step values](#step-values)). Keys may be in any order, and `{ a: undefined }` is a different request from `{}`.
+`params` must be a durable value (see [Step values](#step-values)), and TypeScript checks this with `Durable<T>`. Keys may be in any order, and `{ a: undefined }` is a different request from `{}`.
 
 A rejected start throws a `WorkflowStartError`, which workflow code can catch. Its `code` is:
 

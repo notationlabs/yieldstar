@@ -29,7 +29,7 @@ The runtime validates state against the schema when a store is created, and agai
 
 ### Durable state
 
-After the schema accepts a state, the runtime checks that the schema's output is a durable value (see [Step values](./steps.md#step-values)). A state that holds a `Date`, a `Map` or a class instance makes its store step throw `WorkflowValueError` with the code `INVALID_STEP_VALUE`, and the store is left unchanged: no new version, no wakes. The same applies to `initial`, which then creates no store, and to the value a `take` selects, which then claims nothing.
+After the schema accepts a state, the runtime checks that the schema's output is a durable value (see [Step values](./steps.md#step-values)). TypeScript checks it first: `defineStore` and `step.store` reject a schema whose output type is not durable, and `select`, `when` and `take` reject a selector whose result is not. A state that holds a `Date`, a `Map` or a class instance makes its store step throw `WorkflowValueError` with the code `INVALID_STEP_VALUE`, and the store is left unchanged: no new version, no wakes. The same applies to `initial`, which then creates no store, and to the value a `take` selects, which then claims nothing.
 
 ```ts
 try {

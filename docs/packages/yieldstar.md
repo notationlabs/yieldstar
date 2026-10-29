@@ -23,6 +23,7 @@ import type {
   ExecutionRecord,
   ExecutionStatus,
   ExecutionParent,
+  Durable,
   DurableObject,
   DurableValue,
   WorkflowStartErrorCode,
@@ -31,7 +32,7 @@ import type {
 
 ## `workflow(fn)` / `createWorkflow(fn)`
 
-Defines a workflow. Returns a `WorkflowGenerator`.
+Defines a workflow. Returns a `WorkflowGenerator`. `Params` and `Result` are checked with `Durable<T>` (see [Step values](../manual/steps.md#step-values)), so a workflow whose params or result type holds a `Date`, `Map`, `Set`, `bigint` or function is a type error. A generic `Result` cannot be checked, so a function that wraps `workflow` must give it a concrete result type.
 
 ```ts
 const w = workflow<Params, Result>(async function* (step, event, logger) {
@@ -41,8 +42,8 @@ const w = workflow<Params, Result>(async function* (step, event, logger) {
 
 | Type parameter | Constraint                    | Description                                  |
 | -------------- | ----------------------------- | -------------------------------------------- |
-| `Params`       | `Record<string, any> \| void` | Shape of `event.params`                      |
-| `Result`       | any                           | Return type of the workflow                  |
+| `Params`       | `Record<string, any> \| void` | Shape of `event.params`; must be durable     |
+| `Result`       | any                           | Return type of the workflow; must be durable |
 | `Context`      | `ReadonlyMap<any, any>`       | Shape of `event.context` (set by middleware) |
 
 ## `createWorkflowRouter(workflows)`
@@ -96,7 +97,7 @@ Returns a factory for HTTP SDK clients. See [HTTP SDK](../manual/sdk-http.md).
 
 ## `defineStore(name, schema)`
 
-Defines a durable store type from a name and any Standard Schema. See [Durable Stores](../manual/stores.md).
+Defines a durable store type from a name and any Standard Schema whose output type is durable (`DurableStoreSchema<Schema>`). See [Durable Stores](../manual/stores.md).
 
 ```ts
 const ConversationStore = defineStore("conversation", schema);

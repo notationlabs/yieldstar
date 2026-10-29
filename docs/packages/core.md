@@ -184,6 +184,9 @@ const durableValueCodec: {
 
 // Compile-time check for a recorded value; accepts interfaces.
 type Durable<T> = /* T, or never where T holds a Date, Map, Set, bigint or function */;
+// unknown when T is durable, otherwise Otherwise. Intersected with a
+// parameter, it checks T without changing how T is inferred.
+type IfDurable<T, Otherwise> = [T] extends [Durable<T>] ? unknown : Otherwise;
 ```
 
 `encode` accepts `null`, booleans, finite numbers, strings, `undefined`, errors, arrays with no missing items, and plain objects (the default prototype or `null`) whose own properties are enumerable data properties with string keys. It rejects functions, symbols, bigints, `NaN` and infinities, class instances such as `Date` and `Map`, accessors, symbol or non-enumerable properties, missing array items and reference cycles, and returns a message naming the path of the first invalid value. Neither method throws for an invalid input.
