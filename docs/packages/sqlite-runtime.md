@@ -40,18 +40,20 @@ const runtime = new SqliteRuntime(createSqliteDb({ path: "./.db/local.sqlite" })
 | ------------------- | -------------- | ------------ | ------------------------------------------------------------------------ |
 | `clock`             | `() => number` | `Date.now`   | Time source for every client operation and for delay and retry wake times |
 
-The runtime exposes three clients that share the database:
+The runtime exposes four clients that share the database:
 
 | Client               | Class                   | Tables                                   |
 | -------------------- | ----------------------- | ---------------------------------------- |
 | `runtime.executions` | `SqliteExecutionClient` | `executions`, `start_requests`           |
+| `runtime.effects`    | `SqliteEffectClient`    | `effects`, `effect_conflicts`, `effect_waiters` |
 | `runtime.heap`       | `SqliteHeapClient`      | `step_responses`                         |
 | `runtime.stores`     | `SqliteStoreClient`     | `stores`, `store_waiters`, `store_applied_steps` |
 
 Keeping them in one database lets every guarantee that spans clients hold in a single SQLite transaction:
 
 - A store commit and the wakes for the waiters it satisfies commit together.
-- The heap write that records a step's result deletes that step's waiters.
+- An effect settlement and the wakes for its waiters commit together.
+- The heap write that records a step's result deletes that step's store and effect waiters.
 - Admission inserts the record already due, so the record and its first wake commit together.
 - A new `start` inserts the target, already due and with its parent link, and the start request in one transaction. The request is looked up in the same transaction, so concurrent starts with one request ID admit one target.
 
@@ -62,4 +64,4 @@ against a snapshot outside the SQLite transaction; if the conditional commit
 loses a version race, the base store client runs the updater again against the
 latest snapshot.
 
-`SqliteExecutionClient`, `SqliteHeapClient`, and `SqliteStoreClient` remain exported for adapter tests. Construct them through `SqliteRuntime` in applications, so the store client requests wakes from the same execution client and clock.
+`SqliteExecutionClient`, `SqliteEffectClient`, `SqliteHeapClient`, and `SqliteStoreClient` remain exported for adapter tests. Construct them through `SqliteRuntime` in applications, so the store client requests wakes from the same execution client and clock.

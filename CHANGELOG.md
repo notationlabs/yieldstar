@@ -57,6 +57,9 @@
 - Added `WorkflowStartError` and `WorkflowStartErrorCode` to `@yieldstar/core`, and the start transitions `prepareExecutionStart`, `matchStartRequest` and `createStartedExecution` (with `StartRequestState`) for runtime adapter authors.
 - `SqliteRuntime` stores start requests in a `start_requests` table and the parent link in `parent_execution_id` and `parent_step_key` columns on `executions`. A new start inserts the target and the request in one transaction.
 - Added RFC 003's `start` cases to `registerExecutionClientConformance`. Harnesses may return `failStartCommits` to run the case that a start which fails before it commits leaves no trace.
+- Added `EffectClient` (`begin`, `settle`, `watch`, `getEffect`), `EffectRecord`, `EffectClientInvariantError` (`EFFECT_RUNTIME_INVARIANT`), `WorkflowEffectError` (`INVALID_EFFECT_REQUEST`, `EFFECT_REQUEST_MISMATCH`), the `EffectDeliveryErrorCode` type and the effect transitions (`validateEffectRequest`, `prepareEffectBegin`, `prepareEffectSettle`, `prepareEffectWatch`, `createEffectState`, `matchEffectBegin`, `settleEffect`, `toEffectRecord`) to `@yieldstar/core` (RFC 005). `Runtime` gains `effects`; custom runtime adapters must implement it.
+- `MemoryRuntime` and `SqliteRuntime` expose `effects` (`MemoryEffectClient`, `SqliteEffectClient`). A settlement wakes every waiting execution in the same write, and the heap write that records a step's result deletes its effect waiters. `SqliteRuntime` stores effects in `effects`, `effect_conflicts` and `effect_waiters` tables.
+- Added `registerEffectClientConformance` to `@yieldstar/store-conformance` (RFC 005). Harnesses may return `failEffectWatches` to run the case that a watch which fails before it commits registers nothing.
 
 ### Changed
 

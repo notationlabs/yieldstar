@@ -1,6 +1,6 @@
 # `@yieldstar/store-conformance`
 
-This package contains the runnable qualification suites for YieldStar runtimes: one for store connectors and one for the execution client. The normative protocol is documented in the [store connector conformance specification](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md).
+This package contains the runnable qualification suites for YieldStar runtimes: one for store connectors, one for the execution client and one for the effect client. The normative protocol is documented in the [store connector conformance specification](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md).
 
 Install it with the test runner and core package:
 
@@ -71,6 +71,27 @@ registerExecutionClientConformance({
     return {
       runtime: new MyRuntime(backend, { clock }),
       // A separate connection, as another process would open.
+      createPeer: () => new MyRuntime(backend.connect(), { clock }),
+      restart: () => new MyRuntime(backend.reopen(), { clock }),
+      dispose: () => backend.close(),
+    };
+  },
+});
+```
+
+## Effect client suite
+
+`registerEffectClientConformance` checks a runtime's `EffectClient` against RFC 005: `begin` creating or reading one effect, mismatched operations and inputs, concurrent equal and different settlements and their conflict reports, `watch` registration and immediate wakes, settlement racing `watch`, waiter deletion with the step's result and its rejection for a stale holder, value encoding, and durability across a restart. Its harness takes the same `clock`, `createPeer` and `restart` as the execution client suite, plus `failEffectWatches`, which makes every `watch` on `runtime` fail before it commits and returns a function that stops the failures. Without it the case for a failed watch is skipped; the SQLite harness installs a temporary trigger that aborts the waiter insert.
+
+```ts
+import { registerEffectClientConformance } from "@yieldstar/store-conformance";
+
+registerEffectClientConformance({
+  name: "my-runtime",
+  create({ clock }) {
+    const backend = createCleanBackend();
+    return {
+      runtime: new MyRuntime(backend, { clock }),
       createPeer: () => new MyRuntime(backend.connect(), { clock }),
       restart: () => new MyRuntime(backend.reopen(), { clock }),
       dispose: () => backend.close(),

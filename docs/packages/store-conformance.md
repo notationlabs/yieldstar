@@ -1,6 +1,6 @@
 # @yieldstar/store-conformance
 
-Vitest qualification suites for Yieldstar runtimes. `registerStoreClientConformance` verifies a `StoreClient`'s store lifecycle, concurrency, replay idempotency, waiter wake-up, wake collapsing, and crash-recovery behavior. `registerExecutionClientConformance` verifies a runtime's `ExecutionClient` and fenced heap writes against RFC 001, RFC 002 and RFC 003.
+Vitest qualification suites for Yieldstar runtimes. `registerStoreClientConformance` verifies a `StoreClient`'s store lifecycle, concurrency, replay idempotency, waiter wake-up, wake collapsing, and crash-recovery behavior. `registerExecutionClientConformance` verifies a runtime's `ExecutionClient` and fenced heap writes against RFC 001, RFC 002 and RFC 003. `registerEffectClientConformance` verifies its `EffectClient` against RFC 005.
 
 ## Install
 
@@ -78,6 +78,27 @@ registerExecutionClientConformance({
     return {
       runtime: new MyRuntime(backend, { clock }),
       // A separate connection, as another process would open.
+      createPeer: () => new MyRuntime(backend.connect(), { clock }),
+      restart: () => new MyRuntime(backend.reopen(), { clock }),
+      dispose: () => backend.close(),
+    };
+  },
+});
+```
+
+## Effect client suite
+
+`registerEffectClientConformance` checks a runtime's `EffectClient` against RFC 005: `begin` creating or reading one effect, mismatched operations and inputs, concurrent equal and different settlements and their conflict reports, `watch` registration and immediate wakes, settlement racing `watch`, waiter deletion with the step's result and its rejection for a stale holder, value encoding, and durability across a restart. Its harness takes the same `clock`, `createPeer` and `restart` as the execution client suite, plus `failEffectWatches`, which makes every `watch` on `runtime` fail before it commits and returns a function that stops the failures. Without it the case for a failed watch is skipped; the SQLite harness installs a temporary trigger that aborts the waiter insert.
+
+```ts
+import { registerEffectClientConformance } from "@yieldstar/store-conformance";
+
+registerEffectClientConformance({
+  name: "my-runtime",
+  create({ clock }) {
+    const backend = createCleanBackend();
+    return {
+      runtime: new MyRuntime(backend, { clock }),
       createPeer: () => new MyRuntime(backend.connect(), { clock }),
       restart: () => new MyRuntime(backend.reopen(), { clock }),
       dispose: () => backend.close(),
