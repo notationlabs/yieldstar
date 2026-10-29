@@ -28,13 +28,13 @@ const REPLAY_DELAY_MS = 10;
 /**
  * Runs an execution across a `step.delay` replay boundary deterministically.
  *
- * A delay only suspends the workflow if it hasn't already elapsed when the
- * workflow checks it, which a tiny real-time delay can't guarantee. So Date is
- * frozen (an hour in the past) until the execution has cached its delay step
- * and suspended; `beforeReplay` then runs while the execution is parked (with a
- * frozen clock the wake-up task stays invisible to the memory task queue), and
- * finally the real clock is restored, so the delay has definitely elapsed when
- * the wake-up replays the workflow.
+ * A tiny real-time delay may already have elapsed when the workflow checks it,
+ * so the workflow wouldn't suspend. Instead:
+ * 1. Freeze Date an hour in the past until the execution records its delay
+ *    step and suspends. The wake stays in the future, so nothing claims it.
+ * 2. Run `beforeReplay` while the execution is parked.
+ * 3. Restore the real clock, so the delay has elapsed when the wake replays
+ *    the workflow.
  */
 async function acrossReplayBoundary<T>(params: {
   sdk: ReturnType<typeof createSdk>;
