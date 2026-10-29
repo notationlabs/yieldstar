@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const directory = await mkdtemp(join(tmpdir(), "yieldstar-store-conformance-"));
+const directory = await mkdtemp(join(tmpdir(), "yieldstar-runtime-conformance-"));
 
 function run(command: string[], cwd = root) {
   const result = Bun.spawnSync(command, {
@@ -19,7 +19,7 @@ function run(command: string[], cwd = root) {
 }
 
 try {
-  for (const packageDirectory of ["core", "store-conformance", "test-runtime"]) {
+  for (const packageDirectory of ["core", "runtime-conformance", "test-runtime"]) {
     run([
       "pnpm",
       "--dir",
@@ -37,19 +37,19 @@ try {
       type: "module",
       devDependencies: {
         "@yieldstar/core": "file:./yieldstar-core-0.5.0.tgz",
-        "@yieldstar/store-conformance": "file:./yieldstar-store-conformance-0.5.0.tgz",
+        "@yieldstar/runtime-conformance": "file:./yieldstar-runtime-conformance-0.5.0.tgz",
         "@yieldstar/test-runtime": "file:./yieldstar-test-runtime-0.5.0.tgz",
         vitest: "3.2.7",
       },
     })
   );
   await writeFile(
-    join(directory, "store-conformance.test.ts"),
+    join(directory, "runtime-conformance.test.ts"),
     `import {
   registerEffectClientConformance,
   registerExecutionClientConformance,
   registerStoreClientConformance,
-} from "@yieldstar/store-conformance";
+} from "@yieldstar/runtime-conformance";
 import { MemoryRuntime } from "@yieldstar/test-runtime";
 
 registerStoreClientConformance({
@@ -84,13 +84,13 @@ overrides:
   "@yieldstar/core": "file:./yieldstar-core-0.5.0.tgz"
 minimumReleaseAgeExclude:
   - "@yieldstar/core@0.5.0"
-  - "@yieldstar/store-conformance@0.5.0"
+  - "@yieldstar/runtime-conformance@0.5.0"
   - "@yieldstar/test-runtime@0.5.0"
 `
   );
 
   run(["pnpm", "install"], directory);
-  run(["pnpm", "exec", "vitest", "run", "store-conformance.test.ts"], directory);
+  run(["pnpm", "exec", "vitest", "run", "runtime-conformance.test.ts"], directory);
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

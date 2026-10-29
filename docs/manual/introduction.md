@@ -51,7 +51,7 @@ Yieldstar is a monorepo of composable packages:
 | `@yieldstar/test-runtime`       | `MemoryRuntime`, the in-memory runtime used by Yieldstar's test tooling               |
 | `@yieldstar/test-invoker`       | In-process invoker used by Yieldstar's test tooling                                   |
 | `@yieldstar/test-utils`         | Test SDK and schema helpers used internally by this repository                        |
-| `@yieldstar/store-conformance`  | Vitest qualification suite for third-party store connectors                          |
+| `@yieldstar/runtime-conformance`  | Vitest qualification suites for third-party runtimes and store connectors            |
 
 A runtime has three clients, and a dispatcher drives them:
 

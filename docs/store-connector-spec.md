@@ -6,7 +6,7 @@ This document defines the observable contract for a YieldStar store connector. T
 
 ## Qualification
 
-A connector is qualified by running `registerStoreClientConformance` from `@yieldstar/store-conformance` against a factory that creates a clean backend and returns a `Runtime` over it. A store connector is never qualified alone: its wakes are requests to the runtime's `ExecutionClient`, so the suite observes them as executions that `runtime.executions.claimDue()` returns. Passing the base suite qualifies the runtime for process-local use.
+A connector is qualified by running `registerStoreClientConformance` from `@yieldstar/runtime-conformance` against a factory that creates a clean backend and returns a `Runtime` over it. A store connector is never qualified alone: its wakes are requests to the runtime's `ExecutionClient`, so the suite observes them as executions that `runtime.executions.claimDue()` returns. Passing the base suite qualifies the runtime for process-local use.
 
 A factory that returns `createPeer` declares that independent runtimes can concurrently access the same backend, as separate runtime processes would. The shared-client checks then become REQUIRED, including the lease checks in which one runtime claims an execution and a peer races it for the same execution or claims it after the first lease expires. Several dispatchers, in one process or several, MAY share a backend declared this way. A factory that returns `restart` declares durable storage of stores, waiters and wakes across process failure. The durable-wake checks then become REQUIRED.
 
@@ -72,7 +72,7 @@ Store mutations with a step receipt, store creation, and wake requests are not f
 - A repeated request ID MUST return the first target's ID, without admitting another, when its workflow ID and canonical params match the recorded request, and `START_REQUEST_MISMATCH` otherwise, whatever the target's status. Missing params and `{}` do not match. Concurrent calls with one request ID MUST admit one target.
 - `start` is not fenced. Start-request records MUST survive a restart, and are kept until the caller is pruned.
 
-Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `prepareExecutionStart`, `matchStartRequest`, `createStartedExecution`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/store-conformance` exercises these rules; this repository runs it against both bundled runtimes.
+Runtime adapters MAY build on the storage-neutral transitions exported from `@yieldstar/core` (`prepareExecutionAdmission`, `prepareExecutionStart`, `matchStartRequest`, `createStartedExecution`, `requestExecutionWake`, `claimExecution`, `renewExecutionLease`, `releaseExecutionLease`, `acknowledgeExecution`, `isLeaseCurrent`, `nextClaimAt`) by applying each inside one atomic write. `registerExecutionClientConformance` from `@yieldstar/runtime-conformance` exercises these rules; this repository runs it against both bundled runtimes.
 
 ### Effects
 
@@ -156,4 +156,4 @@ Schema failures MUST surface as `StoreValidationError` (`validateStoreState` thr
 
 ## Running the suite
 
-See [`@yieldstar/store-conformance`](../packages/store-conformance/README.md) for the factory API and a minimal Vitest example. The YieldStar CI runs the same artifact against `MemoryRuntime` and `SqliteRuntime` under Bun and Node. SQLite declares shared-client and durable-restart capabilities, and also runs the execution and effect suites over separate connections to one database file; the in-memory runtime qualifies only for process-local use.
+See [`@yieldstar/runtime-conformance`](../packages/runtime-conformance/README.md) for the factory API and a minimal Vitest example. The YieldStar CI runs the same artifact against `MemoryRuntime` and `SqliteRuntime` under Bun and Node. SQLite declares shared-client and durable-restart capabilities, and also runs the execution and effect suites over separate connections to one database file; the in-memory runtime qualifies only for process-local use.

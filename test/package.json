@@ -12,7 +12,7 @@
     "@yieldstar/core": "workspace:*",
     "@yieldstar/http-server": "workspace:*",
     "@yieldstar/sqlite-runtime": "workspace:*",
-    "@yieldstar/store-conformance": "workspace:*",
+    "@yieldstar/runtime-conformance": "workspace:*",
     "@yieldstar/test-invoker": "workspace:*",
     "@yieldstar/test-runtime": "workspace:*",
     "@yieldstar/test-utils": "workspace:*",

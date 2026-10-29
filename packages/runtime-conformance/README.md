@@ -1,17 +1,17 @@
-# `@yieldstar/store-conformance`
+# `@yieldstar/runtime-conformance`
 
 This package contains the runnable qualification suites for YieldStar runtimes: one for store connectors, one for the execution client and one for the effect client. The normative protocol is documented in the [store connector conformance specification](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md).
 
 Install it with the test runner and core package:
 
 ```sh
-pnpm add -D @yieldstar/core @yieldstar/store-conformance vitest
+pnpm add -D @yieldstar/core @yieldstar/runtime-conformance vitest
 ```
 
 Register the suite from a Vitest test file. The only required integration point is a factory that creates a clean backend and returns a `Runtime` built on it. Store wakes are observed through the runtime's `ExecutionClient`: the suite admits the executions that wait on stores, and a commit that satisfies a waiter must make that execution due, so `runtime.executions.claimDue()` returns it.
 
 ```ts
-import { registerStoreClientConformance } from "@yieldstar/store-conformance";
+import { registerStoreClientConformance } from "@yieldstar/runtime-conformance";
 import { MyRuntime } from "./my-runtime";
 
 registerStoreClientConformance({
@@ -47,7 +47,7 @@ create() {
 Run the test with either supported runtime:
 
 ```sh
-vitest run store-conformance.test.ts
+vitest run runtime-conformance.test.ts
 ```
 
 ## Execution client suite
@@ -61,7 +61,7 @@ The harness has three optional capabilities:
 - `failStartCommits` makes every new `start` on `runtime` fail after it begins writing but before it commits, and returns a function that stops the failures. It enables the case that a failed start leaves no trace; without it that case is skipped. The SQLite harness installs a temporary trigger that aborts the start-request insert.
 
 ```ts
-import { registerExecutionClientConformance } from "@yieldstar/store-conformance";
+import { registerExecutionClientConformance } from "@yieldstar/runtime-conformance";
 import { MyRuntime } from "./my-runtime";
 
 registerExecutionClientConformance({
@@ -84,7 +84,7 @@ registerExecutionClientConformance({
 `registerEffectClientConformance` checks a runtime's `EffectClient`: `begin` creating or reading one effect, mismatched operations and inputs, concurrent equal and different settlements and their conflict reports, `watch` registration and immediate wakes, settlement racing `watch`, waiter deletion with the step's result and its rejection for a stale holder, value encoding, and durability across a restart. Its harness takes the same `clock`, `createPeer` and `restart` as the execution client suite, plus `failEffectWatches`, which makes every `watch` on `runtime` fail before it commits and returns a function that stops the failures. Without it the case for a failed watch is skipped; the SQLite harness installs a temporary trigger that aborts the waiter insert.
 
 ```ts
-import { registerEffectClientConformance } from "@yieldstar/store-conformance";
+import { registerEffectClientConformance } from "@yieldstar/runtime-conformance";
 
 registerEffectClientConformance({
   name: "my-runtime",

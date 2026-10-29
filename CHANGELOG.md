@@ -32,13 +32,14 @@
 - `StepDelay.resumeIn` and `WorkflowDelay.resumeIn` are renamed `wakeAt`. Delay and retry steps read their wake time from the runtime clock instead of `Date.now()`, and `WorkflowGeneratorParams` carries that `clock`.
 - `WorkflowGeneratorParams` carries an `executionClient`, which `WorkflowRunner` sets from its runtime's `executions`.
 - `WorkflowGeneratorParams` carries an `effectClient`, which `WorkflowRunner` sets from its runtime's `effects` (RFC 005). Code that builds `WorkflowGeneratorParams` by hand must pass one.
+- `@yieldstar/store-conformance` is renamed to `@yieldstar/runtime-conformance`, since its suites qualify a whole runtime. The exports are unchanged.
 
 ### Added
 
 - Added `Runtime`, `ExecutionClient` (`admit`, `get`, `requestWake`, `claimDue`, `acknowledge`), `ExecutionRecord`, `ExecutionStatus`, `ExecutionOutcome`, `WorkflowRunOutcome`, `ExecutionAdmissionError`, and `InfrastructureError` to `@yieldstar/core`.
 - Added `SqliteRuntime(db, { clock? })` and `MemoryRuntime({ clock? })`, each exposing `clock`, `executions`, `heap`, and `stores`.
 - Added `ExecutionDispatcher(runtime, { invoker, logger, pollInterval?, keepAlive? })` with `start`, `stop`, `tick`, and `drain`. It is the only component that delivers executions, and it returns a finished execution's recorded outcome without running workflow code.
-- Added `registerExecutionClientConformance` to `@yieldstar/store-conformance`, covering RFC 001's `ExecutionClient` tables for any runtime.
+- Added `registerExecutionClientConformance` to `@yieldstar/runtime-conformance`, covering RFC 001's `ExecutionClient` tables for any runtime.
 - Added `waitForExecutionOutcome` and the storage-neutral execution state machine (`prepareExecutionAdmission`, `claimExecution`, `acknowledgeExecution`, and related helpers) for runtime adapter authors.
 - Added `StoreValidationError` and `StoreNotFoundError`.
 - Re-exported `ExecutionAdmissionError` and the execution record types from `yieldstar`.
@@ -60,7 +61,7 @@
 - Added RFC 003's `start` cases to `registerExecutionClientConformance`. Harnesses may return `failStartCommits` to run the case that a start which fails before it commits leaves no trace.
 - Added `EffectClient` (`begin`, `settle`, `watch`, `getEffect`), `EffectRecord`, `EffectClientInvariantError` (`EFFECT_RUNTIME_INVARIANT`), `WorkflowEffectError` (`INVALID_EFFECT_REQUEST`, `EFFECT_REQUEST_MISMATCH`), the `EffectDeliveryErrorCode` type and the effect transitions (`validateEffectRequest`, `prepareEffectBegin`, `prepareEffectSettle`, `prepareEffectWatch`, `createEffectState`, `matchEffectBegin`, `settleEffect`, `toEffectRecord`) to `@yieldstar/core` (RFC 005). `Runtime` gains `effects`; custom runtime adapters must implement it.
 - `MemoryRuntime` and `SqliteRuntime` expose `effects` (`MemoryEffectClient`, `SqliteEffectClient`). A settlement wakes every waiting execution in the same write, and the heap write that records a step's result deletes its effect waiters. `SqliteRuntime` stores effects in `effects`, `effect_conflicts` and `effect_waiters` tables.
-- Added `registerEffectClientConformance` to `@yieldstar/store-conformance` (RFC 005). Harnesses may return `failEffectWatches` to run the case that a watch which fails before it commits registers nothing.
+- Added `registerEffectClientConformance` to `@yieldstar/runtime-conformance` (RFC 005). Harnesses may return `failEffectWatches` to run the case that a watch which fails before it commits registers nothing.
 
 ### Changed
 

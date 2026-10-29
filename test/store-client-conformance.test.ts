@@ -1,4 +1,4 @@
-import { registerStoreClientConformance } from "@yieldstar/store-conformance";
+import { registerStoreClientConformance } from "@yieldstar/runtime-conformance";
 import { MemoryRuntime } from "@yieldstar/test-runtime";
 import { SqliteRuntime } from "@yieldstar/sqlite-runtime";
 

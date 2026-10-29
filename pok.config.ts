@@ -18,7 +18,7 @@ export default defineConfig({
         published("core"),
         published("http-server"),
         published("sqlite-runtime"),
-        published("store-conformance"),
+        published("runtime-conformance"),
         published("worker-invoker"),
         published("yieldstar"),
         versionOnly("packages/test-invoker/package.json"),

@@ -140,6 +140,15 @@ importers:
         specifier: ^22.18.0
         version: 22.18.0
 
+  packages/runtime-conformance:
+    devDependencies:
+      '@yieldstar/core':
+        specifier: workspace:*
+        version: link:../core
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.18.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@10.2.2)(tsx@4.23.1)(yaml@2.9.0)
+
   packages/sqlite-runtime:
     dependencies:
       '@yieldstar/core':
@@ -158,15 +167,6 @@ importers:
       '@types/node':
         specifier: ^22.18.0
         version: 22.18.0
-
-  packages/store-conformance:
-    devDependencies:
-      '@yieldstar/core':
-        specifier: workspace:*
-        version: link:../core
-      vitest:
-        specifier: ^3.2.4
-        version: 3.2.7(@types/node@22.18.0)(jiti@2.7.0)(lightningcss@1.33.0)(supports-color@10.2.2)(tsx@4.23.1)(yaml@2.9.0)
 
   packages/test-invoker:
     dependencies:
@@ -252,12 +252,12 @@ importers:
       '@yieldstar/http-server':
         specifier: workspace:*
         version: link:../packages/http-server
+      '@yieldstar/runtime-conformance':
+        specifier: workspace:*
+        version: link:../packages/runtime-conformance
       '@yieldstar/sqlite-runtime':
         specifier: workspace:*
         version: link:../packages/sqlite-runtime
-      '@yieldstar/store-conformance':
-        specifier: workspace:*
-        version: link:../packages/store-conformance
       '@yieldstar/test-invoker':
         specifier: workspace:*
         version: link:../packages/test-invoker
