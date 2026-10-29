@@ -7,7 +7,7 @@ This spec adds durable, schema-validated state to YieldStar. The goal is to make
 The core API should stay small:
 
 ```ts
-const store = yield* step.store(StoreDef, { id })
+const store = step.store(StoreDef, { id })
 yield* store.update("append:message-1", draft => {
   draft.messages.push(message)
 })
@@ -59,6 +59,7 @@ import type { StandardSchemaV1 } from "@standard-schema/spec"
 type StoreDefinition<Schema extends StandardSchemaV1> = {
   name: string
   schema: Schema
+  initial: (id: string) => StoreState<Schema>
 }
 
 type StoreState<Schema extends StandardSchemaV1> =
@@ -66,9 +67,14 @@ type StoreState<Schema extends StandardSchemaV1> =
 
 function defineStore<Schema extends StandardSchemaV1>(
   name: string,
-  schema: Schema
+  schema: Schema,
+  options: {
+    initial: (id: string) => Durable<StoreState<Schema>>
+  }
 ): StoreDefinition<Schema>
 ```
+
+`initial` is required, so every store can always be created. It is synchronous and evaluated only when the store with that `id` does not exist.
 
 Example:
 
@@ -85,7 +91,8 @@ const ConversationStore = defineStore(
       })
     ),
     status: v.picklist(["idle", "working"]),
-  })
+  }),
+  { initial: () => ({ messages: [], status: "idle" }) }
 )
 ```
 
@@ -116,7 +123,7 @@ const storeId = params.id ?? event.executionId
 So:
 
 ```ts
-yield* step.store(ConversationStore)
+step.store(ConversationStore)
 ```
 
 means execution-local store.
@@ -124,7 +131,7 @@ means execution-local store.
 And:
 
 ```ts
-yield* step.store(ConversationStore, { id: event.params.conversationId })
+step.store(ConversationStore, { id: event.params.conversationId })
 ```
 
 means shared/correlation-bound store.
@@ -139,21 +146,21 @@ interface StepRunner {
     store: StoreDefinition<Schema>,
     params?: {
       id?: string
-      initial?:
-        | StoreState<Schema>
-        | (() => StoreState<Schema> | Promise<StoreState<Schema>>)
     }
-  ): AsyncGenerator<StepResponse, WorkflowStore<StoreState<Schema>>>
+  ): WorkflowStore<StoreState<Schema>>
 }
 ```
 
 Semantics:
 
-- If the store exists, return a handle.
-- If it does not exist, create it using `initial`.
-- If it does not exist and `initial` is omitted, fail.
+- `step.store` returns a handle synchronously. It does not read, create or change the store, and records no workflow step.
+- Repeated calls for the same identity return handles for the same store, so a loop or helper may request a handle without receiving it from another caller.
 - If no `id` is provided, use `event.executionId`.
-- The operation is durable and idempotent like other YieldStar steps.
+- Every durable operation on a missing store first creates it from `definition.initial(id)`, in the same atomic store write as the operation.
+- Concurrent or repeated operations on a missing store record exactly one initial state per store identity.
+- A crash after an operation commits but before its step is recorded neither creates the store again nor applies the operation twice; the operation's receipt identifies it.
+- A store deleted between deliveries is created again from `initial` by the next operation.
+- An error thrown by `initial` is a workflow error thrown from the operation that ran it.
 
 ## Workflow Store Handle
 
@@ -500,18 +507,12 @@ const AgentStore = defineStore(
     messages: v.array(Message),
     status: v.picklist(["idle", "working"]),
     memory: v.record(v.string(), v.unknown()),
-  })
+  }),
+  { initial: () => ({ messages: [], status: "idle", memory: {} }) }
 )
 
 export const agent = workflow(async function* (step, event) {
-  const store = yield* step.store(AgentStore, {
-    id: event.params.agentId,
-    initial: {
-      messages: [],
-      status: "idle",
-      memory: {},
-    },
-  })
+  const store = step.store(AgentStore, { id: event.params.agentId })
 
   let turn = 0
 
@@ -582,7 +583,8 @@ Required SDK/API changes:
 
 Required tests:
 
-- store creation with initial state
+- store creation from the definition's initial state by the first operation
+- repeated handle requests from a loop and a helper
 - execution-local default store id
 - shared explicit store id
 - durable `get` replay stability

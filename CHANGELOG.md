@@ -33,6 +33,10 @@
 - `WorkflowGeneratorParams` carries an `executionClient`, which `WorkflowRunner` sets from its runtime's `executions`.
 - `WorkflowGeneratorParams` carries an `effectClient`, which `WorkflowRunner` sets from its runtime's `effects` (RFC 005). Code that builds `WorkflowGeneratorParams` by hand must pass one.
 - `@yieldstar/store-conformance` is renamed to `@yieldstar/runtime-conformance`, since its suites qualify a whole runtime. The exports are unchanged.
+- `defineStore(name, schema, { initial })` requires `initial(id)`, a synchronous function returning the state of a new store, and `StoreDefinition` carries it (RFC 006). Every store operation, in workflows and through `StoreClient`, creates a missing store from `initial(id)` in the same atomic write as the operation; `initial` runs only when the store is missing, and concurrent operations on a missing store record one initial state. A store deleted between operations is created again by the next one.
+- `step.store(definition, { id? })` returns a `WorkflowStore` synchronously, without `yield*`, and records no step (RFC 006). Its `initial` param is removed, and a loop or helper can request the same handle any number of times. A non-durable or invalid initial state is reported by the first operation's step, and an error thrown by `initial` reaches workflow code from that operation.
+- `StoreClient.getOrCreateStore` is removed (RFC 006). `StoreDeleteFromResult` loses its not-found variant, and `StoreNotFoundError` is no longer thrown; it stays registered so recorded failures decode.
+- Store connectors implement `readStore`, `insertStore`, `commitStoreMutation` and `commitStoreDeletion`, and `CasStoreClient` provides `getStore` and `deleteStoreFrom` (RFC 006). A commit computed from a created snapshot inserts the store, or conflicts if another writer created it first.
 
 ### Added
 
@@ -62,6 +66,8 @@
 - Added `EffectClient` (`begin`, `settle`, `watch`, `getEffect`), `EffectRecord`, `EffectClientInvariantError` (`EFFECT_RUNTIME_INVARIANT`), `WorkflowEffectError` (`INVALID_EFFECT_REQUEST`, `EFFECT_REQUEST_MISMATCH`), the `EffectDeliveryErrorCode` type and the effect transitions (`validateEffectRequest`, `prepareEffectBegin`, `prepareEffectSettle`, `prepareEffectWatch`, `createEffectState`, `matchEffectBegin`, `settleEffect`, `toEffectRecord`) to `@yieldstar/core` (RFC 005). `Runtime` gains `effects`; custom runtime adapters must implement it.
 - `MemoryRuntime` and `SqliteRuntime` expose `effects` (`MemoryEffectClient`, `SqliteEffectClient`). A settlement wakes every waiting execution in the same write, and the heap write that records a step's result deletes its effect waiters. `SqliteRuntime` stores effects in `effects`, `effect_conflicts` and `effect_waiters` tables.
 - Added `registerEffectClientConformance` to `@yieldstar/runtime-conformance` (RFC 005). Harnesses may return `failEffectWatches` to run the case that a watch which fails before it commits registers nothing.
+- Exported the `StepRunner` type from `yieldstar`, for helpers that take the step runner (RFC 006).
+- Added RFC 006's missing-store cases to `registerStoreClientConformance`.
 
 ### Changed
 
