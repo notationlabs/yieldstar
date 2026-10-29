@@ -9,6 +9,12 @@ import {
 import { describe, expect, test } from "vitest";
 
 export {
+  registerEffectClientConformance,
+  type EffectConformanceHarness,
+  type EffectConformanceHarnessOptions,
+  type EffectConformanceOptions,
+} from "./effect";
+export {
   registerExecutionClientConformance,
   type ExecutionConformanceHarness,
   type ExecutionConformanceHarnessOptions,
