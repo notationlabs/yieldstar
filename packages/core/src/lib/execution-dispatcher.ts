@@ -43,9 +43,9 @@ export interface DispatcherOptions {
   abortGracePeriod?: number;
   /**
    * Delivers only executions whose ID is in this list. The filter is applied
-   * by `claimDue`, so other due executions are never claimed and gain no
+   * by `claimDue`, so other executions are never claimed and gain no
    * redelivery delay. An empty list delivers nothing.
-   * @default every due execution
+   * @default every execution whose due time has passed
    */
   executionIds?: readonly string[];
 }
