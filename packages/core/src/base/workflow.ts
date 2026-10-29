@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { EventParams, WorkflowEvent, EventContext } from "./event";
+import type { EffectClient } from "./effect";
 import type { ExecutionClient, ExecutionLease } from "./execution";
 import { HeapClient } from "./heap";
 import { StoreClient } from "./store";
@@ -21,6 +22,8 @@ export type WorkflowGeneratorParams<
   storeClient: StoreClient;
   /** `step.start` admits its target through this client. */
   executionClient: ExecutionClient;
+  /** `step.effect` records and settles its effects through this client. */
+  effectClient: EffectClient;
   /** The runtime clock. Delay and retry wake times are read from it. */
   clock: () => number;
   logger: Logger;

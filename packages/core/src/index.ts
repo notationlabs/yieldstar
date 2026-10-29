@@ -44,7 +44,11 @@ export type {
   EffectWatchRequest,
   WorkflowEffectErrorCode,
 } from "./base/effect";
-export { EffectClientInvariantError, WorkflowEffectError } from "./base/effect";
+export {
+  EffectClientInvariantError,
+  EffectDeliveryError,
+  WorkflowEffectError,
+} from "./base/effect";
 export type {
   EffectConflictState,
   EffectState,
@@ -187,6 +191,7 @@ export type {
 export {
   StepCacheCheck,
   StepDelay,
+  StepEffectWait,
   StepError,
   StepInvalid,
   StepKey,

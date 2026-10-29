@@ -120,6 +120,36 @@ export type EffectDeliveryErrorCode =
   | "EFFECT_RUNTIME_INVARIANT";
 
 /**
+ * The cause of the infrastructure error with which `step.effect` ends a
+ * delivery without recording its step. It never reaches workflow code: the
+ * delivery is not acknowledged, and the execution is delivered again.
+ *
+ * - `EFFECT_CLIENT_UNAVAILABLE`: an `EffectClient` call failed, and may
+ *   recover without intervention.
+ * - `EFFECT_HANDLER_INVALID`: `lookup` or `perform` returned a malformed
+ *   response or a value that is not durable.
+ * - `EFFECT_RUNTIME_INVARIANT`: the `EffectClient` threw
+ *   `EffectClientInvariantError` or answered with a malformed response.
+ */
+export class EffectDeliveryError extends Error {
+  readonly code: EffectDeliveryErrorCode;
+  readonly effectId: string;
+  readonly stepKey: string;
+
+  constructor(
+    code: EffectDeliveryErrorCode,
+    params: { effectId: string; stepKey: string; message: string },
+    options?: ErrorOptions
+  ) {
+    super(params.message, options);
+    this.name = "EffectDeliveryError";
+    this.code = code;
+    this.effectId = params.effectId;
+    this.stepKey = params.stepKey;
+  }
+}
+
+/**
  * Thrown to workflow code by `step.effect` for an invalid request or one that
  * does not match the recorded effect. It is recorded as the step's error, so
  * replay throws it again.

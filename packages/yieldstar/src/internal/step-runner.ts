@@ -32,6 +32,9 @@ import {
   type Durable,
   type StepSchemaVerdict,
   durableValueCodec,
+  StepEffectWait,
+  validateEffectRequest,
+  WorkflowEffectError,
   WorkflowStartError,
   WorkflowValueError,
 } from "@yieldstar/core";
@@ -44,6 +47,13 @@ import {
   type RuntimeCallResult,
 } from "./runtime-call";
 import type { WorkflowEvent } from "@yieldstar/core";
+import {
+  StepEffectCall,
+  type EffectCallOutcome,
+  type EffectLookup,
+} from "./effect-call";
+
+export type { EffectLookup };
 
 /**
  * @description A library of step generators, each of which:
@@ -165,7 +175,131 @@ export function createStepRunner(params: {
     return startStep(stepKey, request);
   }
 
-  return { run, delay: createDelay(clock), poll, store, start };
+  /**
+   * Runs an external operation identified by `descriptor.effectId`, at most
+   * once in effect: after an uncertain attempt, `lookup` decides whether the
+   * operation already happened before `perform` runs again (RFC 005).
+   */
+  function effect<T, Input extends Record<string, any> = DurableObject>(
+    stepKey: string,
+    descriptor: EffectDescriptor<T, Input> & DurableEffectResult<T>
+  ): AsyncGenerator<StepResponse, T, StepResult | StepError> {
+    if (typeof stepKey !== "string" || stepKey === "") {
+      throw new Error("step.effect requires a non-empty step key");
+    }
+    return effectStep(stepKey, descriptor) as AsyncGenerator<
+      StepResponse,
+      T,
+      StepResult | StepError
+    >;
+  }
+
+  return { run, delay: createDelay(clock), poll, store, start, effect };
+}
+
+/**
+ * Describes one external operation for `step.effect`. `effectId` names the
+ * operation in the external system, so every caller that means it, in any
+ * execution or runtime, uses the same ID, and no caller reuses it for another
+ * operation. The external system must guarantee that repeated `perform` calls
+ * for one ID make one operation with one result, that `not-found` proves no
+ * call exists or can still finish, and that `settled` never changes.
+ */
+export type EffectDescriptor<T, Input = DurableObject> = {
+  effectId: string;
+  /** Names the version of the behaviour of `input`, `lookup` and `perform`. */
+  operation: string;
+  input: Input & Durable<Input>;
+  /** Milliseconds before an uncertain outcome is looked up again. */
+  retryIn: number;
+  /** Reports what the external system knows about `effectId`. */
+  lookup(effectId: string): Promise<EffectLookup<T>>;
+  /** Performs the operation under `effectId`. */
+  perform(effectId: string): Promise<T>;
+};
+
+/**
+ * Checks the effect's result type without taking part in its inference. A
+ * `perform` that resolves with nothing settles the effect with `undefined`.
+ */
+type DurableEffectResult<T> = [T] extends [void]
+  ? unknown
+  : IfDurable<T, { perform(effectId: string): Promise<Durable<T>> }>;
+
+async function* effectStep(
+  key: string,
+  descriptor: EffectDescriptor<unknown, unknown>
+): AsyncGenerator<StepResponse, unknown, any> {
+  yield new StepKey(key);
+
+  const cached = yield new StepCacheCheck();
+
+  if (cached) return yield* replay(cached);
+
+  const { effectId, operation, input, retryIn, lookup, perform } =
+    (descriptor ?? {}) as Partial<EffectDescriptor<unknown, unknown>>;
+  const invalid = invalidEffectRequest({
+    effectId,
+    operation,
+    input,
+    retryIn,
+    lookup,
+    perform,
+  });
+  if (invalid) {
+    const err = new WorkflowEffectError(
+      "INVALID_EFFECT_REQUEST",
+      `step.effect "${key}": ${invalid}`
+    );
+    yield new StepError(err);
+    // unreachable – consumer calls throw() on the generator first
+    throw err;
+  }
+
+  const outcome: EffectCallOutcome = yield new StepEffectCall({
+    stepKey: key,
+    effectId: effectId!,
+    operation: operation!,
+    input: input as DurableObject,
+    retryIn: retryIn!,
+    lookup: (id) => lookup!.call(descriptor, id),
+    perform: (id) => perform!.call(descriptor, id),
+  });
+
+  switch (outcome.status) {
+    case "settled":
+      return yield* record(outcome.result);
+    case "rejected": {
+      const err = new WorkflowEffectError(
+        outcome.code,
+        `Effect "${effectId}" was begun with a different operation or input`
+      );
+      yield new StepError(err);
+      throw err;
+    }
+    case "suspended":
+      yield new StepEffectWait(outcome.wakeAt);
+      throw new Error("Effect wait yielded control unexpectedly");
+  }
+}
+
+function invalidEffectRequest(request: {
+  effectId: unknown;
+  operation: unknown;
+  input: unknown;
+  retryIn: unknown;
+  lookup: unknown;
+  perform: unknown;
+}): string | undefined {
+  const validated = validateEffectRequest(request);
+  if (!validated.ok) return validated.message;
+  const { retryIn } = request;
+  if (typeof retryIn !== "number" || !Number.isFinite(retryIn) || retryIn < 0) {
+    return "retryIn must be a finite, non-negative number";
+  }
+  if (typeof request.lookup !== "function") return "lookup must be a function";
+  if (typeof request.perform !== "function") return "perform must be a function";
+  return undefined;
 }
 
 async function* startStep(

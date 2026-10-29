@@ -16,6 +16,7 @@ import {
   executeRuntimeCall,
   infrastructure,
 } from "../internal/runtime-call";
+import { StepEffectCall, executeEffectCall } from "../internal/effect-call";
 import {
   StepResponse,
   StepKey,
@@ -23,6 +24,7 @@ import {
   StepResult,
   StepDelay,
   StepCacheCheck,
+  StepEffectWait,
   StepInvalid,
   StepStoreWait,
   WorkflowResult,
@@ -76,6 +78,7 @@ export function workflow<
     heapClient,
     storeClient,
     executionClient,
+    effectClient,
     clock,
     logger,
   }) {
@@ -156,12 +159,24 @@ export function workflow<
         // A step that needs a runtime client yields a request. Make the call
         // here, outside workflow code, and resume the step with its result.
         // An infrastructure error rejects the delivery without resuming it.
-        while (stepResponse instanceof StepRuntimeCall) {
+        while (
+          stepResponse instanceof StepRuntimeCall ||
+          stepResponse instanceof StepEffectCall
+        ) {
           stopIfAborted(signal);
-          const callResult = await executeRuntimeCall(stepResponse, {
-            stores: storeClient,
-            executions: executionClient,
-          });
+          const callResult =
+            stepResponse instanceof StepEffectCall
+              ? await executeEffectCall(stepResponse.request, {
+                  effects: effectClient,
+                  executionId,
+                  clock,
+                  assertLease: () => stopIfAborted(signal),
+                  logger,
+                })
+              : await executeRuntimeCall(stepResponse, {
+                  stores: storeClient,
+                  executions: executionClient,
+                });
           iteratorResult = await workflowIterator.next(callResult);
           stepResponse = iteratorResult.value;
         }
@@ -197,8 +212,12 @@ export function workflow<
         stepResponse instanceof StepError &&
         // 1-indexed vs 0-indexed
         stepResponse.maxAttempts > stepAttempt + 1;
+      // A watched effect stays unfinished, so the next delivery begins it
+      // again; its waiter is deleted when the step's result is recorded.
       const needsWake =
-        !cached?.meta.done && stepResponse instanceof StepStoreWait;
+        !cached?.meta.done &&
+        (stepResponse instanceof StepStoreWait ||
+          stepResponse instanceof StepEffectWait);
 
       if (!cached && stepResponseJson !== undefined) {
         const done = !needsRetry && !needsWake;
