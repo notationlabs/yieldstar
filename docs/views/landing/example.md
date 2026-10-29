@@ -2,15 +2,14 @@
 
 ```ts [src/workflow.ts]
 import { workflow } from "yieldstar"
-import { $ } from "bun"
 
-export const summarise = workflow(async function* (step) {
-  let draft = yield* step.run(() => llm(`Write a blog post about ${step.params.topic}`);
+export const summarise = workflow(async function* (step, event) {
+  let draft = yield* step.run(() => llm(`Write a blog post about ${event.params.topic}`));
 
-  while (true) {
-    const feedback = yield* step.run(() => getUserFeedback({ draft }));
+  for (let round = 0; ; round++) {
+    const feedback = yield* step.run(`feedback:${round}`, () => getUserFeedback({ draft }));
     if (!feedback) break;
-    draft = yield* step.run(() => llm(`Improve:\n${draft}\nFeedback:${feedback}`));
+    draft = yield* step.run(`revise:${round}`, () => llm(`Improve:\n${draft}\nFeedback:${feedback}`));
   }
 
   return yield* step.run(() => publish(draft));
@@ -19,15 +18,14 @@ export const summarise = workflow(async function* (step) {
 
 ```ts [src/trigger.ts]
 import { createLocalSdk } from "yieldstar";
-import { createWorkflowInvoker } from "yieldstar/bun-worker-invoker";
-import { invoker } from "./shared";
+import { runtime, invoker } from "./shared";
 import type { Router } from "./router";
 
-const sdk = createLocalSdk<Router>(invoker);
+const sdk = createLocalSdk<Router>(runtime, { invoker });
 
 const result = await sdk.triggerAndWait({
   workflowId: "summarise",
-  params: { topic: "quantum computing", maxWords: 40 },
+  params: { topic: "quantum computing" },
 });
 
 console.log(`Published to ${result.url}`);

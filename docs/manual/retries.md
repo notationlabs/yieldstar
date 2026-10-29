@@ -7,17 +7,16 @@ Yieldstar implements structured retries through `RetryableError`. Throwing this 
 ```ts
 import { RetryableError } from "yieldstar";
 
-yield *
-  step.run(async () => {
-    const res = await fetch("https://api.example.com/charge");
-    if (!res.ok) {
-      throw new RetryableError("Payment failed", {
-        maxAttempts: 5,
-        retryInterval: 2000,
-      });
-    }
-    return res.json();
-  });
+yield* step.run(async () => {
+  const res = await fetch("https://api.example.com/charge");
+  if (!res.ok) {
+    throw new RetryableError("Payment failed", {
+      maxAttempts: 5,
+      retryInterval: 2000,
+    });
+  }
+  return res.json();
+});
 ```
 
 | Option          | Type     | Description                                                           |
@@ -33,13 +32,12 @@ Once all attempts are spent, the runtime throws the error into the workflow gene
 
 ```ts
 try {
-  yield *
-    step.run(async () => {
-      throw new RetryableError("flaky", { maxAttempts: 3, retryInterval: 1000 });
-    });
+  yield* step.run(async () => {
+    throw new RetryableError("flaky", { maxAttempts: 3, retryInterval: 1000 });
+  });
 } catch (err) {
   // all 3 attempts failed
-  yield * step.run(() => markAsFailed());
+  yield* step.run(() => markAsFailed());
 }
 ```
 
@@ -48,10 +46,9 @@ try {
 Not every failure warrants a retry. Any error that is not a `RetryableError` completes the step immediately with that error, without suspending. The runtime stores the error and throws it into the workflow. If the workflow does not catch it, the execution record becomes `failed` with that error as its outcome.
 
 ```ts
-yield *
-  step.run(() => {
-    throw new Error("fatal"); // no retry, thrown immediately
-  });
+yield* step.run(() => {
+  throw new Error("fatal"); // no retry, thrown immediately
+});
 ```
 
 ## Retry via polling
@@ -59,5 +56,5 @@ yield *
 For cases where a step needs to wait on an external condition rather than recover from a failure, `step.poll` wraps the retry mechanism in a predicate loop. It evaluates a function at a fixed interval and completes when the function returns `true`. If the function returns `false`, the poll throws a `RetryableError` internally with the configured policy. If it throws a regular error, the step fails without retrying.
 
 ```ts
-yield * step.poll({ retryInterval: 1000, maxAttempts: 10 }, () => isReady());
+yield* step.poll({ retryInterval: 1000, maxAttempts: 10 }, () => isReady());
 ```

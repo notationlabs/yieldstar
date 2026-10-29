@@ -37,7 +37,7 @@ const { executionId } = await sdk.trigger({
 | `code`                    | Cause                                                                     |
 | ------------------------- | ------------------------------------------------------------------------- |
 | `EXECUTION_ID_CONFLICT`   | The supplied `executionId` is already in use. IDs are never reused, even after the execution fails |
-| `INVALID_EXECUTION_EVENT` | `params` or `context` cannot round-trip through JSON exactly (see below)  |
+| `INVALID_EXECUTION_EVENT` | `params` or `context` are not durable values (see below)                  |
 
 ```ts
 import { ExecutionAdmissionError } from "yieldstar";

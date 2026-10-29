@@ -2,7 +2,7 @@
 
 Yieldstar separates a runtime family from its connectors. A runtime family defines where coordination, scheduling, and workflow execution live. A connector binds that family to a host runtime and persistence driver.
 
-Version 0.5 ships one runtime family: the resident-process runtime. Its `ExecutionDispatcher` and SQLite connection stay inside one long-lived application process, while each delivery of an execution runs in a forked child process.
+Yieldstar ships one runtime family: the resident-process runtime. Its `ExecutionDispatcher` and SQLite connection stay inside one long-lived application process, while each delivery of an execution runs in a forked child process.
 
 | Runtime family | Host | Persistence connector | Workflow execution | Ingress |
 | --- | --- | --- | --- | --- |

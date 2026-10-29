@@ -1,6 +1,6 @@
 # Resident-process runtime
 
-The resident-process runtime keeps coordination inside the application that owns the workflow service. It is the runtime family available in Yieldstar 0.5.
+The resident-process runtime keeps coordination inside the application that owns the workflow service.
 
 The long-lived process owns four pieces:
 
@@ -25,7 +25,7 @@ For Node, change the import to `@yieldstar/sqlite-runtime/node`. No other runtim
 
 ## Delivery guarantees
 
-`SqliteRuntime` keeps execution records, step results, stores and waiters in one database, so it keeps every [runtime guarantee](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md#runtime-guarantees) in single transactions:
+`SqliteRuntime` keeps execution records, step results, stores, effects and waiters in one database, so it keeps every [runtime guarantee](https://github.com/notationlabs/yieldstar/blob/main/docs/store-connector-spec.md#runtime-guarantees) in single transactions:
 
 | Situation                                            | Behavior                                                                                     |
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------- |
@@ -59,5 +59,3 @@ Both connectors implement the same synchronous `SqliteDriver` contract. Transact
 The invoker uses `node:child_process.fork` with advanced IPC serialization. Event params and context, results and errors cross the process boundary as durable value encodings, so errors keep their registered class and `undefined` properties keep their keys. The worker sends a `ready` handshake before the invoker delivers an event; a missing handshake fails after the configured timeout instead of hanging. TypeScript worker paths require Node 22.6 or newer for built-in type stripping. Use compiled JavaScript worker files with older Node releases.
 
 Parent and worker must use the same runtime family. Node must fork Node and Bun must fork Bun because their advanced IPC wire formats are not interoperable. The optional `execPath` can select another executable only within that constraint.
-
-The executable invoker mode and the old `@yieldstar/bun-*` packages were removed in 0.5. Use `@yieldstar/worker-invoker`, `@yieldstar/http-server`, and the appropriate `@yieldstar/sqlite-runtime` connector entry point.

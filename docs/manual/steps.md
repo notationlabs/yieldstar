@@ -13,22 +13,18 @@ Note: Steps must be yielded with `yield*`; plain `yield` produces a runtime erro
 `step.run` executes a function, caches its return value, and replays that cached result on subsequent workflow invocation without re-executing the function.
 
 ```ts
-const result =
-  yield *
-  step.run(() => {
-    return fetchUser(userId);
-  });
+const result = yield* step.run(() => {
+  return fetchUser(userId);
+});
 ```
 
 `step.run` accepts sync or async functions:
 
 ```ts
-const data =
-  yield *
-  step.run(async () => {
-    const res = await fetch("https://api.example.com/data");
-    return res.json();
-  });
+const data = yield* step.run(async () => {
+  const res = await fetch("https://api.example.com/data");
+  return res.json();
+});
 ```
 
 ## Step values
@@ -46,8 +42,8 @@ For example, a `reserve-stock` step that returns its hold's expiry as a `Date` i
 
 ```ts
 const reservation = yield* step.run("reserve-stock", async () => ({
-  id: "r-42",
-  expiresAt: new Date(Date.now() + 15 * 60_000), // ← not durable
+id: "r-42",
+expiresAt: new Date(Date.now() + 15 * 60_000), // ← not durable
 }));
 // Throws WorkflowValueError with code "INVALID_STEP_VALUE" and stepKey "reserve-stock"
 ```
@@ -74,9 +70,9 @@ A step that needs a `Date` returns an ISO string and passes a schema that turns 
 
 ```ts
 const expiresAt = yield* step.run(
-  "reserve-stock",
-  async () => new Date(Date.now() + 15 * 60_000).toISOString(),
-  { schema: z.string().pipe(z.coerce.date()) }
+"reserve-stock",
+async () => new Date(Date.now() + 15 * 60_000).toISOString(),
+{ schema: z.string().pipe(z.coerce.date()) }
 );
 // expiresAt is a Date, on the first run and on replay
 ```
@@ -95,20 +91,20 @@ Replay revives an error as the class registered under its `name`. A custom class
 import { registerErrorClass } from "yieldstar";
 
 class CourierError extends Error {
-  code = "COURIER_DOWN";
-  constructor(public courier: string) {
-    super(`${courier} is down`);
-    this.name = "CourierError";
-  }
+code = "COURIER_DOWN";
+constructor(public courier: string) {
+  super(`${courier} is down`);
+  this.name = "CourierError";
+}
 }
 registerErrorClass("CourierError", CourierError);
 
 try {
-  yield* step.run("ship", () => courier.book(order));
+yield* step.run("ship", () => courier.book(order));
 } catch (err) {
-  if (err instanceof CourierError) {
-    yield* step.run("ship-backup", () => backupCourier.book(order));
-  }
+if (err instanceof CourierError) {
+  yield* step.run("ship-backup", () => backupCourier.book(order));
+}
 }
 ```
 
@@ -125,7 +121,7 @@ A thrown value that is not an error, such as a string or a plain object, is reth
 Once it is due, the dispatcher delivers the execution again. All steps before the delay replay from cache, and execution continues from the next step.
 
 ```ts
-yield * step.delay(30_000); // pause for 30 seconds
+yield* step.delay(30_000); // pause for 30 seconds
 ```
 
 This makes long pauses (waiting for a cooling-off period, spacing out API calls, scheduling future work) durable across process restarts without blocking a thread.
@@ -135,11 +131,10 @@ This makes long pauses (waiting for a cooling-off period, spacing out API calls,
 `step.poll` repeatedly evaluates a predicate at a fixed interval until it returns `true` or exhausts its retry budget. It composes `step.run` with `RetryableError` internally, so each attempt is cached and retried on the same schedule as any other step.
 
 ```ts
-yield *
-  step.poll({ retryInterval: 1000, maxAttempts: 10 }, async () => {
-    const status = await checkDeployment(deployId);
-    return status === "ready";
-  });
+yield* step.poll({ retryInterval: 1000, maxAttempts: 10 }, async () => {
+  const status = await checkDeployment(deployId);
+  return status === "ready";
+});
 ```
 
 If the predicate returns `false` on every attempt, the step throws after `maxAttempts`. If the predicate throws a non-retryable error, execution stops immediately.
@@ -273,16 +268,16 @@ To disambiguate, pass an explicit cache key as the first argument:
 
 ```ts
 for (let i = 0; i < items.length; i++) {
-  yield * step.run(`process-item:${i}`, () => processItem(items[i]));
+  yield* step.run(`process-item:${i}`, () => processItem(items[i]));
 }
 ```
 
 All three step primitives accept an optional key:
 
 ```ts
-yield * step.run("key", fn);
-yield * step.delay("key", ms);
-yield * step.poll("key", opts, predicate);
+yield* step.run("key", fn);
+yield* step.delay("key", ms);
+yield* step.poll("key", opts, predicate);
 ```
 
 `step.start` always takes a key, because the key identifies the start request as well as the cached step. Keep it stable across deploys: a different key starts a different target. `step.effect` always takes a key too; the effect itself is identified by its `effectId`.

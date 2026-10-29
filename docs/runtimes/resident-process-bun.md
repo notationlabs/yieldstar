@@ -5,7 +5,7 @@ Use the Bun connector when the application process and forked workers run under 
 ## Install
 
 ```sh
-bun add yieldstar @yieldstar/core @yieldstar/sqlite-runtime @yieldstar/worker-invoker
+bun add yieldstar @yieldstar/core @yieldstar/sqlite-runtime @yieldstar/worker-invoker pino
 ```
 
 ## Runtime

@@ -24,6 +24,4 @@ To expose that runtime over HTTP, also install:
 bun add @yieldstar/http-server
 ```
 
-Version 0.5 replaced the old `@yieldstar/bun-sqlite-runtime`, `@yieldstar/bun-worker-invoker`, and `@yieldstar/bun-http-server` packages with the runtime-neutral packages above. Choose the `/bun` or `/node` SQLite connector only when importing `createSqliteDb`.
-
 See the [runtime matrix](../runtimes/index.md) for supported runtime families and connector combinations.

@@ -2,8 +2,6 @@
 
 Yieldstar is a workflow engine that provides a durable runtime for JavaScript generator functions.
 
-Version 0.5 ships a resident-process runtime backed by SQLite. It runs on Bun or Node using the host's native SQLite driver and does not require a particular cloud platform.
-
 Workflows are checkpointed with primitives such as `yield* step.run()` and `yield* step.delay()`. The runtime persists step results and resumes delayed, retried, or state-waiting workflows across process restarts.
 
 ```ts
@@ -53,9 +51,10 @@ Yieldstar is a monorepo of composable packages:
 | `@yieldstar/test-utils`         | Test SDK and schema helpers used internally by this repository                        |
 | `@yieldstar/runtime-conformance`  | Vitest qualification suites for third-party runtimes and store connectors            |
 
-A runtime has three clients, and a dispatcher drives them:
+A runtime has four clients, and a dispatcher drives them:
 
 - The **execution client** keeps one durable record per execution: its event, its status and outcome, and when it is next due.
 - The **heap** stores step results so they survive restarts.
 - The **store** client holds schema-validated shared state and the waiters of suspended workflows.
+- The **effect** client records the external operations that `step.effect` calls, so a replay reads their results instead of calling again.
 - The **dispatcher** (`ExecutionDispatcher`) claims due executions, hands each to an invoker, and records the outcome.

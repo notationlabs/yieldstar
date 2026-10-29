@@ -18,7 +18,7 @@ The generator function receives three arguments:
 
 | Argument | Type                             | Description                                                   |
 | -------- | -------------------------------- | ------------------------------------------------------------- |
-| `step`   | `StepRunner`                     | Exposes `run`, `delay`, and `poll` primitives                 |
+| `step`   | `StepRunner`                     | Exposes `run`, `delay`, `poll`, `store`, `start` and `effect` |
 | `event`  | `WorkflowEvent<Params, Context>` | Contains `workflowId`, `executionId`, `params`, and `context` |
 | `logger` | `Logger` (Pino)                  | Structured logger scoped to the execution                     |
 
@@ -89,7 +89,7 @@ interface ExecutionRecord {
 | ----------- | -------------------------------------------------------------------- |
 | `admitted`  | No delivery has been acknowledged yet                                |
 | `running`   | A dispatcher holds a live lease on the execution and is delivering it |
-| `suspended` | The latest delivery paused on a delay, retry or store wait           |
+| `suspended` | The latest delivery paused on a delay, retry, store wait or effect wait |
 | `completed` | The workflow returned. `outcome.result` holds the return value       |
 | `failed`    | Workflow code threw an uncaught error. `outcome.error` holds it      |
 

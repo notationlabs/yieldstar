@@ -9,7 +9,7 @@ Node 22.6 or newer can run TypeScript worker entry points through built-in type 
 ## Install
 
 ```sh
-pnpm add yieldstar @yieldstar/core @yieldstar/sqlite-runtime @yieldstar/worker-invoker
+pnpm add yieldstar @yieldstar/core @yieldstar/sqlite-runtime @yieldstar/worker-invoker pino
 ```
 
 ## Runtime

@@ -47,7 +47,6 @@ yield* step.run(async () => {
 - Full usage, runtimes, APIs, and examples: [packages/yieldstar/README.md](packages/yieldstar/README.md)
 - Runtime families and connectors: [docs/runtimes/index.md](docs/runtimes/index.md)
 - Store connector specification and qualification: [docs/store-connector-spec.md](docs/store-connector-spec.md)
-- Migrating from 0.4: [docs/migrations/0.4-to-0.5.md](docs/migrations/0.4-to-0.5.md)
 
 ## Contributing
 

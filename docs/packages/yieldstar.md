@@ -14,6 +14,7 @@ bun add yieldstar
 import { workflow, createWorkflow } from "yieldstar";
 import { createWorkflowRouter } from "yieldstar";
 import { RetryableError, ExecutionAdmissionError, WorkflowStartError } from "yieldstar";
+import { WorkflowValueError, registerErrorClass, WORKFLOW_RESULT_STEP_KEY } from "yieldstar";
 import { WorkflowEffectError, EffectDeliveryError, EffectClientInvariantError } from "yieldstar";
 import { defineStore } from "yieldstar";
 import { createLocalSdk } from "yieldstar";
@@ -21,6 +22,8 @@ import { createHttpSdkFactory } from "yieldstar";
 import type {
   WorkflowFn,
   StepRunner,
+  StepRunOptions,
+  DurableStepFn,
   WorkflowStore,
   ExecutionRecord,
   ExecutionStatus,
@@ -28,6 +31,8 @@ import type {
   Durable,
   DurableObject,
   DurableValue,
+  ErrorClass,
+  WorkflowValueErrorCode,
   WorkflowStartErrorCode,
   EffectDescriptor,
   EffectLookup,
@@ -125,21 +130,21 @@ const ConversationStore = defineStore("conversation", schema, {
 Available on the first argument of a workflow function:
 
 ```ts
-yield * step.run(fn);
-yield * step.run("key", fn);
-yield * step.run("key", fn, { schema });
+yield* step.run(fn);
+yield* step.run("key", fn);
+yield* step.run("key", fn, { schema });
 
-yield * step.delay(ms);
-yield * step.delay("key", ms);
+yield* step.delay(ms);
+yield* step.delay("key", ms);
 
-yield * step.poll(opts, predicate);
-yield * step.poll("key", opts, predicate);
+yield* step.poll(opts, predicate);
+yield* step.poll("key", opts, predicate);
 
 const store = step.store(definition, { id }); // no yield*
 
-yield * step.start("key", { workflowId, params });
+yield* step.start("key", { workflowId, params });
 
-yield * step.effect("key", { effectId, operation, input, lookup, perform, retryIn });
+yield* step.effect("key", { effectId, operation, input, lookup, perform, retryIn });
 ```
 
 `step.store` returns a `WorkflowStore` handle synchronously and records no step, so a loop or helper can request the same store again. `id` defaults to `event.executionId`. The handle has the readonly properties `definition`, `id` and `key`, and the durable operations `get`, `select`, `update`, `updateFrom`, `deleteFrom`, `when` and `take`, each of which creates a missing store from the definition's `initial` – see [Durable Stores](../manual/stores.md) and [Waiting on State](../manual/store-waiting.md). Helpers that take the step runner can type it as `StepRunner`.
