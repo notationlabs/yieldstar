@@ -368,7 +368,7 @@ test("local trigger rejects params that cannot round-trip", async () => {
     .trigger({
       workflowId: "noop",
       executionId: "lossy",
-      params: { at: new Date() },
+      params: { notify: () => {} },
     } as never)
     .catch((err) => err);
   expect(error).toMatchObject({ code: "INVALID_EXECUTION_EVENT" });

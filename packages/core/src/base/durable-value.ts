@@ -6,8 +6,12 @@ export type DurableValue =
   | number
   | string
   | undefined
+  | bigint
+  | Date
   | Error
   | DurableValue[]
+  | Map<DurableValue, DurableValue>
+  | Set<DurableValue>
   | DurableObject;
 
 export type DurableObject = { [key: string]: DurableValue };
@@ -23,11 +27,21 @@ export type Durable<T> = T extends
   | boolean
   | null
   | undefined
+  | bigint
+  | Date
   | Error
   ? T
   : T extends readonly (infer U)[]
   ? readonly Durable<U>[]
-  : T extends Function | Date | Map<any, any> | Set<any> | bigint
+  : T extends Map<infer K, infer V>
+  ? Map<Durable<K>, Durable<V>>
+  : T extends ReadonlyMap<infer K, infer V>
+  ? ReadonlyMap<Durable<K>, Durable<V>>
+  : T extends Set<infer U>
+  ? Set<Durable<U>>
+  : T extends ReadonlySet<infer U>
+  ? ReadonlySet<Durable<U>>
+  : T extends Function
   ? never
   : { [K in keyof T]: Durable<T[K]> };
 
@@ -53,9 +67,11 @@ export interface DurableValueCodec {
   /**
    * Validates `value` recursively and returns its canonical JSON: object keys
    * sorted by UTF-16 code unit and `-0` written as `0`, so equal values always
-   * encode to the same string. `undefined`, errors and plain objects with an
-   * own `$type` key are written as tagged objects. Never throws for an invalid
-   * value.
+   * encode to the same string. `undefined`, `bigint`, `Date`, `Map`, `Set`,
+   * errors and plain objects with an own `$type` key are written as tagged
+   * objects. Map entries and set values keep their insertion order, so maps
+   * or sets that differ only in order encode differently. Never throws for an
+   * invalid value.
    */
   encode(value: unknown): DurableValueEncoding;
 
@@ -134,6 +150,8 @@ function encodeValue(value: unknown, path: string, ancestors: Set<object>): stri
       return value ? "true" : "false";
     case "string":
       return JSON.stringify(value);
+    case "bigint":
+      return `{"$type":"bigint","value":"${value}"}`;
     case "number":
       if (!Number.isFinite(value)) {
         throw new DurableValueError(`${path}: ${value} is not a finite number`);
@@ -154,6 +172,9 @@ function encodeValue(value: unknown, path: string, ancestors: Set<object>): stri
   try {
     if (Array.isArray(value)) return encodeArray(value, path, ancestors);
     if (value instanceof Error) return encodeError(value, path, ancestors);
+    if (value instanceof Date) return encodeDate(value, path);
+    if (value instanceof Map) return encodeMap(value, path, ancestors);
+    if (value instanceof Set) return encodeSet(value, path, ancestors);
     return encodeObject(value, path, ancestors);
   } finally {
     // Error encoding recovers from invalid properties, so the set must be
@@ -185,6 +206,52 @@ function encodeArray(value: unknown[], path: string, ancestors: Set<object>) {
     items.push(encodeValue(dataValue(descriptor, itemPath), itemPath, ancestors));
   }
   return `[${items.join(",")}]`;
+}
+
+function encodeDate(value: Date, path: string) {
+  expectBuiltIn(value, Date.prototype, "dates", path);
+  if (Number.isNaN(value.getTime())) {
+    throw new DurableValueError(`${path}: invalid Date`);
+  }
+  return `{"$type":"date","value":${JSON.stringify(value.toISOString())}}`;
+}
+
+function encodeMap(
+  value: Map<unknown, unknown>,
+  path: string,
+  ancestors: Set<object>
+) {
+  expectBuiltIn(value, Map.prototype, "maps", path);
+  const entries: string[] = [];
+  let i = 0;
+  for (const [key, item] of value) {
+    const entryPath = `${path}.entries[${i++}]`;
+    const encodedKey = encodeValue(key, `${entryPath}[0]`, ancestors);
+    entries.push(`[${encodedKey},${encodeValue(item, `${entryPath}[1]`, ancestors)}]`);
+  }
+  return `{"$type":"map","entries":[${entries.join(",")}]}`;
+}
+
+function encodeSet(value: Set<unknown>, path: string, ancestors: Set<object>) {
+  expectBuiltIn(value, Set.prototype, "sets", path);
+  const values: string[] = [];
+  let i = 0;
+  for (const item of value) {
+    values.push(encodeValue(item, `${path}.values[${i++}]`, ancestors));
+  }
+  return `{"$type":"set","values":[${values.join(",")}]}`;
+}
+
+/**
+ * Rejects subclasses and own properties, which the tag would not keep.
+ */
+function expectBuiltIn(value: object, proto: object, kind: string, path: string) {
+  if (Object.getPrototypeOf(value) !== proto) {
+    throw new DurableValueError(`${path}: ${kind} must not be subclassed`);
+  }
+  if (Reflect.ownKeys(value).length > 0) {
+    throw new DurableValueError(`${path}: ${kind} must not have own properties`);
+  }
 }
 
 function encodeObject(value: object, path: string, ancestors: Set<object>) {
@@ -336,11 +403,82 @@ export function decodeParsedValue(parsed: unknown, path = "$"): DurableValue {
       }
       return decodeObject(value as Record<string, unknown>, `${path}.value`);
     }
+    case "bigint":
+      return decodeBigInt(object, path);
+    case "date":
+      return decodeDate(object, path);
+    case "map":
+      return decodeMap(object, path);
+    case "set":
+      return decodeSet(object, path);
     case "error":
       return decodeError(object, path);
     default:
       throw new DurableValueError(`${path}: unknown $type ${JSON.stringify(object.$type)}`);
   }
+}
+
+function decodeBigInt(tag: Record<string, unknown>, path: string): bigint {
+  expectKeys(tag, path, ["$type", "value"], []);
+  const { value } = tag;
+  if (typeof value !== "string" || !/^-?(0|[1-9][0-9]*)$/.test(value) || value === "-0") {
+    throw new DurableValueError(`${path}.value: must be an integer string`);
+  }
+  return BigInt(value);
+}
+
+function decodeDate(tag: Record<string, unknown>, path: string): Date {
+  expectKeys(tag, path, ["$type", "value"], []);
+  const { value } = tag;
+  const date = typeof value === "string" ? new Date(value) : undefined;
+  // Only the string toISOString writes is accepted, so that every date has
+  // one encoding.
+  if (!date || Number.isNaN(date.getTime()) || date.toISOString() !== value) {
+    throw new DurableValueError(`${path}.value: must be an ISO 8601 date string`);
+  }
+  return date;
+}
+
+function decodeMap(
+  tag: Record<string, unknown>,
+  path: string
+): Map<DurableValue, DurableValue> {
+  expectKeys(tag, path, ["$type", "entries"], []);
+  const entries = expectArray(tag.entries, `${path}.entries`);
+  const map = new Map<DurableValue, DurableValue>();
+  entries.forEach((entry, i) => {
+    const entryPath = `${path}.entries[${i}]`;
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw new DurableValueError(`${entryPath}: must be a [key, value] pair`);
+    }
+    map.set(
+      decodeParsedValue(entry[0], `${entryPath}[0]`),
+      decodeParsedValue(entry[1], `${entryPath}[1]`)
+    );
+  });
+  if (map.size !== entries.length) {
+    throw new DurableValueError(`${path}.entries: duplicate keys`);
+  }
+  return map;
+}
+
+function decodeSet(tag: Record<string, unknown>, path: string): Set<DurableValue> {
+  expectKeys(tag, path, ["$type", "values"], []);
+  const values = expectArray(tag.values, `${path}.values`);
+  const set = new Set(
+    values.map((item, i) => decodeParsedValue(item, `${path}.values[${i}]`))
+  );
+  if (set.size !== values.length) {
+    throw new DurableValueError(`${path}.values: duplicate values`);
+  }
+  return set;
+}
+
+function expectArray(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new DurableValueError(`${path}: must be an array`);
+  }
+  return value;
 }
 
 function decodeObject(object: Record<string, unknown>, path: string): DurableObject {

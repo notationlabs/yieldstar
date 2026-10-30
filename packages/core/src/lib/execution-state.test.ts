@@ -30,7 +30,7 @@ test.each([
   ["array params", { workflowId: "w", params: [] }],
   ["null params", { workflowId: "w", params: null }],
   ["string params", { workflowId: "w", params: "x" }],
-  ["class instance params", { workflowId: "w", params: new Date(0) }],
+  ["class instance params", { workflowId: "w", params: new WeakMap() }],
 ])("prepareExecutionStart rejects %s", (_label, request) => {
   const prepared = prepareExecutionStart({ requestId, ...request } as never);
   expect(prepared.ok).toBe(false);
@@ -169,8 +169,8 @@ test("execution events round trip through the codec", () => {
 });
 
 test.each([
-  ["a Date in params", { params: { at: new Date(0) }, context: new Map() }],
-  ["a Date in context", { params: {}, context: new Map([["at", new Date(0)]]) }],
+  ["an invalid Date in params", { params: { at: new Date(Number.NaN) }, context: new Map() }],
+  ["a WeakMap in context", { params: {}, context: new Map([["at", new WeakMap()]]) }],
   ["a number context key", { params: {}, context: new Map([[7, 1]]) }],
 ])("prepareExecutionAdmission rejects %s with INVALID_EXECUTION_EVENT", (_label, event) => {
   expect(prepareExecutionAdmission({ workflowId: "w", ...event })).toMatchObject({
@@ -233,7 +233,7 @@ test("acknowledging a non-durable result records a failed outcome with INVALID_S
   const { state, lease } = claimExecution(admitted, { now: 0, duration: 1_000 });
   const acknowledged = acknowledgeExecution(state, {
     lease,
-    outcome: { status: "completed", result: { at: new Date(0) } },
+    outcome: { status: "completed", result: { at: new WeakMap() } },
     now: 1,
   });
   expect(acknowledged.state.status).toBe("failed");

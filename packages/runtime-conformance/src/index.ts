@@ -247,7 +247,7 @@ export function registerStoreClientConformance({
       const { stores } = harness.runtime;
       const invalid = { code: "INVALID_STEP_VALUE", name: "WorkflowValueError" };
       try {
-        seed(Store, "never-created", { messages: [], unrelated: new Date(0) as never });
+        seed(Store, "never-created", { messages: [], unrelated: new Date(Number.NaN) as never });
         await expect(
           stores.getStore({ definition: Store, id: "never-created" })
         ).rejects.toMatchObject(invalid);
@@ -274,7 +274,7 @@ export function registerStoreClientConformance({
             stepId,
             updater(draft) {
               draft.messages.push({ id: "two" });
-              (draft as Record<string, unknown>).at = new Map();
+              (draft as Record<string, unknown>).at = new Date(Number.NaN);
             },
           })
         ).rejects.toMatchObject({ ...invalid, stepKey: "update" });
@@ -283,7 +283,7 @@ export function registerStoreClientConformance({
             definition: Store,
             id: "durable",
             snapshot: created,
-            updater: () => ({ messages: [], unrelated: 1n as never }),
+            updater: () => ({ messages: [], unrelated: Number.NaN as never }),
           })
         ).rejects.toMatchObject(invalid);
         expect(await stores.getStore({ definition: Store, id: "durable" })).toMatchObject({
@@ -300,7 +300,7 @@ export function registerStoreClientConformance({
           stores.takeFromStore({
             definition: TakeStore,
             id: "durable-take",
-            selector: (state) => state.messages.length > 0 && new Set(state.messages),
+            selector: (state) => state.messages.length > 0 && new Date(Number.NaN),
             claim(draft) {
               draft.messages = [];
             },

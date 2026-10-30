@@ -217,7 +217,7 @@ test("INVALID_START_PARAMETERS is recorded and thrown after one client call", as
     charge: workflow(async function* (step) {
       yield* step.start("ship", {
         workflowId: "ship-order",
-        params: { at: new Date() } as never,
+        params: { notify: () => {} } as never,
       });
       return "unreachable";
     }),
@@ -225,7 +225,7 @@ test("INVALID_START_PARAMETERS is recorded and thrown after one client call", as
   const start = fakeStart(() => ({
     status: "rejected",
     code: "INVALID_START_PARAMETERS",
-    message: "$.at: Date instances are not plain objects",
+    message: '$["notify"]: function is not a durable value',
   }));
   vi.spyOn(runtime.executions, "start").mockImplementation(start);
 

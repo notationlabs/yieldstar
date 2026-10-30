@@ -33,22 +33,30 @@ The runtime records each step's result in the step's record, and replay reads th
 
 | Durable                                                       | Not durable                                       |
 | ------------------------------------------------------------- | ------------------------------------------------- |
-| `null`, booleans, finite numbers, strings                     | `Date`, `Map`, `Set`, `bigint`, functions         |
+| `null`, booleans, finite numbers, strings, `bigint`           | Functions and symbols                             |
 | `undefined`, as a whole value, a property or an array item    | Class instances, such as `new Reservation()`      |
-| Errors, including their class, `code`, `cause` and fields     | `NaN`, `Infinity`, sparse arrays, cycles          |
-| Arrays and plain objects made of durable values               | Objects with symbol keys, getters or setters      |
+| Valid `Date`s, and `Map`s and `Set`s of durable values        | `NaN`, `Infinity`, invalid `Date`s, sparse arrays, cycles |
+| Errors, including their class, `code`, `cause` and fields     | Objects with symbol keys, getters or setters      |
+| Arrays and plain objects made of durable values               | Subclasses of `Array`, `Date`, `Map` and `Set`    |
 
-For example, a `reserve-stock` step that returns its hold's expiry as a `Date` is rejected on its first run:
+A `Date`, `Map`, `Set` or `bigint` reads back as the same type, so a step can return one directly:
 
 ```ts
 const reservation = yield* step.run("reserve-stock", async () => ({
 id: "r-42",
-expiresAt: new Date(Date.now() + 15 * 60_000), // ← not durable
+expiresAt: new Date(Date.now() + 15 * 60_000),
 }));
+reservation.expiresAt; // a Date, on the first run and on replay
+```
+
+A step that returns a value that is not durable, such as a class instance, is rejected on its first run:
+
+```ts
+const hold = yield* step.run("reserve-stock", async () => new Reservation("r-42"));
 // Throws WorkflowValueError with code "INVALID_STEP_VALUE" and stepKey "reserve-stock"
 ```
 
-The rejection is recorded as the step's error, so replay throws the same `WorkflowValueError`, and workflow code can catch it like any other step error. This is important because the mistake surfaces in the first test run, rather than on a replay hours later. TypeScript catches most of these values earlier with the `Durable<T>` type, so `new Date()` in the example above is a type error. Every API that records a value checks it: `step.run` results, workflow params and results, `step.start` params, `step.effect` inputs and results, store state (through the store's schema output) and the values `select`, `when` and `take` return. Interfaces, optional properties and unions with `undefined` are accepted. A value typed `any` is not checked, and one typed `unknown` is rejected until it is narrowed, since it may hold anything; the runtime still checks both.
+The rejection is recorded as the step's error, so replay throws the same `WorkflowValueError`, and workflow code can catch it like any other step error. This is important because the mistake surfaces in the first test run, rather than on a replay hours later. TypeScript catches most of these values earlier with the `Durable<T>` type, which rejects a function anywhere in a value. It cannot tell a class instance from a plain object, so only the runtime check rejects class instances. Every API that records a value checks it: `step.run` results, workflow params and results, `step.start` params, `step.effect` inputs and results, store state (through the store's schema output) and the values `select`, `when` and `take` return. Interfaces, optional properties and unions with `undefined` are accepted. A value typed `any` is not checked, and one typed `unknown` is rejected until it is narrowed, since it may hold anything; the runtime still checks both.
 
 Workflow code never receives the object the step function returned. On the first run, `step.run` encodes the result, decodes it again, and returns the decoded copy, which is the same value replay reads from the record:
 
@@ -62,19 +70,19 @@ recorded; // { id: 42, note: undefined }: the undefined property keeps its key
 
 Plain objects stay plain objects. An object with `name`, `message` and `stack` properties is not an error, and an object with a `$type` key reads back unchanged.
 
-The same rule applies to the values that store steps record, to store state (see [Durable Stores](./stores.md#durable-state)) and to the workflow's own result. A workflow that returns a `Date` fails with `WorkflowValueError` (`INVALID_STEP_VALUE`) and the step key `$$workflow-result$$`.
+The same rule applies to the values that store steps record, to store state (see [Durable Stores](./stores.md#durable-state)) and to the workflow's own result. A workflow that returns a class instance fails with `WorkflowValueError` (`INVALID_STEP_VALUE`) and the step key `$$workflow-result$$`.
 
 ### Schemas
 
-A step that needs a `Date` returns an ISO string and passes a schema that turns the string into a `Date`. The schema is any [Standard Schema](https://standardschema.dev), such as one from Zod or Valibot:
+A step that needs a class instance returns a durable form of it and passes a schema that rebuilds the instance. The schema is any [Standard Schema](https://standardschema.dev), such as one from Zod or Valibot:
 
 ```ts
-const expiresAt = yield* step.run(
-"reserve-stock",
-async () => new Date(Date.now() + 15 * 60_000).toISOString(),
-{ schema: z.string().pipe(z.coerce.date()) }
+const price = yield* step.run(
+"quote",
+async () => ({ amount: "12.50", currency: "GBP" }),
+{ schema: MoneyInput.transform((value) => new Money(value)) }
 );
-// expiresAt is a Date, on the first run and on replay
+// price is a Money, on the first run and on replay
 ```
 
 `step.run` validates the decoded value with the schema on the first run and on every replay, and returns the schema's output. The step function must still return a durable value, because the record stores the schema's input, not its output.

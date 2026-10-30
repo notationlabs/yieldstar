@@ -316,7 +316,7 @@ export function registerEffectClientConformance({
         ["an empty effect ID", { effectId: "" }],
         ["an empty operation", { operation: "" }],
         ["array input", { input: [] }],
-        ["a Date in the input", { input: { at: new Date(0) } }],
+        ["an invalid Date in the input", { input: { at: new Date(Number.NaN) } }],
         ["a non-finite number in the input", { input: { amount: Number.NaN } }],
         ["an empty execution ID", { executionId: "" }],
         ["an empty step key", { stepKey: "" }],
@@ -510,7 +510,7 @@ export function registerEffectClientConformance({
         await begin(runtime, "pay:invariant");
         await expectInvariant(settle(runtime, "pay:invariant", "result", "charge-v2"));
         await expectInvariant(
-          settle(runtime, "pay:invariant", { at: new Date(0) } as never)
+          settle(runtime, "pay:invariant", { at: new Date(Number.NaN) } as never)
         );
         expect(await runtime.effects.getEffect("pay:invariant")).toMatchObject({
           status: "pending",

@@ -54,7 +54,7 @@ const result = await exec.waitForResult();
 | `POST /trigger` | `{ workflowId, params?, context?, executionId? }`    | `202 { executionId }` once admission commits; `409 { code: "EXECUTION_ID_CONFLICT" }`; `400 { code: "INVALID_EXECUTION_EVENT" }` |
 | `POST /events`  | `{ executionId }`                                    | Blocks until the record is terminal. `200` with the encoded result, `500` with the encoded recorded error, `404` for an unknown ID |
 
-Both routes read and write bodies with the durable value codec. Plain JSON is a valid encoding, so any HTTP client can call `/trigger`, while the HTTP SDK can also send `undefined` values and errors, which the codec writes as objects tagged with a `$type` key. A plain object with its own `$type` key must be sent wrapped as `{ "$type": "object", "value": ... }`.
+Both routes read and write bodies with the durable value codec. Plain JSON is a valid encoding, so any HTTP client can call `/trigger`, while the HTTP SDK can also send `undefined` values, `Date`s, `Map`s, `Set`s, `bigint`s and errors, which the codec writes as objects tagged with a `$type` key. A plain object with its own `$type` key must be sent wrapped as `{ "$type": "object", "value": ... }`.
 
 `/trigger` responds `202` before any workflow code runs. When the body omits `executionId`, the runtime chooses one and the response carries it.
 

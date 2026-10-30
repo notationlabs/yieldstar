@@ -44,7 +44,7 @@ import type {
 
 ## `workflow(fn)` / `createWorkflow(fn)`
 
-Defines a workflow. Returns a `WorkflowGenerator`. `Params` and `Result` are checked with `Durable<T>` (see [Step values](../manual/steps.md#step-values)), so a workflow whose params or result type holds a `Date`, `Map`, `Set`, `bigint` or function is a type error. A generic `Result` cannot be checked, so a function that wraps `workflow` must give it a concrete result type.
+Defines a workflow. Returns a `WorkflowGenerator`. `Params` and `Result` are checked with `Durable<T>` (see [Step values](../manual/steps.md#step-values)), so a workflow whose params or result type holds a function is a type error. A generic `Result` cannot be checked, so a function that wraps `workflow` must give it a concrete result type.
 
 ```ts
 const w = workflow<Params, Result>(async function* (step, event, logger) {

@@ -141,12 +141,26 @@ describe("step values", () => {
   });
 
   test.each([
-    ["a Date", () => new Date(0)],
-    ["a Map", () => new Map([["a", 1]])],
-    ["a Set", () => new Set([1])],
-    ["a BigInt", () => 1n],
+    ["a Date", new Date("2026-10-29T12:00:00.000Z")],
+    ["a Map", new Map<unknown, unknown>([["a", 1], [{ id: 2 }, new Set([3])]])],
+    ["a Set", new Set(["mug", "cup"])],
+    ["a BigInt", 2n ** 70n],
+    ["a nested Date", { at: new Date(0), lines: [{ due: new Date(1) }] }],
+  ])("%s returns an equal value of the same type on both runs", async (_label, value) => {
+    const { first, replay } = await acrossReplay((step) =>
+      step.run("value", async () => nonDurable(value))
+    );
+    for (const run of [first, replay]) {
+      expect(valueOf(run)).toEqual(value);
+      if (typeof value === "object") expect(valueOf(run)).not.toBe(value);
+    }
+  });
+
+  test.each([
     ["a class instance", () => new Point(1)],
-    ["a nested Date", () => ({ at: new Date(0) })],
+    ["a nested class instance", () => ({ at: new Point(1) })],
+    ["an invalid Date", () => new Date(Number.NaN)],
+    ["a function in a Map", () => new Map([["fn", () => 1]])],
   ])("%s throws INVALID_STEP_VALUE on the first run and replay", async (_label, make) => {
     let calls = 0;
     const { first, replay } = await acrossReplay((step) =>
@@ -205,10 +219,12 @@ describe("step values", () => {
 
   test("step.run results are typed as durable values", () => {
     workflow(async function* (step) {
-      // @ts-expect-error a Date is not a durable value
-      yield* step.run("now", async () => new Date());
-      // @ts-expect-error a Map is not a durable value
-      yield* step.run("map", () => new Map<string, number>());
+      // @ts-expect-error a function is not a durable value
+      yield* step.run("fn", async () => () => 1);
+      // @ts-expect-error a function is not a durable value
+      yield* step.run("map", () => new Map<string, () => number>());
+      const now: Date = yield* step.run("now", async () => new Date());
+      const totals: Map<string, bigint> = yield* step.run("totals", () => new Map([["a", 1n]]));
       interface Reservation {
         id: string;
         note?: string;
@@ -219,27 +235,27 @@ describe("step values", () => {
       );
       const count: number = yield* step.run("count", () => 1);
       const nothing: void = yield* step.run("nothing", async () => {});
-      return { reservation, count, nothing };
+      return { reservation, count, nothing, now, totals };
     });
   });
 });
 
 describe("workflow results", () => {
-  test("a workflow that returns a Date fails with INVALID_STEP_VALUE", async () => {
+  test("a workflow that returns a class instance fails with INVALID_STEP_VALUE", async () => {
     const sdk = createTestSdkFactory()({
       workflow: workflow(async function* () {
-        return nonDurable(new Date(0));
+        return nonDurable(new Point(1));
       }),
     });
     const error = await sdk
-      .triggerAndWait({ workflowId: "workflow", executionId: "returns-date" })
+      .triggerAndWait({ workflowId: "workflow", executionId: "returns-point" })
       .catch((err) => err);
     expect(error).toBeInstanceOf(WorkflowValueError);
     expect(error).toMatchObject({
       code: "INVALID_STEP_VALUE",
       stepKey: WORKFLOW_RESULT_STEP_KEY,
     });
-    expect(await sdk.runtime.executions.get("returns-date")).toMatchObject({
+    expect(await sdk.runtime.executions.get("returns-point")).toMatchObject({
       status: "failed",
       outcome: { status: "failed", error: { code: "INVALID_STEP_VALUE" } },
     });
@@ -256,14 +272,24 @@ describe("workflow results", () => {
     expect(Object.keys(result)).toEqual(["a", "list"]);
   });
 
-  test("workflow results are typed as durable values", () => {
-    // @ts-expect-error a Date is not a durable value
-    workflow(async function* () {
-      return new Date();
+  test("a workflow result keeps Dates and Maps", async () => {
+    const sdk = createTestSdkFactory()({
+      workflow: workflow(async function* () {
+        return { at: new Date(0), totals: new Map([["mug", 2n]]) };
+      }),
     });
-    // @ts-expect-error a Map is not a durable value
+    const result = await sdk.triggerAndWait({ workflowId: "workflow" });
+    expect(result).toEqual({ at: new Date(0), totals: new Map([["mug", 2n]]) });
+  });
+
+  test("workflow results are typed as durable values", () => {
+    // @ts-expect-error a function is not a durable value
     workflow(async function* () {
-      return { totals: new Map<string, number>() };
+      return () => 1;
+    });
+    // @ts-expect-error a function is not a durable value
+    workflow(async function* () {
+      return { totals: new Map<string, () => number>() };
     });
     interface Receipt {
       id: string;
@@ -288,15 +314,15 @@ describe("workflow results", () => {
 });
 
 describe("params and context", () => {
-  test("admission with a Date in params or context is rejected with INVALID_EXECUTION_EVENT", async () => {
+  test("admission with a class instance in params or context is rejected with INVALID_EXECUTION_EVENT", async () => {
     const sdk = createTestSdkFactory()({
       workflow: workflow(async function* () {
         return null;
       }),
     });
     for (const event of [
-      { workflowId: "workflow" as const, params: { at: new Date(0) } },
-      { workflowId: "workflow" as const, params: {}, context: { at: new Date(0) } },
+      { workflowId: "workflow" as const, params: { at: new Point(0) } },
+      { workflowId: "workflow" as const, params: {}, context: { at: new Point(0) } },
     ]) {
       const error = await sdk.trigger(event as any).catch((err) => err);
       expect(error).toBeInstanceOf(ExecutionAdmissionError);
@@ -305,12 +331,15 @@ describe("params and context", () => {
   });
 
   test("workflow and step.start params are typed as durable values", () => {
-    // @ts-expect-error a Date is not a durable value
-    workflow(async function* (_step, _event: WorkflowEvent<{ at: Date }>) {
+    // @ts-expect-error a function is not a durable value
+    workflow(async function* (_step, _event: WorkflowEvent<{ notify: () => void }>) {
       return null;
     });
-    // @ts-expect-error a Set is not a durable value
-    workflow<{ tags: Set<string> }, null, ReadonlyMap<any, any>>(async function* () {
+    // @ts-expect-error a function is not a durable value
+    workflow<{ tags: Set<() => void> }, null, ReadonlyMap<any, any>>(async function* () {
+      return null;
+    });
+    workflow(async function* (_step, _event: WorkflowEvent<{ at: Date; tags: Set<string> }>) {
       return null;
     });
     interface Order {
@@ -319,8 +348,8 @@ describe("params and context", () => {
       lines: { sku: string }[];
     }
     workflow(async function* (step, event: WorkflowEvent<Order>) {
-      // @ts-expect-error a Date is not a durable value
-      yield* step.start("bad", { workflowId: "ship", params: { at: new Date() } });
+      // @ts-expect-error a function is not a durable value
+      yield* step.start("bad", { workflowId: "ship", params: { notify: () => {} } });
       const order: Order = event.params;
       return yield* step.start("ship", { workflowId: "ship", params: order });
     });
@@ -447,7 +476,7 @@ describe("step errors", () => {
   test("a non-durable property is absent on the first run and on replay", async () => {
     const { first, replay } = await acrossReplay((step) =>
       step.run("value", async () => {
-        throw Object.assign(new Error("boom"), { at: new Date(0), attempts: 2 });
+        throw Object.assign(new Error("boom"), { at: new Point(0), attempts: 2 });
       })
     );
     for (const run of [first, replay]) {
@@ -587,7 +616,7 @@ describe("store values", () => {
       const store = step.store(Orders, { id: "o1" });
       return yield* store.update("value", (draft) => {
         draft.lines.push({ sku: "mug" });
-        draft.note = new Date(0);
+        draft.note = new Point(0);
       });
     });
     for (const run of [first, replay]) {
@@ -600,7 +629,7 @@ describe("store values", () => {
 
   test("a non-durable initial state throws INVALID_STEP_VALUE and creates no store", async () => {
     const MappedOrders = defineStore("mapped-orders", testSchema<Order>(), {
-      initial: () => ({ lines: [], note: nonDurable(new Map()) }),
+      initial: () => ({ lines: [], note: nonDurable(new Point(0)) }),
     });
     const { first, replay, sdk } = await acrossReplay(async function* (step) {
       return yield* step.store(MappedOrders, { id: "o2" }).update("value", (draft) => {
@@ -622,7 +651,7 @@ describe("store values", () => {
       });
       return yield* store.take(
         "value",
-        (state) => state.lines.length > 0 && nonDurable(new Set(state.lines)),
+        (state) => state.lines.length > 0 && nonDurable(new Point(state.lines.length)),
         (draft) => {
           draft.lines = [];
         }
@@ -636,7 +665,7 @@ describe("store values", () => {
   test("a select result that is not durable throws INVALID_STEP_VALUE", async () => {
     const { first, replay } = await acrossReplay(async function* (step) {
       const store = step.store(Orders, { id: "o4" });
-      return yield* store.select("value", () => nonDurable(new Date(0)));
+      return yield* store.select("value", () => nonDurable(new Point(0)));
     });
     for (const run of [first, replay]) {
       expect(thrownBy(run)).toMatchObject({ code: "INVALID_STEP_VALUE", stepKey: "value" });
@@ -644,8 +673,11 @@ describe("store values", () => {
   });
 
   test("store state and store step results are typed as durable values", () => {
-    // @ts-expect-error a Date is not a durable value
-    defineStore("dated", testSchema<{ at: Date }>(), { initial: () => ({ at: new Date(0) }) });
+    // @ts-expect-error a function is not a durable value
+    defineStore("callable", testSchema<{ run: () => void }>(), { initial: () => ({ run() {} }) });
+    defineStore("dated", testSchema<{ at: Date; seen: Set<string> }>(), {
+      initial: () => ({ at: new Date(0), seen: new Set() }),
+    });
     interface Cart {
       id: string;
       note?: string;
@@ -656,20 +688,20 @@ describe("store values", () => {
     });
     workflow(async function* (step) {
       step.store({
-        name: "dated",
-        // @ts-expect-error a Date is not a durable value
-        schema: testSchema<{ at: Date }>(),
-        initial: () => ({ at: new Date(0) }),
+        name: "callable",
+        // @ts-expect-error a function is not a durable value
+        schema: testSchema<{ run: () => void }>(),
+        initial: () => ({ run() {} }),
       });
       const cart = step.store(Carts);
-      // @ts-expect-error a Date is not a durable value
-      yield* cart.select("at", () => new Date());
-      // @ts-expect-error a Set is not a durable value
-      yield* cart.when("skus", (state) => state.lines.length > 0 && new Set(state.lines));
+      // @ts-expect-error a function is not a durable value
+      yield* cart.select("fn", () => () => 1);
+      // @ts-expect-error a function is not a durable value
+      yield* cart.when("fns", (state) => state.lines.length > 0 && new Set([() => 1]));
       yield* cart.take(
         "taken",
-        // @ts-expect-error a Map is not a durable value
-        (state) => state.lines.length > 0 && { bySku: new Map<string, number>() },
+        // @ts-expect-error a function is not a durable value
+        (state) => state.lines.length > 0 && { bySku: new Map<string, () => number>() },
         (draft) => {
           draft.lines = [];
         }
@@ -678,12 +710,37 @@ describe("store values", () => {
       const note = yield* cart.select("note", (state) => state.note);
       const lines = yield* cart.when("lines", (state) => state.lines.length > 0 && state.lines);
       const busy = yield* cart.when("busy", (state) => state.lines.length > 1);
+      const skus = yield* cart.select("skus", (state) => new Set(state.lines.map((l) => l.sku)));
+      expectTypeOf(skus).toEqualTypeOf<Set<string>>();
       expectTypeOf(count).toEqualTypeOf<number>();
       expectTypeOf(note).toEqualTypeOf<string | undefined>();
       expectTypeOf(lines).toEqualTypeOf<{ sku: string; qty: number }[]>();
       expectTypeOf(busy).toEqualTypeOf<true>();
       return null;
     });
+  });
+
+  test("store state keeps Dates, Maps and Sets", async () => {
+    type Ledger = { opened?: Date; totals: Map<string, bigint>; seen: Set<string> };
+    const Ledgers = defineStore("ledgers", testSchema<Ledger>(), {
+      initial: () => ({ totals: new Map(), seen: new Set() }),
+    });
+    const { first, replay } = await acrossReplay(async function* (step) {
+      const store = step.store(Ledgers, { id: "l1" });
+      yield* store.update("open", (draft) => {
+        draft.opened = new Date(0);
+        draft.totals.set("mug", 2n);
+        draft.seen.add("mug");
+      });
+      return yield* store.get("value");
+    });
+    for (const run of [first, replay]) {
+      expect((valueOf(run) as { state: Ledger }).state).toEqual({
+        opened: new Date(0),
+        totals: new Map([["mug", 2n]]),
+        seen: new Set(["mug"]),
+      });
+    }
   });
 
   test("store state keeps undefined properties", async () => {
@@ -763,11 +820,23 @@ describe("HTTP transport", () => {
     }
   });
 
-  test("a Date in params is rejected with INVALID_EXECUTION_EVENT before any request", async () => {
+  test("Dates, Maps and bigints in params reach the workflow and come back in the result", async () => {
+    const { http, dispatcher } = setup();
+    try {
+      const params = { at: new Date(0), totals: new Map([["mug", 2n]]) };
+      const execution = await http.trigger({ workflowId: "echo", params });
+      expect(await execution.waitForResult()).toEqual({ params, tenant: undefined });
+    } finally {
+      dispatcher.stop();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  test("a class instance in params is rejected with INVALID_EXECUTION_EVENT before any request", async () => {
     const { http, fetchMock, dispatcher } = setup();
     try {
       const error = await http
-        .trigger({ workflowId: "echo", params: { at: new Date(0) } })
+        .trigger({ workflowId: "echo", params: { at: nonDurable(new Point(0)) } })
         .catch((err) => err);
       expect(error).toBeInstanceOf(ExecutionAdmissionError);
       expect(error.code).toBe("INVALID_EXECUTION_EVENT");
@@ -804,7 +873,7 @@ describe("HTTP transport", () => {
     try {
       const response = await fetch("http://yieldstar.test/trigger", {
         method: "POST",
-        body: JSON.stringify({ workflowId: "echo", params: { $type: "date", value: 0 } }),
+        body: JSON.stringify({ workflowId: "echo", params: { $type: "regexp", value: "a" } }),
       });
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ code: "INVALID_EXECUTION_EVENT" });

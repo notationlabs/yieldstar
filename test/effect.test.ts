@@ -505,7 +505,7 @@ describe("workflow driver", () => {
     ["a numeric effectId", { effectId: 42 as never }, "effectId must be a non-empty string"],
     ["an empty operation", { operation: "" }, "operation must be a non-empty string"],
     ["an array input", { input: [1] as never }, "input must be a plain object"],
-    ["a non-durable input", { input: { at: new Date() } as never }, "input: "],
+    ["a non-durable input", { input: { at: new Receipt("r-1") } as never }, "input: "],
     ["a negative retryIn", { retryIn: -1 }, "retryIn must be a finite, non-negative number"],
     ["an infinite retryIn", { retryIn: Infinity }, "retryIn must be a finite, non-negative number"],
     ["a NaN retryIn", { retryIn: NaN }, "retryIn must be a finite, non-negative number"],
@@ -622,8 +622,8 @@ describe("workflow driver", () => {
     ["lookup returns a malformed response", { lookup: async () => ({ status: "maybe" }) as never }, true],
     ["lookup returns undefined", { lookup: async () => undefined as never }, true],
     ["lookup returns settled without a result", { lookup: async () => ({ status: "settled" }) as never }, true],
-    ["lookup returns a non-durable result", { lookup: async () => ({ status: "settled", result: new Date() }) }, true],
-    ["perform returns a non-durable result", { perform: async () => new Map() }, false],
+    ["lookup returns a non-durable result", { lookup: async () => ({ status: "settled", result: new Receipt("r-1") }) as never }, true],
+    ["perform returns a non-durable result", { perform: async () => new Receipt("r-1") as never }, false],
   ])("when %s, no step is recorded, the effect stays pending and the retry carries EFFECT_HANDLER_INVALID", async (_, overrides, pending) => {
     const { deliver, readStep, runtime, spies, beginElsewhere, caught } = setup(overrides);
     if (pending) await beginElsewhere();
@@ -773,10 +773,7 @@ describe("serialization", () => {
   });
 
   test.each<[string, unknown]>([
-    ["a Date", new Date(0)],
-    ["a Map", new Map()],
-    ["a Set", new Set()],
-    ["a bigint", 1n],
+    ["an invalid Date", new Date(Number.NaN)],
     ["a function", () => 1],
     ["NaN", NaN],
     ["Infinity", Infinity],
@@ -870,16 +867,16 @@ describe("types", () => {
         operation: "o",
         input: {},
         lookup: async () => ({ status: "unknown" }),
-        // @ts-expect-error a Date is not a durable value
-        perform: async () => new Date(),
+        // @ts-expect-error a function is not a durable value
+        perform: async () => () => 1,
         retryIn: 0,
       });
 
       yield* step.effect("dated-input", {
         effectId: "d",
         operation: "o",
-        // @ts-expect-error a Date is not a durable value
-        input: { at: new Date() },
+        // @ts-expect-error a function is not a durable value
+        input: { notify: () => {} },
         lookup: async () => ({ status: "unknown" }),
         perform: async () => 1,
         retryIn: 0,
