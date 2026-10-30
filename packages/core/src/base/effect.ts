@@ -138,7 +138,7 @@ export type EffectDeliveryErrorCode =
  * - `EFFECT_CLIENT_UNAVAILABLE`: an `EffectClient` call failed, and may
  *   recover without intervention.
  * - `EFFECT_HANDLER_INVALID`: `lookup` or `perform` returned a malformed
- *   response or a value that is not durable, or `fails` threw.
+ *   response or a value that is not durable, or `failsOn` threw.
  * - `EFFECT_RUNTIME_INVARIANT`: the `EffectClient` threw
  *   `EffectClientInvariantError` or answered with a malformed response.
  */

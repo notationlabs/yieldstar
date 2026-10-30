@@ -515,7 +515,7 @@ describe("workflow driver", () => {
     ["a maxAttempts of 0", { maxAttempts: 0 }, "maxAttempts must be a positive integer"],
     ["a fractional maxAttempts", { maxAttempts: 1.5 }, "maxAttempts must be a positive integer"],
     ["a string maxAttempts", { maxAttempts: "3" as never }, "maxAttempts must be a positive integer"],
-    ["a fails that is not a function", { fails: true as never }, "fails must be a function"],
+    ["a failsOn that is not a function", { failsOn: true as never }, "failsOn must be a function"],
   ])("%s records INVALID_EFFECT_REQUEST, which reaches workflow code without a client call", async (_, overrides, message) => {
     const { deliver, caught, spies, readStep, advance } = setup(overrides);
 
@@ -747,9 +747,9 @@ registerErrorClass("ProviderDeclinedError", ProviderDeclinedError);
 const declined = (err: unknown) => err instanceof ProviderDeclinedError;
 
 describe("definite failures", () => {
-  test("a perform error that fails accepts fails the effect, and the step throws it on every delivery", async () => {
+  test("a perform error that failsOn accepts fails the effect, and the step throws it on every delivery", async () => {
     const { deliver, log, caught, provider, runtime, readStep, advance } = setup({
-      fails: declined,
+      failsOn: declined,
     });
     provider.perform.mockImplementationOnce(async () => {
       log.push("perform");
@@ -780,7 +780,7 @@ describe("definite failures", () => {
   });
 
   test("an effect that failed elsewhere throws its error without a callback", async () => {
-    const { deliver, log, caught, beginElsewhere, real, provider } = setup({ fails: declined });
+    const { deliver, log, caught, beginElsewhere, real, provider } = setup({ failsOn: declined });
     await beginElsewhere();
     await real.settle({
       effectId: EFFECT_ID,
@@ -812,22 +812,22 @@ describe("definite failures", () => {
     expect((await runtime.effects.getEffect(EFFECT_ID))?.status).toBe("failed");
   });
 
-  test("a perform error that fails rejects leaves the outcome uncertain", async () => {
-    const fails = vi.fn(declined);
-    const { deliver, provider, caught, runtime } = setup({ fails });
+  test("a perform error that failsOn rejects leaves the outcome uncertain", async () => {
+    const failsOn = vi.fn(declined);
+    const { deliver, provider, caught, runtime } = setup({ failsOn });
     const timeout = new Error("provider timeout");
     provider.perform.mockImplementationOnce(async () => {
       throw timeout;
     });
 
     await expect(deliver()).resolves.toEqual({ status: "suspended", wakeAt: 61_000 });
-    expect(fails).toHaveBeenCalledWith(timeout);
+    expect(failsOn).toHaveBeenCalledWith(timeout);
     expect(caught).toEqual([]);
     expect((await runtime.effects.getEffect(EFFECT_ID))?.status).toBe("pending");
   });
 
   test("a thrown value that is not an Error fails the effect wrapped in an Error", async () => {
-    const { deliver, provider, caught } = setup({ fails: () => true });
+    const { deliver, provider, caught } = setup({ failsOn: () => true });
     provider.perform.mockImplementationOnce(async () => {
       throw "declined";
     });
@@ -837,9 +837,9 @@ describe("definite failures", () => {
     expect((caught[0] as Error).message).toBe("declined");
   });
 
-  test("a fails that throws ends the delivery with EFFECT_HANDLER_INVALID and records nothing", async () => {
+  test("a failsOn that throws ends the delivery with EFFECT_HANDLER_INVALID and records nothing", async () => {
     const { deliver, provider, runtime, readStep } = setup({
-      fails: () => {
+      failsOn: () => {
         throw new Error("classifier bug");
       },
     });

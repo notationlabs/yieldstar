@@ -8,7 +8,7 @@
 
 ### Added
 
-- `step.effect` takes an optional `fails(error)`. When `perform` throws and `fails` returns `true`, the effect fails with the error, the step records and throws it, and every execution that begins the same effect ID receives it. `lookup` can return `{ status: "failed", error }`. A second failure keeps the first error without a conflict report.
+- `step.effect` takes an optional `failsOn(error)`. When `perform` throws and `failsOn` returns `true`, the effect fails with the error, the step records and throws it, and every execution that begins the same effect ID receives it. `lookup` can return `{ status: "failed", error }`. A second failure keeps the first error without a conflict report.
 - `step.effect` takes an optional `maxAttempts`. When an attempt ends uncertain and it is attempt number `maxAttempts`, the step throws `WorkflowEffectError` with code `EFFECT_OUTCOME_UNKNOWN` instead of suspending, and the effect stays pending.
 - `SqliteEffectClient` adds `status` and `conflicting_status` columns to an existing `effect_conflicts` table, and reads existing conflict reports as conflicts between two results.
 

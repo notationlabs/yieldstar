@@ -60,7 +60,7 @@ Two step-write results also reject with an `InfrastructureError`, and both end t
 - The write returns `lost` because another claim has taken over. The cause is a `LeaseLostError`.
 - The step is already recorded with a different value. The cause is a `StepConflictError`. The record stands, the delivery ends as a retry, and the next delivery replays the recorded value.
 
-`step.effect` also ends a delivery with an `InfrastructureError`, whose cause is an `EffectDeliveryError`, when it records no step: `EFFECT_CLIENT_UNAVAILABLE` when an `EffectClient` call throws, `EFFECT_RUNTIME_INVARIANT` when it throws `EffectClientInvariantError` (or an error with that `code`) or answers with a malformed response, and `EFFECT_HANDLER_INVALID` when `lookup` or `perform` answers with a malformed response or a value that is not durable, or when `fails` throws. The runner never calls `lookup` or `perform` once the delivery's `signal` has aborted.
+`step.effect` also ends a delivery with an `InfrastructureError`, whose cause is an `EffectDeliveryError`, when it records no step: `EFFECT_CLIENT_UNAVAILABLE` when an `EffectClient` call throws, `EFFECT_RUNTIME_INVARIANT` when it throws `EffectClientInvariantError` (or an error with that `code`) or answers with a malformed response, and `EFFECT_HANDLER_INVALID` when `lookup` or `perform` answers with a malformed response or a value that is not durable, or when `failsOn` throws. The runner never calls `lookup` or `perform` once the delivery's `signal` has aborted.
 
 ## `ExecutionRecord`
 

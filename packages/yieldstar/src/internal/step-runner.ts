@@ -223,7 +223,7 @@ export type EffectDescriptor<T, Input = DurableObject> = {
    * failed and will never succeed. The effect then fails with the error, and
    * the step throws it. Any other thrown value leaves the outcome uncertain.
    */
-  fails?(error: unknown): boolean;
+  failsOn?(error: unknown): boolean;
 };
 
 /**
@@ -244,7 +244,7 @@ async function* effectStep(
 
   if (cached) return yield* replay(cached);
 
-  const { effectId, operation, input, retryIn, maxAttempts, lookup, perform, fails } =
+  const { effectId, operation, input, retryIn, maxAttempts, lookup, perform, failsOn } =
     (descriptor ?? {}) as Partial<EffectDescriptor<unknown, unknown>>;
   const invalid = invalidEffectRequest({
     effectId,
@@ -254,7 +254,7 @@ async function* effectStep(
     maxAttempts,
     lookup,
     perform,
-    fails,
+    failsOn,
   });
   if (invalid) {
     const err = new WorkflowEffectError(
@@ -275,7 +275,7 @@ async function* effectStep(
     maxAttempts,
     lookup: (id) => lookup!.call(descriptor, id),
     perform: (id) => perform!.call(descriptor, id),
-    fails: fails && ((error) => fails.call(descriptor, error)),
+    failsOn: failsOn && ((error) => failsOn.call(descriptor, error)),
   });
 
   switch (outcome.status) {
@@ -316,7 +316,7 @@ function invalidEffectRequest(request: {
   maxAttempts: unknown;
   lookup: unknown;
   perform: unknown;
-  fails: unknown;
+  failsOn: unknown;
 }): string | undefined {
   const validated = validateEffectRequest(request);
   if (!validated.ok) return validated.message;
@@ -333,8 +333,8 @@ function invalidEffectRequest(request: {
   }
   if (typeof request.lookup !== "function") return "lookup must be a function";
   if (typeof request.perform !== "function") return "perform must be a function";
-  if (request.fails !== undefined && typeof request.fails !== "function") {
-    return "fails must be a function";
+  if (request.failsOn !== undefined && typeof request.failsOn !== "function") {
+    return "failsOn must be a function";
   }
   return undefined;
 }

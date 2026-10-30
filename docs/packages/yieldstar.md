@@ -93,7 +93,7 @@ Thrown to workflow code by `step.start` when the runtime rejects the start. `err
 
 ## `WorkflowEffectError`
 
-Thrown to workflow code by `step.effect`. `err.code` is `"INVALID_EFFECT_REQUEST"` (the `effectId`, `operation`, `input`, `retryIn`, `maxAttempts`, `lookup`, `perform` or `fails` is invalid), `"EFFECT_REQUEST_MISMATCH"` (the effect already exists with a different `operation` or `input`) or `"EFFECT_OUTCOME_UNKNOWN"` (the outcome is still unknown after `maxAttempts` attempts). It is recorded as the step's error, so replay throws the same class and code. See [`step.effect`](../manual/steps.md#stepeffect).
+Thrown to workflow code by `step.effect`. `err.code` is `"INVALID_EFFECT_REQUEST"` (the `effectId`, `operation`, `input`, `retryIn`, `maxAttempts`, `lookup`, `perform` or `failsOn` is invalid), `"EFFECT_REQUEST_MISMATCH"` (the effect already exists with a different `operation` or `input`) or `"EFFECT_OUTCOME_UNKNOWN"` (the outcome is still unknown after `maxAttempts` attempts). It is recorded as the step's error, so replay throws the same class and code. See [`step.effect`](../manual/steps.md#stepeffect).
 
 ## `EffectDeliveryError`
 
@@ -144,7 +144,7 @@ const store = step.store(definition, { id }); // no yield*
 
 yield* step.start("key", { workflowId, params });
 
-yield* step.effect("key", { effectId, operation, input, lookup, perform, retryIn, fails, maxAttempts });
+yield* step.effect("key", { effectId, operation, input, lookup, perform, retryIn, failsOn, maxAttempts });
 ```
 
 `step.store` returns a `WorkflowStore` handle synchronously and records no step, so a loop or helper can request the same store again. `id` defaults to `event.executionId`. The handle has the readonly properties `definition`, `id` and `key`, and the durable operations `get`, `select`, `update`, `updateFrom`, `deleteFrom`, `when` and `take`, each of which creates a missing store from the definition's `initial` – see [Durable Stores](../manual/stores.md) and [Waiting on State](../manual/store-waiting.md). Helpers that take the step runner can type it as `StepRunner`.
@@ -162,7 +162,7 @@ type EffectDescriptor<T, Input = DurableObject> = {
   maxAttempts?: number;
   lookup(effectId: string): Promise<EffectLookup<T>>;
   perform(effectId: string): Promise<T>; // T is checked with Durable<T>
-  fails?(error: unknown): boolean;
+  failsOn?(error: unknown): boolean;
 };
 
 type EffectLookup<T> =

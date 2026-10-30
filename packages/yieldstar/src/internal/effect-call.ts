@@ -29,7 +29,7 @@ export type EffectCallRequest = {
   maxAttempts?: number;
   lookup(effectId: string): Promise<unknown>;
   perform(effectId: string): Promise<unknown>;
-  fails?(error: unknown): boolean;
+  failsOn?(error: unknown): boolean;
 };
 
 /**
@@ -151,13 +151,13 @@ export async function executeEffectCall(
   }
 
   function isDefiniteFailure(err: unknown): boolean {
-    if (!request.fails) return false;
+    if (!request.failsOn) return false;
     try {
-      return request.fails(err) === true;
+      return request.failsOn(err) === true;
     } catch (failsErr) {
       throw fail(
         "EFFECT_HANDLER_INVALID",
-        `fails threw for effect "${effectId}": ${errorMessage(failsErr)}`,
+        `failsOn threw for effect "${effectId}": ${errorMessage(failsErr)}`,
         failsErr
       );
     }
