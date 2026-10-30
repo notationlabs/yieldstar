@@ -351,6 +351,18 @@ describe("Durable<T>", () => {
     record({ readonlyMap });
   });
 
+  test("keeps the shape and mutability of arrays and tuples", () => {
+    expectTypeOf<Durable<string[]>>().toEqualTypeOf<string[]>();
+    expectTypeOf<Durable<readonly string[]>>().toEqualTypeOf<readonly string[]>();
+    expectTypeOf<Durable<[string, Date]>>().toEqualTypeOf<[string, Date]>();
+    expectTypeOf<Durable<readonly [string, number]>>().toEqualTypeOf<
+      readonly [string, number]
+    >();
+    expectTypeOf<Durable<{ lines: { qty: number }[] }>>().toEqualTypeOf<{
+      lines: { qty: number }[];
+    }>();
+  });
+
   test("rejects functions, including inside Maps and Sets", () => {
     // @ts-expect-error
     record({ fn: () => 1 });
@@ -358,5 +370,9 @@ describe("Durable<T>", () => {
     record(new Map<string, () => number>());
     // @ts-expect-error
     record(new Set<() => number>());
+    // @ts-expect-error
+    record([() => 1]);
+    // @ts-expect-error
+    record([{ fn: () => 1 }]);
   });
 });

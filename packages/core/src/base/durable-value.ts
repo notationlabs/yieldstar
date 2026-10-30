@@ -18,8 +18,9 @@ export type DurableObject = { [key: string]: DurableValue };
 
 /**
  * Compile-time check for a value that will be recorded. Unlike an index
- * signature, it accepts interfaces. The codec still validates every value at
- * runtime.
+ * signature, it accepts interfaces. Arrays and tuples keep their shape and
+ * mutability, so `Durable<T>` can also type a recorded value. The codec still
+ * validates every value at runtime.
  */
 export type Durable<T> = T extends
   | string
@@ -32,7 +33,13 @@ export type Durable<T> = T extends
   | Error
   ? T
   : T extends readonly (infer U)[]
-  ? readonly Durable<U>[]
+  ? // Only tuples go through the mapped type. On a recursive array type such
+    // as `DurableValue[]` it exceeds TypeScript's instantiation depth.
+    number extends T["length"]
+    ? T extends unknown[]
+      ? Durable<U>[]
+      : readonly Durable<U>[]
+    : { [K in keyof T]: Durable<T[K]> }
   : T extends Map<infer K, infer V>
   ? Map<Durable<K>, Durable<V>>
   : T extends ReadonlyMap<infer K, infer V>
