@@ -198,7 +198,8 @@ export function createStepRunner(params: {
  * execution or runtime, uses the same ID, and no caller reuses it for another
  * operation. The external system must guarantee that repeated `perform` calls
  * for one ID make one operation with one result, that `not-found` proves no
- * call exists or can still finish, and that `settled` never changes.
+ * call exists or can still finish, and that `settled` and `failed` never
+ * change.
  */
 export type EffectDescriptor<T, Input = DurableObject> = {
   effectId: string;
@@ -207,10 +208,22 @@ export type EffectDescriptor<T, Input = DurableObject> = {
   input: Input & Durable<Input>;
   /** Milliseconds before an uncertain outcome is looked up again. */
   retryIn: number;
+  /**
+   * The number of attempts that may end uncertain before the step throws a
+   * `WorkflowEffectError` with code `EFFECT_OUTCOME_UNKNOWN`. Without it, the
+   * step looks the effect up until its outcome is known.
+   */
+  maxAttempts?: number;
   /** Reports what the external system knows about `effectId`. */
   lookup(effectId: string): Promise<EffectLookup<T>>;
   /** Performs the operation under `effectId`. */
   perform(effectId: string): Promise<T>;
+  /**
+   * Returns true when an error thrown by `perform` proves that the operation
+   * failed and will never succeed. The effect then fails with the error, and
+   * the step throws it. Any other thrown value leaves the outcome uncertain.
+   */
+  fails?(error: unknown): boolean;
 };
 
 /**
@@ -231,15 +244,17 @@ async function* effectStep(
 
   if (cached) return yield* replay(cached);
 
-  const { effectId, operation, input, retryIn, lookup, perform } =
+  const { effectId, operation, input, retryIn, maxAttempts, lookup, perform, fails } =
     (descriptor ?? {}) as Partial<EffectDescriptor<unknown, unknown>>;
   const invalid = invalidEffectRequest({
     effectId,
     operation,
     input,
     retryIn,
+    maxAttempts,
     lookup,
     perform,
+    fails,
   });
   if (invalid) {
     const err = new WorkflowEffectError(
@@ -257,13 +272,28 @@ async function* effectStep(
     operation: operation!,
     input: input as DurableObject,
     retryIn: retryIn!,
+    maxAttempts,
     lookup: (id) => lookup!.call(descriptor, id),
     perform: (id) => perform!.call(descriptor, id),
+    fails: fails && ((error) => fails.call(descriptor, error)),
   });
 
   switch (outcome.status) {
     case "settled":
       return yield* record(outcome.result);
+    case "failed":
+      yield new StepError(outcome.error);
+      throw outcome.error;
+    case "unknown": {
+      const err = new WorkflowEffectError(
+        "EFFECT_OUTCOME_UNKNOWN",
+        `The outcome of effect "${effectId}" is still unknown after ${outcome.attempts} ${
+          outcome.attempts === 1 ? "attempt" : "attempts"
+        }`
+      );
+      yield new StepError(err);
+      throw err;
+    }
     case "rejected": {
       const err = new WorkflowEffectError(
         outcome.code,
@@ -283,8 +313,10 @@ function invalidEffectRequest(request: {
   operation: unknown;
   input: unknown;
   retryIn: unknown;
+  maxAttempts: unknown;
   lookup: unknown;
   perform: unknown;
+  fails: unknown;
 }): string | undefined {
   const validated = validateEffectRequest(request);
   if (!validated.ok) return validated.message;
@@ -292,8 +324,18 @@ function invalidEffectRequest(request: {
   if (typeof retryIn !== "number" || !Number.isFinite(retryIn) || retryIn < 0) {
     return "retryIn must be a finite, non-negative number";
   }
+  const { maxAttempts } = request;
+  if (
+    maxAttempts !== undefined &&
+    (typeof maxAttempts !== "number" || !Number.isInteger(maxAttempts) || maxAttempts < 1)
+  ) {
+    return "maxAttempts must be a positive integer";
+  }
   if (typeof request.lookup !== "function") return "lookup must be a function";
   if (typeof request.perform !== "function") return "perform must be a function";
+  if (request.fails !== undefined && typeof request.fails !== "function") {
+    return "fails must be a function";
+  }
   return undefined;
 }
 

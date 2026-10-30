@@ -39,6 +39,7 @@ export type {
   EffectClient,
   EffectConflictReport,
   EffectDeliveryErrorCode,
+  EffectOutcome,
   EffectRecord,
   EffectSettleRequest,
   EffectSettleResult,
@@ -52,6 +53,7 @@ export {
 } from "./base/effect";
 export type {
   EffectConflictState,
+  EffectOutcomeStatus,
   EffectState,
   PreparedEffectBegin,
   PreparedEffectSettle,

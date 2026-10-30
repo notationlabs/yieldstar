@@ -3,6 +3,7 @@ import {
   EffectClientInvariantError,
   type EffectBeginRequest,
   type EffectBeginResult,
+  type EffectOutcome,
   type EffectRecord,
   type EffectSettleRequest,
   type EffectSettleResult,
@@ -18,13 +19,19 @@ export type EffectState = {
   effectId: string;
   operation: string;
   input: string;
-  status: "pending" | "settled";
+  status: "pending" | EffectOutcomeStatus;
+  /** The result, or the error when `status` is `failed`. */
   result?: string;
   conflicts: EffectConflictState[];
 };
 
+export type EffectOutcomeStatus = EffectOutcome["status"];
+
 export type EffectConflictState = {
+  status: EffectOutcomeStatus;
+  /** The stored result or error. */
   result: string;
+  conflictingStatus: EffectOutcomeStatus;
   conflictingResult: string;
   reportedAt: number;
 };
@@ -41,7 +48,8 @@ export type PreparedEffectBegin = {
 export type PreparedEffectSettle = {
   effectId: string;
   operation: string;
-  /** The canonical result. */
+  status: EffectOutcomeStatus;
+  /** The canonical result, or the canonical error when `status` is `failed`. */
   result: string;
 };
 
@@ -89,7 +97,7 @@ export function prepareEffectBegin(request: EffectBeginRequest): PreparedEffectB
   };
 }
 
-/** Validates a `settle` request and encodes its result canonically. */
+/** Validates a `settle` request and encodes its result or error canonically. */
 export function prepareEffectSettle(request: EffectSettleRequest): PreparedEffectSettle {
   if (!isNonEmptyString(request.effectId)) {
     throw invariant("Invalid effect settlement: effectId must be a non-empty string");
@@ -97,13 +105,26 @@ export function prepareEffectSettle(request: EffectSettleRequest): PreparedEffec
   if (!isNonEmptyString(request.operation)) {
     throw invariant("Invalid effect settlement: operation must be a non-empty string");
   }
-  const encoding = durableValueCodec.encode(request.result);
+  let value: unknown;
+  if (request.status === "settled") {
+    value = request.result;
+  } else if (request.status === "failed") {
+    if (!(request.error instanceof Error)) {
+      throw invariant("Invalid effect settlement: error must be an Error");
+    }
+    value = request.error;
+  } else {
+    throw invariant('Invalid effect settlement: status must be "settled" or "failed"');
+  }
+  const encoding = durableValueCodec.encode(value);
   if (encoding.status === "invalid") {
-    throw invariant(`Invalid effect settlement: result: ${encoding.message}`);
+    const field = request.status === "settled" ? "result" : "error";
+    throw invariant(`Invalid effect settlement: ${field}: ${encoding.message}`);
   }
   return {
     effectId: request.effectId,
     operation: request.operation,
+    status: request.status,
     result: encoding.canonical,
   };
 }
@@ -141,13 +162,12 @@ export function matchEffectBegin(
     return { status: "rejected", code: "EFFECT_REQUEST_MISMATCH" };
   }
   if (state.status === "pending") return { status: "pending" };
-  return { status: "settled", result: decodeSettledResult(state) };
+  return decodeStoredOutcome(state);
 }
 
 /**
  * Applies a settlement. `wake` is true only when this settlement moved the
- * effect from pending to settled: adapters then wake every waiter in the same
- * write. `state` is the input object when nothing changed. Throws
+ * effect out of pending: adapters then wake every waiter in the same write. `state` is the input object when nothing changed. Throws
  * `EffectClientInvariantError` when the operation differs from the effect's,
  * which `begin` would have rejected.
  */
@@ -161,19 +181,24 @@ export function settleEffect(
       `Cannot settle effect "${state.effectId}" as operation "${settle.operation}": it was begun as "${state.operation}"`
     );
   }
+  const settled = decodeOutcome(settle.status, settle.result, state.effectId);
   if (state.status === "pending") {
     return {
-      state: { ...state, status: "settled", result: settle.result },
-      result: { status: "settled", result: decodeValue(settle.result, state.effectId) },
+      state: { ...state, status: settle.status, result: settle.result },
+      result: settled,
       wake: true,
     };
   }
-  const result = decodeSettledResult(state);
-  if (state.result === settle.result) {
-    return { state, result: { status: "settled", result }, wake: false };
+  const stored = decodeStoredOutcome(state);
+  if (state.status === settle.status && state.result === settle.result) {
+    return { state, result: stored, wake: false };
   }
-  const conflictingResult = decodeValue(settle.result, state.effectId);
-  // One report per distinct conflicting result, so a settlement repeated after
+  // Two failures agree that the operation failed, though their errors differ
+  // in detail such as the stack, so the first error stays without a report.
+  if (state.status === "failed" && settle.status === "failed") {
+    return { state, result: stored, wake: false };
+  }
+  // One report per distinct conflicting value, so a settlement repeated after
   // a lost response does not add another.
   const reported = state.conflicts.some(
     (conflict) => conflict.conflictingResult === settle.result
@@ -185,10 +210,16 @@ export function settleEffect(
           ...state,
           conflicts: [
             ...state.conflicts,
-            { result: state.result!, conflictingResult: settle.result, reportedAt: now },
+            {
+              status: state.status,
+              result: state.result!,
+              conflictingStatus: settle.status,
+              conflictingResult: settle.result,
+              reportedAt: now,
+            },
           ],
         },
-    result: { status: "conflict", result, conflictingResult },
+    result: { status: "conflict", outcome: stored, conflictingOutcome: settled },
     wake: false,
   };
 }
@@ -200,12 +231,20 @@ export function toEffectRecord(state: EffectState): EffectRecord {
     input: decodeInput(state),
     status: state.status,
     conflicts: state.conflicts.map((conflict) => ({
-      result: decodeValue(conflict.result, state.effectId),
-      conflictingResult: decodeValue(conflict.conflictingResult, state.effectId),
+      outcome: decodeOutcome(conflict.status, conflict.result, state.effectId),
+      conflictingOutcome: decodeOutcome(
+        conflict.conflictingStatus,
+        conflict.conflictingResult,
+        state.effectId
+      ),
       reportedAt: conflict.reportedAt,
     })),
   };
-  if (state.status === "settled") record.result = decodeSettledResult(state);
+  if (state.status !== "pending") {
+    const outcome = decodeStoredOutcome(state);
+    if (outcome.status === "settled") record.result = outcome.result;
+    else record.error = outcome.error;
+  }
   return record;
 }
 
@@ -213,11 +252,28 @@ export function effectNotFound(effectId: string): EffectClientInvariantError {
   return invariant(`Effect "${effectId}" does not exist: begin it first`);
 }
 
-function decodeSettledResult(state: EffectState): DurableValue {
-  if (state.result === undefined) {
-    throw invariant(`Settled effect "${state.effectId}" has no stored result`);
+function decodeStoredOutcome(state: EffectState): EffectOutcome {
+  if (state.status === "pending") {
+    throw invariant(`Effect "${state.effectId}" is pending`);
   }
-  return decodeValue(state.result, state.effectId);
+  if (state.result === undefined) {
+    throw invariant(`Effect "${state.effectId}" is ${state.status} but has no stored value`);
+  }
+  return decodeOutcome(state.status, state.result, state.effectId);
+}
+
+function decodeOutcome(
+  status: EffectOutcomeStatus,
+  canonical: string,
+  effectId: string
+): EffectOutcome {
+  const value = decodeValue(canonical, effectId);
+  if (status === "settled") return { status, result: value };
+  if (status === "failed" && value instanceof Error) return { status, error: value };
+  if (status === "failed") {
+    throw invariant(`Stored error of effect "${effectId}" is not an Error`);
+  }
+  throw invariant(`Effect "${effectId}" has an unknown status`);
 }
 
 function decodeInput(state: EffectState): DurableObject {

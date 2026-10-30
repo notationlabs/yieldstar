@@ -10,25 +10,32 @@ export type EffectBeginRequest = {
   stepKey: string;
 };
 
+/**
+ * How an effect ended. A `failed` effect ended with a definite failure: the
+ * external operation did not succeed and never will.
+ */
+export type EffectOutcome =
+  | { status: "settled"; result: DurableValue }
+  | { status: "failed"; error: Error };
+
 export type EffectBeginResult =
   | { status: "new" }
   | { status: "pending" }
-  | { status: "settled"; result: DurableValue }
+  | EffectOutcome
   | { status: "rejected"; code: "EFFECT_REQUEST_MISMATCH" };
 
 export type EffectSettleRequest = {
   operation: string;
   effectId: string;
-  result: DurableValue;
-};
+} & EffectOutcome;
 
 export type EffectSettleResult =
-  | { status: "settled"; result: DurableValue }
+  | EffectOutcome
   | {
       status: "conflict";
-      /** The first result, which stays settled. */
-      result: DurableValue;
-      conflictingResult: DurableValue;
+      /** The first outcome, which stays. */
+      outcome: EffectOutcome;
+      conflictingOutcome: EffectOutcome;
     };
 
 export type EffectWatchRequest = {
@@ -37,10 +44,10 @@ export type EffectWatchRequest = {
   stepKey: string;
 };
 
-/** A settlement that reported a different result from the settled one. */
+/** A settlement that reported a different outcome from the stored one. */
 export type EffectConflictReport = {
-  result: DurableValue;
-  conflictingResult: DurableValue;
+  outcome: EffectOutcome;
+  conflictingOutcome: EffectOutcome;
   reportedAt: number;
 };
 
@@ -48,9 +55,11 @@ export type EffectRecord = {
   effectId: string;
   operation: string;
   input: DurableObject;
-  status: "pending" | "settled";
+  status: "pending" | "settled" | "failed";
   /** Present, possibly as `undefined`, only when `status` is `settled`. */
   result?: DurableValue;
+  /** Present only when `status` is `failed`. */
+  error?: Error;
   conflicts: EffectConflictReport[];
 };
 
@@ -76,17 +85,18 @@ export interface EffectClient {
   begin(request: EffectBeginRequest): Promise<EffectBeginResult>;
 
   /**
-   * Settles a pending effect with `result` and wakes every execution watching
-   * it, all-or-nothing. Settling an effect again with an equal result returns
-   * the settled result; a different result keeps the first, returns
-   * `conflict` and stores a permanent conflict report.
+   * Settles a pending effect with a result, or fails it with an error, and
+   * wakes every execution watching it, all-or-nothing. Settling an effect
+   * again with an equal outcome, or failing a failed effect again with any
+   * error, returns the stored outcome; any other outcome keeps the first,
+   * returns `conflict` and stores a permanent conflict report.
    */
   settle(request: EffectSettleRequest): Promise<EffectSettleResult>;
 
   /**
    * Registers the step as a waiter on the effect, so settlement wakes its
    * execution. Repeating it keeps one registration. If the effect is already
-   * settled, wakes the execution now. The waiter is deleted by the heap write
+   * settled or failed, wakes the execution now. The waiter is deleted by the heap write
    * that records the step's result.
    */
   watch(request: EffectWatchRequest): Promise<void>;
@@ -111,7 +121,8 @@ export class EffectClientInvariantError extends Error {
 
 export type WorkflowEffectErrorCode =
   | "INVALID_EFFECT_REQUEST"
-  | "EFFECT_REQUEST_MISMATCH";
+  | "EFFECT_REQUEST_MISMATCH"
+  | "EFFECT_OUTCOME_UNKNOWN";
 
 /** The codes with which `step.effect` requests another delivery. */
 export type EffectDeliveryErrorCode =
@@ -127,7 +138,7 @@ export type EffectDeliveryErrorCode =
  * - `EFFECT_CLIENT_UNAVAILABLE`: an `EffectClient` call failed, and may
  *   recover without intervention.
  * - `EFFECT_HANDLER_INVALID`: `lookup` or `perform` returned a malformed
- *   response or a value that is not durable.
+ *   response or a value that is not durable, or `fails` threw.
  * - `EFFECT_RUNTIME_INVARIANT`: the `EffectClient` threw
  *   `EffectClientInvariantError` or answered with a malformed response.
  */
@@ -150,9 +161,10 @@ export class EffectDeliveryError extends Error {
 }
 
 /**
- * Thrown to workflow code by `step.effect` for an invalid request or one that
- * does not match the recorded effect. It is recorded as the step's error, so
- * replay throws it again.
+ * Thrown to workflow code by `step.effect` for an invalid request, one that
+ * does not match the recorded effect, or an effect whose outcome is still
+ * unknown after `maxAttempts`. It is recorded as the step's error, so replay
+ * throws it again.
  */
 export class WorkflowEffectError extends Error {
   readonly code: WorkflowEffectErrorCode;

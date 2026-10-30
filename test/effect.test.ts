@@ -250,6 +250,7 @@ describe("workflow driver", () => {
     await real.settle({
       effectId: EFFECT_ID,
       operation: "charge-v1",
+      status: "settled",
       result: { chargeId: "ch-elsewhere" },
     });
 
@@ -511,6 +512,10 @@ describe("workflow driver", () => {
     ["a NaN retryIn", { retryIn: NaN }, "retryIn must be a finite, non-negative number"],
     ["a missing lookup", { lookup: undefined as never }, "lookup must be a function"],
     ["a missing perform", { perform: undefined as never }, "perform must be a function"],
+    ["a maxAttempts of 0", { maxAttempts: 0 }, "maxAttempts must be a positive integer"],
+    ["a fractional maxAttempts", { maxAttempts: 1.5 }, "maxAttempts must be a positive integer"],
+    ["a string maxAttempts", { maxAttempts: "3" as never }, "maxAttempts must be a positive integer"],
+    ["a fails that is not a function", { fails: true as never }, "fails must be a function"],
   ])("%s records INVALID_EFFECT_REQUEST, which reaches workflow code without a client call", async (_, overrides, message) => {
     const { deliver, caught, spies, readStep, advance } = setup(overrides);
 
@@ -669,7 +674,12 @@ describe("workflow driver", () => {
     const { deliver, beginElsewhere, real, warn, readStep, runtime } = setup({
       lookup: async () => {
         // Another runtime settles the effect while this lookup is running.
-        await real.settle({ effectId: EFFECT_ID, operation: "charge-v1", result: { chargeId: "ch-1" } });
+        await real.settle({
+          effectId: EFFECT_ID,
+          operation: "charge-v1",
+          status: "settled",
+          result: { chargeId: "ch-1" },
+        });
         return { status: "settled", result: { chargeId: "ch-2" } };
       },
     });
@@ -682,13 +692,18 @@ describe("workflow driver", () => {
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]![0]).toMatchObject({
       effectId: EFFECT_ID,
-      result: { chargeId: "ch-1" },
-      conflictingResult: { chargeId: "ch-2" },
+      outcome: { status: "settled", result: { chargeId: "ch-1" } },
+      conflictingOutcome: { status: "settled", result: { chargeId: "ch-2" } },
     });
     expect(await readStep("charge")).toMatchObject({ result: { chargeId: "ch-1" } });
     expect(await runtime.effects.getEffect(EFFECT_ID)).toMatchObject({
       result: { chargeId: "ch-1" },
-      conflicts: [{ result: { chargeId: "ch-1" }, conflictingResult: { chargeId: "ch-2" } }],
+      conflicts: [
+        {
+          outcome: { status: "settled", result: { chargeId: "ch-1" } },
+          conflictingOutcome: { status: "settled", result: { chargeId: "ch-2" } },
+        },
+      ],
     });
   });
 
@@ -718,6 +733,203 @@ registerErrorClass("ChargeDeclined", ChargeDeclined);
 class Receipt {
   constructor(public id: string) {}
 }
+
+class ProviderDeclinedError extends Error {
+  declineCode: string;
+  constructor(declineCode: string) {
+    super(`Declined: ${declineCode}`);
+    this.name = "ProviderDeclinedError";
+    this.declineCode = declineCode;
+  }
+}
+registerErrorClass("ProviderDeclinedError", ProviderDeclinedError);
+
+const declined = (err: unknown) => err instanceof ProviderDeclinedError;
+
+describe("definite failures", () => {
+  test("a perform error that fails accepts fails the effect, and the step throws it on every delivery", async () => {
+    const { deliver, log, caught, provider, runtime, readStep, advance } = setup({
+      fails: declined,
+    });
+    provider.perform.mockImplementationOnce(async () => {
+      log.push("perform");
+      throw new ProviderDeclinedError("do_not_honor");
+    });
+
+    await expect(deliver()).resolves.toEqual({ status: "completed", result: "caught" });
+    expect(log.slice(0, 4)).toEqual(["begin", "perform", "settle", "write:charge:done"]);
+    expect(caught).toHaveLength(1);
+    expect(caught[0]).toBeInstanceOf(ProviderDeclinedError);
+    expect(caught[0]).toMatchObject({ declineCode: "do_not_honor" });
+    expect(await readStep("charge")).toMatchObject({
+      type: "step-error",
+      err: { name: "ProviderDeclinedError" },
+      done: true,
+    });
+    const record = await runtime.effects.getEffect(EFFECT_ID);
+    expect(record).toMatchObject({ status: "failed", conflicts: [] });
+    expect(record!.error).toBeInstanceOf(ProviderDeclinedError);
+
+    advance(1);
+    log.length = 0;
+    await deliver();
+    expect(log).toEqual([]);
+    expect(caught).toHaveLength(2);
+    expect(caught[1]).toBeInstanceOf(ProviderDeclinedError);
+    expect(provider.perform).toHaveBeenCalledTimes(1);
+  });
+
+  test("an effect that failed elsewhere throws its error without a callback", async () => {
+    const { deliver, log, caught, beginElsewhere, real, provider } = setup({ fails: declined });
+    await beginElsewhere();
+    await real.settle({
+      effectId: EFFECT_ID,
+      operation: "charge-v1",
+      status: "failed",
+      error: new ProviderDeclinedError("expired_card"),
+    });
+
+    await expect(deliver()).resolves.toEqual({ status: "completed", result: "caught" });
+    expect(log.slice(0, 2)).toEqual(["begin", "write:charge:done"]);
+    expect(caught[0]).toMatchObject({ declineCode: "expired_card" });
+    expect(provider.lookup).not.toHaveBeenCalled();
+    expect(provider.perform).not.toHaveBeenCalled();
+  });
+
+  test("a lookup that reports failed fails the effect without performing", async () => {
+    const { deliver, log, caught, beginElsewhere, provider, runtime } = setup({
+      lookup: async () => {
+        log.push("lookup");
+        return { status: "failed", error: new ProviderDeclinedError("do_not_honor") };
+      },
+    });
+    await beginElsewhere();
+
+    await expect(deliver()).resolves.toEqual({ status: "completed", result: "caught" });
+    expect(log.slice(0, 4)).toEqual(["begin", "lookup", "settle", "write:charge:done"]);
+    expect(caught[0]).toBeInstanceOf(ProviderDeclinedError);
+    expect(provider.perform).not.toHaveBeenCalled();
+    expect((await runtime.effects.getEffect(EFFECT_ID))?.status).toBe("failed");
+  });
+
+  test("a perform error that fails rejects leaves the outcome uncertain", async () => {
+    const fails = vi.fn(declined);
+    const { deliver, provider, caught, runtime } = setup({ fails });
+    const timeout = new Error("provider timeout");
+    provider.perform.mockImplementationOnce(async () => {
+      throw timeout;
+    });
+
+    await expect(deliver()).resolves.toEqual({ status: "suspended", wakeAt: 61_000 });
+    expect(fails).toHaveBeenCalledWith(timeout);
+    expect(caught).toEqual([]);
+    expect((await runtime.effects.getEffect(EFFECT_ID))?.status).toBe("pending");
+  });
+
+  test("a thrown value that is not an Error fails the effect wrapped in an Error", async () => {
+    const { deliver, provider, caught } = setup({ fails: () => true });
+    provider.perform.mockImplementationOnce(async () => {
+      throw "declined";
+    });
+
+    await deliver();
+    expect(caught[0]).toBeInstanceOf(Error);
+    expect((caught[0] as Error).message).toBe("declined");
+  });
+
+  test("a fails that throws ends the delivery with EFFECT_HANDLER_INVALID and records nothing", async () => {
+    const { deliver, provider, runtime, readStep } = setup({
+      fails: () => {
+        throw new Error("classifier bug");
+      },
+    });
+    provider.perform.mockImplementationOnce(async () => {
+      throw new ProviderDeclinedError("do_not_honor");
+    });
+
+    expect(await deliveryCode(deliver())).toBe("EFFECT_HANDLER_INVALID");
+    expect(await readStep("charge")).toBeNull();
+    expect((await runtime.effects.getEffect(EFFECT_ID))?.status).toBe("pending");
+  });
+
+  test("a failed lookup whose error is not an Error ends the delivery with EFFECT_HANDLER_INVALID", async () => {
+    const { deliver, beginElsewhere } = setup({
+      lookup: async () => ({ status: "failed", error: "declined" }) as never,
+    });
+    await beginElsewhere();
+
+    expect(await deliveryCode(deliver())).toBe("EFFECT_HANDLER_INVALID");
+  });
+});
+
+describe("attempt limit", () => {
+  test("an outcome still unknown after maxAttempts throws EFFECT_OUTCOME_UNKNOWN and leaves the effect pending", async () => {
+    const { deliver, log, caught, provider, runtime, readStep, advance } = setup({
+      maxAttempts: 2,
+      lookup: async () => {
+        log.push("lookup");
+        throw new Error("permission denied");
+      },
+    });
+    provider.perform.mockImplementationOnce(async () => {
+      log.push("perform");
+      throw new Error("socket hang up");
+    });
+
+    await expect(deliver()).resolves.toEqual({ status: "suspended", wakeAt: 61_000 });
+    expect(log).toEqual(["begin", "perform", "watch", "write:charge:unfinished"]);
+
+    advance(60_000);
+    log.length = 0;
+    await expect(deliver()).resolves.toEqual({ status: "completed", result: "caught" });
+    expect(log.slice(0, 3)).toEqual(["begin", "lookup", "write:charge:done"]);
+    expect(caught).toHaveLength(1);
+    expect(caught[0]).toBeInstanceOf(WorkflowEffectError);
+    expect(caught[0]).toMatchObject({ code: "EFFECT_OUTCOME_UNKNOWN" });
+    expect((caught[0] as Error).message).toContain("after 2 attempts");
+    expect(await readStep("charge")).toMatchObject({
+      type: "step-error",
+      err: { name: "WorkflowEffectError", code: "EFFECT_OUTCOME_UNKNOWN" },
+      done: true,
+    });
+    expect((await runtime.effects.getEffect(EFFECT_ID))?.status).toBe("pending");
+
+    advance(1);
+    log.length = 0;
+    await deliver();
+    expect(log).toEqual([]);
+    expect(caught).toHaveLength(2);
+    expect(caught[1]).toMatchObject({ code: "EFFECT_OUTCOME_UNKNOWN" });
+  });
+
+  test("a maxAttempts of 1 throws on the first uncertain attempt without watching", async () => {
+    const { deliver, caught, provider, spies } = setup({ maxAttempts: 1 });
+    provider.perform.mockImplementationOnce(async () => {
+      throw new Error("socket hang up");
+    });
+
+    await expect(deliver()).resolves.toEqual({ status: "completed", result: "caught" });
+    expect(caught[0]).toMatchObject({ code: "EFFECT_OUTCOME_UNKNOWN" });
+    expect((caught[0] as Error).message).toContain("after 1 attempt");
+    expect(spies.watch).not.toHaveBeenCalled();
+  });
+
+  test("an outcome found within maxAttempts settles as usual", async () => {
+    const { deliver, provider, advance, caught } = setup({ maxAttempts: 2 });
+    provider.perform.mockImplementationOnce(async (effectId) => {
+      provider.charges.set(effectId, { chargeId: "ch-1", amount: 4999 });
+      throw new Error("response lost");
+    });
+
+    await expect(deliver()).resolves.toMatchObject({ status: "suspended" });
+    advance(60_000);
+    await expect(deliver()).resolves.toEqual({
+      status: "completed",
+      result: { chargeId: "ch-1", amount: 4999 },
+    });
+    expect(caught).toEqual([]);
+  });
+});
 
 describe("serialization", () => {
   const values: [string, unknown][] = [
