@@ -167,7 +167,8 @@ export function matchEffectBegin(
 
 /**
  * Applies a settlement. `wake` is true only when this settlement moved the
- * effect out of pending: adapters then wake every waiter in the same write. `state` is the input object when nothing changed. Throws
+ * effect out of pending: adapters then wake every waiter in the same write.
+ * `state` is the input object when nothing changed. Throws
  * `EffectClientInvariantError` when the operation differs from the effect's,
  * which `begin` would have rejected.
  */

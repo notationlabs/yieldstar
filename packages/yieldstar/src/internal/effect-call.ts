@@ -150,7 +150,6 @@ export async function executeEffectCall(
     return settled;
   }
 
-  // Asks the descriptor whether a thrown value is a definite failure.
   function isDefiniteFailure(err: unknown): boolean {
     if (!request.fails) return false;
     try {
