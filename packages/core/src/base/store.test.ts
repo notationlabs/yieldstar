@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import {
   cloneStoreState,
+  diffStorePaths,
   storePathsIntersect,
   trackStoreSelector,
   trackStoreUpdater,
@@ -173,4 +174,59 @@ test("cloneStoreState launders proxy wrappers into plain objects", () => {
 
   expect(() => structuredClone(clean)).not.toThrow();
   expect(clean.wrapper.inner).toEqual(makeState().messages);
+});
+
+type Ledger = { opened: Date; totals: Map<string, number>; seen: Set<string>; note: string };
+
+function makeLedger(): Ledger {
+  return {
+    opened: new Date(0),
+    totals: new Map([["mug", 1]]),
+    seen: new Set(["mug"]),
+    note: "",
+  };
+}
+
+test("trackStoreUpdater: Map, Set and Date methods work on the draft and record their path", () => {
+  const draft = makeLedger();
+  const tracked = trackStoreUpdater(draft);
+
+  tracked.draft.totals.set("cup", 2);
+  tracked.draft.seen.add("cup");
+  tracked.draft.opened.setTime(1);
+
+  const paths = tracked.writePaths();
+  expect(wakes(["totals"], paths)).toBe(true);
+  expect(wakes(["seen"], paths)).toBe(true);
+  expect(wakes(["opened"], paths)).toBe(true);
+  expect(wakes(["note"], paths)).toBe(false);
+  expect(draft.totals.get("cup")).toBe(2);
+  expect(draft.seen.has("cup")).toBe(true);
+  expect(draft.opened.getTime()).toBe(1);
+});
+
+test("trackStoreSelector: Map, Set and Date methods work and record a read of the whole value", () => {
+  const { result, readPaths } = trackStoreSelector(makeLedger(), (state) => [
+    state.totals.get("mug"),
+    state.seen.has("mug"),
+    state.opened.getTime(),
+  ]);
+
+  expect(result).toEqual([1, true, 0]);
+  expect(readPaths).toEqual(
+    expect.arrayContaining([["totals"], ["seen"], ["opened"]])
+  );
+});
+
+test("diffStorePaths: compares Maps, Sets and Dates by content", () => {
+  const next = makeLedger();
+  expect(diffStorePaths(makeLedger(), next)).toEqual([]);
+
+  next.totals.set("mug", 2);
+  next.seen.add("cup");
+  next.opened = new Date(1);
+  expect(diffStorePaths(makeLedger(), next)).toEqual(
+    expect.arrayContaining([["totals"], ["seen"], ["opened"]])
+  );
+  expect(diffStorePaths(makeLedger(), next)).toHaveLength(3);
 });

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `durableValueCodec` encodes `Date`, `Map`, `Set` and `bigint` as tagged values and decodes them back to the same type, so step results, store state, params, context, effect inputs and results, and workflow results may hold them. Map entries and set values keep their insertion order. Invalid `Date`s, subclasses of these types and instances with own properties are still rejected. `Durable<T>` accepts these types, and still rejects functions.
+- Store updaters can mutate `Date`s, `Map`s and `Set`s in a draft. A write through one of their methods wakes waiters on the value's path.
+
 ## 0.6.1 - 2026-10-29
 
 ### Added

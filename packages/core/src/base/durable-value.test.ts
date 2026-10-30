@@ -86,12 +86,16 @@ describe("durableValueCodec.encode rejects", () => {
   test.each([
     ["functions", () => {}],
     ["symbols", Symbol("s")],
-    ["bigints", 1n],
     ["NaN", Number.NaN],
     ["Infinity", Number.POSITIVE_INFINITY],
     ["-Infinity", Number.NEGATIVE_INFINITY],
-    ["Dates", new Date(0)],
-    ["Maps", new Map()],
+    ["invalid Dates", new Date(Number.NaN)],
+    ["Date subclasses", new (class Day extends Date {})(0)],
+    ["Dates with own properties", Object.assign(new Date(0), { tz: "UTC" })],
+    ["Map subclasses", new (class Index extends Map {})()],
+    ["Sets with own properties", Object.assign(new Set(), { label: "s" })],
+    ["Maps with invalid keys", new Map([[() => 1, 1]])],
+    ["Sets with invalid values", new Set([Symbol("s")])],
     ["class instances", new (class Point {})()],
     ["array subclasses", new (class List extends Array {})()],
   ])("%s", (_label, value) => {
@@ -99,7 +103,8 @@ describe("durableValueCodec.encode rejects", () => {
   });
 
   test("nested invalid values, naming their path", () => {
-    expect(invalidMessage({ a: { b: new Date(0) } })).toMatch(/^\$\["a"\]\["b"\]: /);
+    expect(invalidMessage({ a: { b: () => 1 } })).toMatch(/^\$\["a"\]\["b"\]: /);
+    expect(invalidMessage(new Map([["k", () => 1]]))).toMatch(/^\$\.entries\[0\]\[1\]: /);
   });
 
   test("missing array items", () => {
@@ -186,6 +191,69 @@ describe("durableValueCodec tags undefined", () => {
   });
 });
 
+describe("durableValueCodec tags built-in types", () => {
+  test("bigints as decimal strings", () => {
+    expect(canonical(-12n)).toBe('{"$type":"bigint","value":"-12"}');
+    expect(roundTrip(2n ** 70n)).toBe(2n ** 70n);
+  });
+
+  test("Dates as ISO strings", () => {
+    const at = new Date("2026-10-29T12:00:00.123Z");
+    expect(canonical(at)).toBe('{"$type":"date","value":"2026-10-29T12:00:00.123Z"}');
+    const decoded = roundTrip(at);
+    expect(decoded).toBeInstanceOf(Date);
+    expect(decoded).not.toBe(at);
+    expect((decoded as Date).getTime()).toBe(at.getTime());
+  });
+
+  test("Dates outside the four-digit year range", () => {
+    const far = new Date(8.64e15);
+    expect((roundTrip(far) as Date).getTime()).toBe(far.getTime());
+  });
+
+  test("Maps as entries in insertion order, with any durable keys", () => {
+    const map = new Map<unknown, unknown>([
+      ["b", 1],
+      [1n, new Date(0)],
+      [{ id: 1 }, [undefined]],
+    ]);
+    expect(canonical(new Map([["a", 1]]))).toBe('{"$type":"map","entries":[["a",1]]}');
+    expect(roundTrip(map)).toEqual(map);
+    expect([...(roundTrip(map) as Map<unknown, unknown>).keys()][0]).toBe("b");
+  });
+
+  test("Sets as values in insertion order", () => {
+    const set = new Set([3, 1, "x"]);
+    expect(canonical(set)).toBe('{"$type":"set","values":[3,1,"x"]}');
+    expect([...(roundTrip(set) as Set<unknown>)]).toEqual([3, 1, "x"]);
+  });
+
+  test("Maps and Sets that differ only in order encode differently", () => {
+    expect(canonical(new Set([1, 2]))).not.toBe(canonical(new Set([2, 1])));
+    expect(canonical(new Map([["a", 1], ["b", 2]]))).not.toBe(
+      canonical(new Map([["b", 2], ["a", 1]]))
+    );
+  });
+
+  test("nested inside objects, arrays and errors", () => {
+    const value = { at: new Date(0), tags: [new Set(["a"])], ids: new Map([[1, 2n]]) };
+    expect(roundTrip(value)).toEqual(value);
+    const error = Object.assign(new Error("boom"), { at: new Date(0) });
+    expect((roundTrip(error) as typeof error).at).toEqual(new Date(0));
+  });
+
+  test("a Map that contains itself is a reference cycle", () => {
+    const map = new Map<string, unknown>();
+    map.set("self", map);
+    expect(invalidMessage(map)).toMatch(/reference cycle/);
+  });
+
+  test("plain objects shaped like the new tags read back as written", () => {
+    const value = { $type: "date", value: "2026-10-29T12:00:00.000Z" };
+    expect(roundTrip(value)).toEqual(value);
+  });
+});
+
 describe("durableValueCodec wraps plain objects with a $type key", () => {
   test("so they read back as written", () => {
     const value = { $type: "undefined" };
@@ -243,7 +311,15 @@ describe("durableValueCodec.decode", () => {
 
   test.each([
     ["text that is not JSON", "{"],
-    ["an unknown tag", '{"$type":"date","value":0}'],
+    ["an unknown tag", '{"$type":"regexp","value":"a"}'],
+    ["a bigint that is not an integer string", '{"$type":"bigint","value":"1.5"}'],
+    ["a bigint written as -0", '{"$type":"bigint","value":"-0"}'],
+    ["a date that is not a string", '{"$type":"date","value":0}'],
+    ["a date that is not in toISOString form", '{"$type":"date","value":"2026-10-29"}'],
+    ["a map entry that is not a pair", '{"$type":"map","entries":[["a"]]}'],
+    ["a map with duplicate keys", '{"$type":"map","entries":[["a",1],["a",2]]}'],
+    ["a set with duplicate values", '{"$type":"set","values":[1,1]}'],
+    ["a set without values", '{"$type":"set"}'],
     ["a tag with extra keys", '{"$type":"undefined","value":1}'],
     ["a wrapped value that is not an object", '{"$type":"object","value":[1]}'],
     ["an error without a message", '{"$type":"error","name":"Error"}'],
@@ -258,7 +334,7 @@ describe("Durable<T>", () => {
     return value;
   }
 
-  test("accepts interfaces, undefined and errors", () => {
+  test("accepts interfaces, undefined, errors and built-in types", () => {
     interface Reservation {
       id: string;
       note?: string;
@@ -268,18 +344,19 @@ describe("Durable<T>", () => {
     const reservation: Reservation = { id: "r", lines: [], error: null };
     expectTypeOf(record(reservation)).toEqualTypeOf<Reservation>();
     expectTypeOf(record(undefined)).toEqualTypeOf<undefined>();
+    record({ at: new Date(), n: 1n });
+    record({ map: new Map<string, { at: Date }>() });
+    record(new Set<number>());
+    const readonlyMap: ReadonlyMap<string, number> = new Map();
+    record({ readonlyMap });
   });
 
-  test("rejects Dates, Maps, Sets, bigints and functions", () => {
-    // @ts-expect-error
-    record({ at: new Date() });
-    // @ts-expect-error
-    record({ map: new Map<string, number>() });
-    // @ts-expect-error
-    record(new Set<number>());
-    // @ts-expect-error
-    record(1n);
+  test("rejects functions, including inside Maps and Sets", () => {
     // @ts-expect-error
     record({ fn: () => 1 });
+    // @ts-expect-error
+    record(new Map<string, () => number>());
+    // @ts-expect-error
+    record(new Set<() => number>());
   });
 });

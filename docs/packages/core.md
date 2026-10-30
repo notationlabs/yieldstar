@@ -190,23 +190,27 @@ const durableValueCodec: {
 };
 
 // Compile-time check for a recorded value; accepts interfaces.
-type Durable<T> = /* T, or never where T holds a Date, Map, Set, bigint or function */;
+type Durable<T> = /* T, or never where T holds a function */;
 // unknown when T is durable, otherwise Otherwise. Intersected with a
 // parameter, it checks T without changing how T is inferred.
 type IfDurable<T, Otherwise> = [T] extends [Durable<T>] ? unknown : Otherwise;
 ```
 
-`encode` accepts `null`, booleans, finite numbers, strings, `undefined`, errors, arrays with no missing items, and plain objects (the default prototype or `null`) whose own properties are enumerable data properties with string keys. It rejects functions, symbols, bigints, `NaN` and infinities, class instances such as `Date` and `Map`, accessors, symbol or non-enumerable properties, missing array items and reference cycles, and returns a message naming the path of the first invalid value. Neither method throws for an invalid input.
+`encode` accepts `null`, booleans, finite numbers, strings, `bigint`s, `undefined`, errors, valid `Date`s, `Map`s and `Set`s of durable values, arrays with no missing items, and plain objects (the default prototype or `null`) whose own properties are enumerable data properties with string keys. It rejects functions, symbols, `NaN` and infinities, invalid `Date`s, class instances, subclasses of `Array`, `Date`, `Map` and `Set` or ones with own properties, accessors, symbol or non-enumerable properties, missing array items and reference cycles, and returns a message naming the path of the first invalid value. Neither method throws for an invalid input.
 
-The canonical string sorts object keys and writes `-0` as `0`, so two values that differ only in key order encode to the same string. Values JSON cannot hold are tagged objects with a `$type` key:
+The canonical string sorts object keys and writes `-0` as `0`, so two values that differ only in key order encode to the same string. Map entries and set values keep their insertion order, so two maps or sets that differ only in order encode to different strings. Values JSON cannot hold are tagged objects with a `$type` key:
 
 | Value | Encoding |
 | --- | --- |
 | `undefined` | `{"$type":"undefined"}` |
+| A `bigint` | `{"$type":"bigint","value":"123"}` |
+| A `Date` | `{"$type":"date","value":"2026-10-29T12:00:00.000Z"}` |
+| A `Map` | `{"$type":"map","entries":[[key, value], ...]}` |
+| A `Set` | `{"$type":"set","values":[...]}` |
 | A plain object with its own `$type` key | `{"$type":"object","value":{...}}` |
 | An error | `{"$type":"error","name":...,"message":...,"stack"?,"code"?,"cause"?,"errors"?,"fields"?}` |
 
-So `{ a: undefined }` and `{}` stay distinct, and only a tagged value decodes as `undefined` or an error: an error-shaped plain object stays a plain object.
+So `{ a: undefined }` and `{}` stay distinct, and only a tagged value decodes as `undefined`, a built-in type or an error: an error-shaped plain object stays a plain object.
 
 An error keeps its `name`, `message`, a string `stack` and `code`, its own `cause` (encoded recursively), a non-enumerable `errors` array such as `AggregateError`'s, and its own enumerable properties whose values are durable, under `fields`. Properties that are not durable are left out rather than rejecting the error. `encodeThrownValue(value)` encodes a thrown value as thrown when it is durable, and as `Error(String(value))` otherwise.
 

@@ -97,12 +97,14 @@ describe("error encoding", () => {
 
   test("omits non-durable properties", () => {
     const error = Object.assign(new Error("boom"), {
-      at: new Date(0),
+      at: new WeakMap(),
       handler: () => {},
       ok: 1,
+      when: new Date(0),
     });
     const revived = roundTrip(error);
-    expect(Object.keys(revived)).toEqual(["ok"]);
+    expect(Object.keys(revived)).toEqual(["ok", "when"]);
+    expect((revived as unknown as { when: Date }).when).toEqual(new Date(0));
   });
 
   test("ignores a non-string code", () => {
@@ -202,9 +204,9 @@ describe("encodeThrownValue", () => {
   });
 
   test("records a non-durable thrown value as Error(String(value))", () => {
-    const revived = decode(encodeThrownValue(new Date(0))) as Error;
+    const revived = decode(encodeThrownValue(new WeakMap())) as Error;
     expect(Object.getPrototypeOf(revived)).toBe(Error.prototype);
-    expect(revived.message).toBe(String(new Date(0)));
-    expect((decode(encodeThrownValue(10n)) as Error).message).toBe("10");
+    expect(revived.message).toBe(String(new WeakMap()));
+    expect((decode(encodeThrownValue(Symbol("s"))) as Error).message).toBe("Symbol(s)");
   });
 });

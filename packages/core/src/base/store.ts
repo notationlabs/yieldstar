@@ -2,7 +2,13 @@ import type { StandardSchemaV1 } from "@standard-schema/spec";
 import { durableValueCodec, type Durable, type IfDurable } from "./durable-value";
 import { WorkflowValueError, registerErrorClass } from "./errors";
 
-export type Draft<T> = T extends object
+export type Draft<T> = T extends Date
+  ? T
+  : T extends ReadonlyMap<infer K, infer V>
+  ? Map<Draft<K>, Draft<V>>
+  : T extends ReadonlySet<infer U>
+  ? Set<Draft<U>>
+  : T extends object
   ? { -readonly [K in keyof T]: Draft<T[K]> }
   : T;
 
@@ -904,6 +910,11 @@ export function diffStorePaths(previous: unknown, next: unknown): StorePath[] {
   function visit(left: unknown, right: unknown, path: StorePath) {
     if (Object.is(left, right)) return;
 
+    if (isOpaqueValue(left) || isOpaqueValue(right)) {
+      if (!sameEncoding(left, right)) paths.push(path);
+      return;
+    }
+
     if (!isDiffableObject(left) || !isDiffableObject(right)) {
       paths.push(path);
       return;
@@ -953,6 +964,12 @@ export function trackStoreSelector<T, R>(
 
   function track(value: unknown, path: StorePath): unknown {
     if (!isDiffableObject(value)) return value;
+    if (isOpaqueValue(value)) {
+      // The selector reads the whole value, because its methods do not work
+      // on a proxy.
+      if (path.length === 0) paths.push(path);
+      return value;
+    }
 
     const cached = proxies.get(value);
     if (cached) return cached;
@@ -1045,6 +1062,12 @@ export function trackStoreUpdater<T>(target: T): TrackedStoreUpdater<T> {
 
   function track(value: unknown, path: StorePath): unknown {
     if (!isDiffableObject(value)) return value;
+    if (isOpaqueValue(value)) {
+      // Its methods do not work on a proxy, so the updater gets the raw value
+      // and any read of it is recorded as a write.
+      paths.push(path);
+      return value;
+    }
 
     const cached = proxies.get(value);
     if (cached) return cached;
@@ -1115,6 +1138,20 @@ function isPathPrefix(prefix: StorePath, path: StorePath): boolean {
 
 function isDiffableObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/**
+ * Whether `value` keeps its contents in internal slots, which proxies and
+ * `Object.keys` cannot see.
+ */
+function isOpaqueValue(value: unknown): value is Date | Map<unknown, unknown> | Set<unknown> {
+  return value instanceof Date || value instanceof Map || value instanceof Set;
+}
+
+function sameEncoding(left: unknown, right: unknown) {
+  const a = durableValueCodec.encode(left);
+  const b = durableValueCodec.encode(right);
+  return a.status === "encoded" && b.status === "encoded" && a.canonical === b.canonical;
 }
 
 function arrayKeyToPathSegment(key: string): string | number {

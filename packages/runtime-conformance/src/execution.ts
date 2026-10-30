@@ -457,16 +457,15 @@ export function registerExecutionClientConformance({
       const cyclic: Record<string, unknown> = {};
       cyclic.self = cyclic;
       const invalidEvents: [string, { params: any; context: Map<any, any> }][] = [
-        ["a Date", { params: { at: new Date(0) }, context: new Map() }],
+        ["an invalid Date", { params: { at: new Date(NaN) }, context: new Map() }],
         ["a class instance", { params: { point: new Point(1) }, context: new Map() }],
         ["NaN", { params: { n: NaN }, context: new Map() }],
         ["Infinity", { params: { n: Infinity }, context: new Map() }],
-        ["a bigint", { params: { n: 10n }, context: new Map() }],
         ["a function", { params: { fn: () => 1 }, context: new Map() }],
-        ["a Map", { params: { map: new Map([["a", 1]]) }, context: new Map() }],
+        ["a function in a Map", { params: { map: new Map([["a", () => 1]]) }, context: new Map() }],
         ["a sparse array", { params: { list: [1, , 3] }, context: new Map() }],
         ["a cycle", { params: cyclic, context: new Map() }],
-        ["a Date in context", { params: {}, context: new Map([["at", new Date(0)]]) }],
+        ["a class instance in context", { params: {}, context: new Map([["at", new Point(1)]]) }],
         ["an object context key", { params: {}, context: new Map([[{}, 1]]) }],
         ["a number context key", { params: {}, context: new Map([[7, 1]]) }],
       ];
@@ -955,7 +954,7 @@ export function registerExecutionClientConformance({
         const lease = await claimOne(runtime, "invalid-result");
         const acknowledged = await runtime.executions.acknowledge({
           lease,
-          outcome: { status: "completed", result: { at: new Date(0) } },
+          outcome: { status: "completed", result: { point: new Point(1) } },
         });
         const record = await runtime.executions.get("invalid-result");
         expect(record!.status).toBe("failed");
@@ -1885,17 +1884,16 @@ export function registerExecutionClientConformance({
       });
       const hidden = Object.defineProperty({}, "value", { value: 1, enumerable: false });
       const invalidParams: [string, unknown][] = [
-        ["a Date", { at: new Date(0) }],
+        ["an invalid Date", { at: new Date(NaN) }],
         ["a class instance", { point: new Point(1) }],
         ["NaN", { n: NaN }],
         ["Infinity", { n: Infinity }],
-        ["a bigint", { n: 10n }],
         ["a function", { fn: () => 1 }],
         ["a symbol", { s: Symbol("s") }],
         ["a symbol key", { [Symbol("s")]: 1 }],
         ["an accessor", { nested: accessor }],
         ["a non-enumerable property", { nested: hidden }],
-        ["a Map", { map: new Map([["a", 1]]) }],
+        ["a function in a Map", { map: new Map([["a", () => 1]]) }],
         ["a sparse array", { list: [1, , 3] }],
         ["a cycle", cyclic],
         ["an array as params", [1, 2]],
