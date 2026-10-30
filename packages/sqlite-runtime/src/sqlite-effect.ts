@@ -86,7 +86,7 @@ export class SqliteEffectClient implements EffectClient {
       const state = this.effectsDao.getState(watch.effectId);
       if (!state) throw effectNotFound(watch.effectId);
       this.effectWaitersDao.upsertWaiter(watch);
-      if (state.status === "settled") {
+      if (state.status !== "pending") {
         this.executions.wakeInTransaction(watch.executionId);
       }
     });

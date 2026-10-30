@@ -169,6 +169,9 @@ export function workflow<
               ? await executeEffectCall(stepResponse.request, {
                   effects: effectClient,
                   executionId,
+                  // Each earlier attempt of an effect step that ended
+                  // uncertain wrote one unfinished record.
+                  attempt: stepAttempt,
                   clock,
                   assertLease: () => stopIfAborted(signal),
                   logger,

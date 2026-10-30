@@ -10,7 +10,9 @@ class EffectRow {
 }
 
 class EffectConflictRow {
+  status!: EffectConflictState["status"];
   result!: string;
+  conflicting_status!: EffectConflictState["conflictingStatus"];
   conflicting_result!: string;
   reported_at!: number;
 }
@@ -38,12 +40,27 @@ export class EffectsDao {
       );
       CREATE TABLE IF NOT EXISTS effect_conflicts (
         effect_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'settled',
         result TEXT NOT NULL,
+        conflicting_status TEXT NOT NULL DEFAULT 'settled',
         conflicting_result TEXT NOT NULL,
         reported_at INTEGER NOT NULL,
         PRIMARY KEY (effect_id, conflicting_result)
       );
     `);
+    // Databases created before effects could fail have no status columns.
+    // Every conflict report in them is between two results.
+    const columns = this.db
+      .query<{ name: string }>(`PRAGMA table_info(effect_conflicts)`)
+      .all()
+      .map((column) => column.name);
+    for (const column of ["status", "conflicting_status"]) {
+      if (!columns.includes(column)) {
+        this.db.run(
+          `ALTER TABLE effect_conflicts ADD COLUMN ${column} TEXT NOT NULL DEFAULT 'settled'`
+        );
+      }
+    }
   }
 
   getState(effectId: string): EffectState | undefined {
@@ -53,7 +70,8 @@ export class EffectsDao {
     if (!row) return undefined;
     const conflicts = this.db
       .query<EffectConflictRow>(
-        `SELECT result, conflicting_result, reported_at FROM effect_conflicts
+        `SELECT status, result, conflicting_status, conflicting_result, reported_at
+         FROM effect_conflicts
          WHERE effect_id = $effectId
          ORDER BY reported_at, rowid`
       )
@@ -64,7 +82,9 @@ export class EffectsDao {
       input: row.input,
       status: row.status,
       conflicts: conflicts.map((conflict) => ({
+        status: conflict.status,
         result: conflict.result,
+        conflictingStatus: conflict.conflicting_status,
         conflictingResult: conflict.conflicting_result,
         reportedAt: conflict.reported_at,
       })),
@@ -110,12 +130,16 @@ export class EffectsDao {
   private insertConflict(effectId: string, conflict: EffectConflictState) {
     this.db
       .query(
-        `INSERT INTO effect_conflicts (effect_id, result, conflicting_result, reported_at)
-         VALUES ($effectId, $result, $conflictingResult, $reportedAt)`
+        `INSERT INTO effect_conflicts
+           (effect_id, status, result, conflicting_status, conflicting_result, reported_at)
+         VALUES
+           ($effectId, $status, $result, $conflictingStatus, $conflictingResult, $reportedAt)`
       )
       .run({
         $effectId: effectId,
+        $status: conflict.status,
         $result: conflict.result,
+        $conflictingStatus: conflict.conflictingStatus,
         $conflictingResult: conflict.conflictingResult,
         $reportedAt: conflict.reportedAt,
       });

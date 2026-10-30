@@ -67,7 +67,7 @@ export class MemoryEffectClient implements EffectClient {
     let waiters = this.waiters.get(watch.effectId);
     if (!waiters) this.waiters.set(watch.effectId, (waiters = new Map()));
     waiters.set(waiterKey(watch), watch);
-    if (state.status === "settled") this.executions.wakeNow(watch.executionId);
+    if (state.status !== "pending") this.executions.wakeNow(watch.executionId);
   }
 
   async getEffect(effectId: string): Promise<EffectRecord | undefined> {

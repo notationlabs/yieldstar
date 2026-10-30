@@ -268,6 +268,7 @@ test("a settlement wakes every watching execution, and each reads the settled re
   await runtime.effects.settle({
     effectId: EFFECT_ID,
     operation: "charge-v1",
+    status: "settled",
     result: { chargeId: "ch-settled" },
   });
   provider.lookup.mockClear();

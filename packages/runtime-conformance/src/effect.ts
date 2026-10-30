@@ -190,7 +190,11 @@ export function registerEffectClientConformance({
     result: DurableValue,
     operation = OPERATION
   ) {
-    return runtime.effects.settle({ effectId, operation, result });
+    return runtime.effects.settle({ effectId, operation, status: "settled", result });
+  }
+
+  function fail(runtime: Runtime, effectId: string, error: Error, operation = OPERATION) {
+    return runtime.effects.settle({ effectId, operation, status: "failed", error });
   }
 
   function watch(runtime: Runtime, effectId: string, executionId: string, stepKey = "charge") {
@@ -394,8 +398,8 @@ export function registerEffectClientConformance({
         const reportedAt = clock.now;
         const conflict = {
           status: "conflict",
-          result: { paymentId: "pay_1" },
-          conflictingResult: { paymentId: "pay_2" },
+          outcome: { status: "settled", result: { paymentId: "pay_1" } },
+          conflictingOutcome: { status: "settled", result: { paymentId: "pay_2" } },
         };
         expect(await settle(peer, "pay:conflict", { paymentId: "pay_2" })).toEqual(conflict);
 
@@ -417,8 +421,8 @@ export function registerEffectClientConformance({
           result: { paymentId: "pay_1" },
           conflicts: [
             {
-              result: { paymentId: "pay_1" },
-              conflictingResult: { paymentId: "pay_2" },
+              outcome: { status: "settled", result: { paymentId: "pay_1" } },
+              conflictingOutcome: { status: "settled", result: { paymentId: "pay_2" } },
               reportedAt,
             },
           ],
@@ -442,13 +446,17 @@ export function registerEffectClientConformance({
         const loser = winner === "first" ? "second" : "first";
         expect(conflicts[0]).toEqual({
           status: "conflict",
-          result: winner,
-          conflictingResult: loser,
+          outcome: { status: "settled", result: winner },
+          conflictingOutcome: { status: "settled", result: loser },
         });
         const record = await runtime.effects.getEffect("pay:race");
         expect(record?.result).toBe(winner);
         expect(record?.conflicts).toEqual([
-          { result: winner, conflictingResult: loser, reportedAt: START },
+          {
+            outcome: { status: "settled", result: winner },
+            conflictingOutcome: { status: "settled", result: loser },
+            reportedAt: START,
+          },
         ]);
       });
 
@@ -501,6 +509,103 @@ export function registerEffectClientConformance({
         expect(Object.keys(record!.input)).toContain("note");
       });
 
+      it("fails a pending effect with an error and returns the failure to later begins", async ({
+        runtime,
+        peer,
+      }) => {
+        await begin(runtime, "pay:declined");
+        const failed = await fail(runtime, "pay:declined", new CardDeclinedError("do_not_honor"));
+        expect(failed.status).toBe("failed");
+
+        const begun = await begin(peer, "pay:declined");
+        const record = await peer.effects.getEffect("pay:declined");
+        expect(record).toMatchObject({ status: "failed", conflicts: [] });
+        expect("result" in record!).toBe(false);
+        for (const error of [
+          (failed as { error: Error }).error,
+          (begun as { error: Error }).error,
+          record!.error,
+        ]) {
+          expect(error).toBeInstanceOf(CardDeclinedError);
+          expect(error).toMatchObject({
+            message: "Card declined: do_not_honor",
+            declineCode: "do_not_honor",
+          });
+        }
+        expect(begun.status).toBe("failed");
+      });
+
+      it("keeps the first error without a report when a failed effect fails again", async ({
+        runtime,
+        peer,
+      }) => {
+        await begin(runtime, "pay:failed-twice");
+        await fail(runtime, "pay:failed-twice", new CardDeclinedError("first"));
+        const again = await fail(peer, "pay:failed-twice", new CardDeclinedError("second"));
+        expect(again.status).toBe("failed");
+        expect((again as { error: Error }).error).toMatchObject({ declineCode: "first" });
+        const record = await runtime.effects.getEffect("pay:failed-twice");
+        expect((record!.error as CardDeclinedError).declineCode).toBe("first");
+        expect(record!.conflicts).toEqual([]);
+      });
+
+      it("keeps the first outcome and reports a conflict between a result and a failure", async ({
+        runtime,
+        peer,
+      }) => {
+        await begin(runtime, "pay:settled-first");
+        await settle(runtime, "pay:settled-first", { paymentId: "pay_1" });
+        const afterSettle = await fail(
+          peer,
+          "pay:settled-first",
+          new CardDeclinedError("late")
+        );
+        expect(afterSettle).toMatchObject({
+          status: "conflict",
+          outcome: { status: "settled", result: { paymentId: "pay_1" } },
+          conflictingOutcome: { status: "failed" },
+        });
+        expect(
+          (afterSettle as { conflictingOutcome: { error: Error } }).conflictingOutcome.error
+        ).toBeInstanceOf(CardDeclinedError);
+
+        await begin(runtime, "pay:failed-first");
+        await fail(runtime, "pay:failed-first", new CardDeclinedError("early"));
+        const afterFail = await settle(peer, "pay:failed-first", { paymentId: "pay_2" });
+        expect(afterFail).toMatchObject({
+          status: "conflict",
+          outcome: { status: "failed" },
+          conflictingOutcome: { status: "settled", result: { paymentId: "pay_2" } },
+        });
+
+        const settledFirst = await runtime.effects.getEffect("pay:settled-first");
+        expect(settledFirst).toMatchObject({
+          status: "settled",
+          result: { paymentId: "pay_1" },
+          conflicts: [
+            {
+              outcome: { status: "settled", result: { paymentId: "pay_1" } },
+              conflictingOutcome: { status: "failed" },
+              reportedAt: START,
+            },
+          ],
+        });
+        const failedFirst = await runtime.effects.getEffect("pay:failed-first");
+        expect(failedFirst).toMatchObject({
+          status: "failed",
+          conflicts: [
+            {
+              outcome: { status: "failed" },
+              conflictingOutcome: { status: "settled", result: { paymentId: "pay_2" } },
+              reportedAt: START,
+            },
+          ],
+        });
+        expect(failedFirst!.conflicts[0].outcome).toMatchObject({
+          error: { declineCode: "early" },
+        });
+      });
+
       it("throws EffectClientInvariantError for an unknown effect, a changed operation or an invalid result", async ({
         runtime,
       }) => {
@@ -511,6 +616,17 @@ export function registerEffectClientConformance({
         await expectInvariant(settle(runtime, "pay:invariant", "result", "charge-v2"));
         await expectInvariant(
           settle(runtime, "pay:invariant", { at: new Date(Number.NaN) } as never)
+        );
+        await expectInvariant(
+          fail(runtime, "pay:invariant", { message: "not an Error" } as never)
+        );
+        await expectInvariant(
+          runtime.effects.settle({
+            effectId: "pay:invariant",
+            operation: OPERATION,
+            status: "done",
+            result: "result",
+          } as never)
         );
         expect(await runtime.effects.getEffect("pay:invariant")).toMatchObject({
           status: "pending",
@@ -601,6 +717,21 @@ export function registerEffectClientConformance({
         // A repeated watch is never skipped as a duplicate.
         await watch(runtime, "pay:settled", "order-42");
         expect(await claimedIds(runtime)).toEqual(["order-42"]);
+      });
+
+      it("wakes watching executions when an effect fails, and at once on a watch of a failed effect", async ({
+        runtime,
+        peer,
+      }) => {
+        await admitSuspended(runtime, "order-42");
+        await admitSuspended(runtime, "support");
+        await begin(runtime, "pay:failing");
+        await watch(runtime, "pay:failing", "order-42");
+        await fail(peer, "pay:failing", new CardDeclinedError("do_not_honor"));
+        expect(await claimedIds(runtime)).toEqual(["order-42"]);
+
+        await watch(peer, "pay:failing", "support", "check");
+        expect(await claimedIds(runtime)).toEqual(["support"]);
       });
 
       it("wakes the watching execution when settlement races with watch", async ({
@@ -717,13 +848,13 @@ export function registerEffectClientConformance({
           result: { paymentId: "pay_1" },
           conflicts: [
             {
-              result: { paymentId: "pay_1" },
-              conflictingResult: { paymentId: "pay_2" },
+              outcome: { status: "settled", result: { paymentId: "pay_1" } },
+              conflictingOutcome: { status: "settled", result: { paymentId: "pay_2" } },
               reportedAt: START,
             },
             {
-              result: { paymentId: "pay_1" },
-              conflictingResult: { paymentId: "pay_3" },
+              outcome: { status: "settled", result: { paymentId: "pay_1" } },
+              conflictingOutcome: { status: "settled", result: { paymentId: "pay_3" } },
               reportedAt: START,
             },
           ],
@@ -769,10 +900,17 @@ export function registerEffectClientConformance({
         await begin(runtime, "pay:conflict");
         await settle(runtime, "pay:conflict", "first");
         await settle(runtime, "pay:conflict", "second");
+        await fail(runtime, "pay:conflict", new CardDeclinedError("late"));
         const conflicted = await runtime.effects.getEffect("pay:conflict");
+        await begin(runtime, "pay:failed");
+        await fail(runtime, "pay:failed", new CardDeclinedError("do_not_honor"));
+        await settle(runtime, "pay:failed", "late");
+        const failed = await runtime.effects.getEffect("pay:failed");
 
         const restarted = await restart();
         expect(await restarted.effects.getEffect("pay:conflict")).toEqual(conflicted);
+        expect(await restarted.effects.getEffect("pay:failed")).toEqual(failed);
+        expect(failed!.error).toBeInstanceOf(CardDeclinedError);
         expect(await begin(restarted, "pay:pending")).toEqual({ status: "pending" });
         expect(await claim(restarted)).toEqual([]);
         await settle(restarted, "pay:pending", "done");

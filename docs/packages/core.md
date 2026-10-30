@@ -53,14 +53,14 @@ type WorkflowRunOutcome =
   | { status: "failed"; error: Error };
 ```
 
-An event whose `workflowId` has no registered workflow resolves as `failed`. A store wait resolves as `suspended` without `wakeAt`, because a store commit wakes it. A `step.effect` whose outcome is uncertain resolves as `suspended` with `wakeAt` set to now plus its `retryIn`, after it has watched the effect and recorded the unfinished step.
+An event whose `workflowId` has no registered workflow resolves as `failed`. A store wait resolves as `suspended` without `wakeAt`, because a store commit wakes it. A `step.effect` whose outcome is uncertain resolves as `suspended` with `wakeAt` set to now plus its `retryIn`, after it has watched the effect and recorded the unfinished step. On attempt number `maxAttempts`, it records a `WorkflowEffectError` with code `EFFECT_OUTCOME_UNKNOWN` instead.
 
 Two step-write results also reject with an `InfrastructureError`, and both end the delivery without an outcome:
 
 - The write returns `lost` because another claim has taken over. The cause is a `LeaseLostError`.
 - The step is already recorded with a different value. The cause is a `StepConflictError`. The record stands, the delivery ends as a retry, and the next delivery replays the recorded value.
 
-`step.effect` also ends a delivery with an `InfrastructureError`, whose cause is an `EffectDeliveryError`, when it records no step: `EFFECT_CLIENT_UNAVAILABLE` when an `EffectClient` call throws, `EFFECT_RUNTIME_INVARIANT` when it throws `EffectClientInvariantError` (or an error with that `code`) or answers with a malformed response, and `EFFECT_HANDLER_INVALID` when `lookup` or `perform` answers with a malformed response or a value that is not durable. The runner never calls `lookup` or `perform` once the delivery's `signal` has aborted.
+`step.effect` also ends a delivery with an `InfrastructureError`, whose cause is an `EffectDeliveryError`, when it records no step: `EFFECT_CLIENT_UNAVAILABLE` when an `EffectClient` call throws, `EFFECT_RUNTIME_INVARIANT` when it throws `EffectClientInvariantError` (or an error with that `code`) or answers with a malformed response, and `EFFECT_HANDLER_INVALID` when `lookup` or `perform` answers with a malformed response or a value that is not durable, or when `failsOn` throws. The runner never calls `lookup` or `perform` once the delivery's `signal` has aborted.
 
 ## `ExecutionRecord`
 
