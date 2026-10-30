@@ -9,9 +9,9 @@ export type DurableValue =
   | bigint
   | Date
   | Error
-  | DurableValue[]
-  | Map<DurableValue, DurableValue>
-  | Set<DurableValue>
+  | readonly DurableValue[]
+  | ReadonlyMap<DurableValue, DurableValue>
+  | ReadonlySet<DurableValue>
   | DurableObject;
 
 export type DurableObject = { [key: string]: DurableValue };

@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, test } from "vitest";
-import { type Durable, durableValueCodec } from "./durable-value";
+import { type Durable, type DurableValue, durableValueCodec } from "./durable-value";
 
 function canonical(value: unknown) {
   const encoding = durableValueCodec.encode(value);
@@ -361,6 +361,13 @@ describe("Durable<T>", () => {
     expectTypeOf<Durable<{ lines: { qty: number }[] }>>().toEqualTypeOf<{
       lines: { qty: number }[];
     }>();
+  });
+
+  test("is assignable to DurableValue for readonly arrays, maps and sets", () => {
+    expectTypeOf<Durable<readonly { at: Date }[]>>().toExtend<DurableValue>();
+    expectTypeOf<Durable<readonly [string, number]>>().toExtend<DurableValue>();
+    expectTypeOf<Durable<ReadonlyMap<string, number[]>>>().toExtend<DurableValue>();
+    expectTypeOf<Durable<ReadonlySet<string>>>().toExtend<DurableValue>();
   });
 
   test("rejects functions, including inside Maps and Sets", () => {
