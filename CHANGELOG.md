@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- `EffectClient.settle` takes `status: "settled"` with a `result` or `status: "failed"` with an `error`. A `conflict` result, and each `EffectConflictReport`, carry `outcome` and `conflictingOutcome` instead of `result` and `conflictingResult`. `begin` can return `failed` with the stored error, and `EffectRecord.status` can be `failed`, with the error in `error`. `EffectState` and `EffectConflictState` store each side's status. Runtime adapters must store and return failed effects; `registerEffectClientConformance` checks them.
+
 ### Added
+
+- `step.effect` takes an optional `fails(error)`. When `perform` throws and `fails` returns `true`, the effect fails with the error, the step records and throws it, and every execution that begins the same effect ID receives it. `lookup` can return `{ status: "failed", error }`. A second failure keeps the first error without a conflict report.
+- `step.effect` takes an optional `maxAttempts`. When an attempt ends uncertain and it is attempt number `maxAttempts`, the step throws `WorkflowEffectError` with code `EFFECT_OUTCOME_UNKNOWN` instead of suspending, and the effect stays pending.
+- `SqliteEffectClient` adds `status` and `conflicting_status` columns to an existing `effect_conflicts` table, and reads existing conflict reports as conflicts between two results.
 
 - `durableValueCodec` encodes `Date`, `Map`, `Set` and `bigint` as tagged values and decodes them back to the same type, so step results, store state, params, context, effect inputs and results, and workflow results may hold them. Map entries and set values keep their insertion order. Invalid `Date`s, subclasses of these types and instances with own properties are still rejected. `Durable<T>` accepts these types, and still rejects functions.
 - Store updaters can mutate `Date`s, `Map`s and `Set`s in a draft. A write through one of their methods wakes waiters on the value's path.

@@ -194,12 +194,15 @@ The step key names where the call happens in this execution. `effectId` names th
 | `lookup`    | Asks the external system what it knows about `effectId`                                          |
 | `perform`   | Performs the operation under `effectId` and resolves with its result                             |
 | `retryIn`   | Milliseconds to wait before looking up an uncertain outcome again. Finite and not negative       |
+| `fails`     | Optional. Returns `true` when an error thrown by `perform` is a definite failure                 |
+| `maxAttempts` | Optional. How many attempts may end uncertain before the step gives up. A positive integer     |
 
-Before it calls `perform`, the runtime writes a pending effect record for the effect ID, so the record always exists before the operation can start. When a later attempt finds the record still pending, an earlier call may have started or finished, so it calls `lookup` instead of `perform`. `lookup` resolves with one of three answers:
+Before it calls `perform`, the runtime writes a pending effect record for the effect ID, so the record always exists before the operation can start. When a later attempt finds the record still pending, an earlier call may have started or finished, so it calls `lookup` instead of `perform`. `lookup` resolves with one of four answers:
 
 ```ts
 type EffectLookup<T> =
   | { status: "settled"; result: T } // the operation happened; here is its result
+  | { status: "failed"; error: Error } // the operation failed and never will succeed
   | { status: "not-found" } // no call exists, is running, or can still finish
   | { status: "unknown" }; // the system cannot say yet
 ```
@@ -211,12 +214,47 @@ type EffectLookup<T> =
 | The effect is pending                          | Calls `lookup`                                                              |
 | `lookup` returns `not-found`                   | Calls `perform`                                                             |
 | `perform` resolves, or `lookup` returns `settled` | Settles the effect with the result, records the step and returns the result |
-| The effect is already settled                  | Records and returns the settled result, without calling `lookup` or `perform` |
+| `perform` rejects and `fails` returns `true`, or `lookup` returns `failed` | Fails the effect with the error, records the step and throws the error |
+| The effect is already settled or failed        | Records and returns the result, or records and throws the error, without calling `lookup` or `perform` |
 | `lookup` returns `unknown`, or a callback rejects | Suspends the execution until `retryIn` has passed, then begins again      |
+| The attempt ends uncertain and is attempt number `maxAttempts` | Records and throws a `WorkflowEffectError` with code `EFFECT_OUTCOME_UNKNOWN` |
 
-A rejected `lookup` or `perform` counts as `unknown`, because the step cannot tell whether the operation happened. The step suspends, as `step.delay` does, and the delivery ends as `suspended` with `wakeAt` set to now plus `retryIn`. On the next delivery the step begins again and looks up the effect. If another execution settles the effect while this one waits, the runtime wakes this one straight away, and it reads the settled result.
+A rejected `lookup` or `perform` counts as `unknown`, because the step cannot tell whether the operation happened. The step suspends, as `step.delay` does, and the delivery ends as `suspended` with `wakeAt` set to now plus `retryIn`. On the next delivery the step begins again and looks up the effect. If another execution settles or fails the effect while this one waits, the runtime wakes this one straight away, and it reads the stored outcome.
 
-Once settled, an effect never changes. The result is stored in the effect record before the step is recorded, so a crash between the two returns the stored result on the next delivery without calling the external system. Every execution that begins the same effect receives that result.
+Once settled or failed, an effect never changes. The outcome is stored in the effect record before the step is recorded, so a crash between the two returns the stored outcome on the next delivery without calling the external system. Every execution that begins the same effect receives that outcome.
+
+### Definite failures
+
+Many errors prove that an operation did not happen: a declined card, a request that failed validation, a quota that is used up. Without `fails`, the step treats these errors like a timeout. It looks the effect up again after `retryIn`, and it keeps looking until the effect settles. `fails` tells the step which errors are final:
+
+```ts
+const payment = yield* step.effect("charge", {
+  ...chargeEffect,
+  fails: (err) => err instanceof CardDeclinedError,
+});
+```
+
+When `perform` throws and `fails` returns `true`, the runtime fails the effect with the error, records it as the step's error and throws it to workflow code. Replay throws the same error, and every execution that begins the same effect ID receives it without calling `lookup` or `perform`. To try the operation again, use a new effect ID. A thrown value that is not an `Error` is stored as `new Error(String(value))`. Register the error's class with `registerErrorClass` so that replay throws an instance of it (see [Errors in step records](#errors-in-step-records)).
+
+`fails` must return `true` only when the provider has finished the operation and it did not succeed. A timeout, a lost connection or a server error leaves the outcome uncertain, so `fails` must return `false` for them. `fails` is not called for errors thrown by `lookup`: a lookup that fails proves nothing about the operation.
+
+When `lookup` finds an operation that the provider records as failed, it can return `{ status: "failed", error }`, and the step fails the effect in the same way.
+
+### Giving up
+
+Without `maxAttempts`, an effect whose outcome stays unknown keeps the step suspended indefinitely. For example, a `lookup` that throws because a credential was revoked retries every `retryIn` milliseconds. `maxAttempts` sets how many attempts may end uncertain. When an attempt ends uncertain and it is attempt number `maxAttempts`, the step records and throws a `WorkflowEffectError` with code `EFFECT_OUTCOME_UNKNOWN` instead of suspending:
+
+```ts
+try {
+  yield* step.effect("charge", { ...chargeEffect, maxAttempts: 5 });
+} catch (err) {
+  if (err instanceof WorkflowEffectError && err.code === "EFFECT_OUTCOME_UNKNOWN") {
+    // the charge may or may not have happened
+  }
+}
+```
+
+A delivery that ends with an `EffectDeliveryError` does not count as an attempt. The effect stays pending, because the operation may still have happened. A later step that begins the same effect ID calls `lookup` before it calls `perform`, and it counts its own attempts. With `retryIn: 60_000` and `maxAttempts: 5`, the step gives up about four minutes after the first attempt.
 
 `input`, the result of `perform` and a settled `lookup` result must be durable values (see [Step values](#step-values)). A `perform` that resolves with nothing, such as a delete, settles the effect with `undefined`. TypeScript checks `input` and the result with `Durable<T>`.
 
@@ -227,7 +265,8 @@ Once settled, an effect never changes. The result is stored in the effect record
 1. Repeated or concurrent `perform` calls make one operation and return one result.
 2. `not-found` proves that no call was accepted, is running or has completed, and that no earlier call can still finish. A charge still in flight must not be reported as `not-found`, or a second `perform` charges again.
 3. `settled` returns the same result as every successful `perform`, and never changes.
-4. `unknown` means neither the result nor its absence is known yet.
+4. `failed`, and an error for which `fails` returns `true`, mean that the operation finished without success and no call can still succeed.
+5. `unknown` means neither the result nor its absence is known yet.
 
 Many payment and cloud APIs keep the first promise with an idempotency key; pass the effect ID as that key. If an API cannot keep these promises, `step.effect` does not make it safe to call twice.
 
@@ -237,8 +276,9 @@ If workflow code changes while an effect is pending, the new code must still use
 
 `step.effect` throws a `WorkflowEffectError`, which workflow code can catch. Its `code` is:
 
-- `INVALID_EFFECT_REQUEST` when `effectId` or `operation` is not a non-empty string, `input` is not a plain object of durable values, `retryIn` is not finite and non-negative, or `lookup` or `perform` is not a function. Nothing is sent to the runtime's effect records.
+- `INVALID_EFFECT_REQUEST` when `effectId` or `operation` is not a non-empty string, `input` is not a plain object of durable values, `retryIn` is not finite and non-negative, `maxAttempts` is not a positive integer, `lookup` or `perform` is not a function, or `fails` is given and is not a function. Nothing is sent to the runtime's effect records.
 - `EFFECT_REQUEST_MISMATCH` when the effect already exists with a different `operation` or `input`, for example after a deploy changed the amount. Neither callback runs.
+- `EFFECT_OUTCOME_UNKNOWN` when the outcome is still unknown after `maxAttempts` attempts (see [Giving up](#giving-up)).
 
 ```ts
 try {
@@ -250,7 +290,7 @@ try {
 }
 ```
 
-Both are recorded as the step's error, so replay throws the same class and code. Inputs match when their canonical encodings match, so key order does not matter and `{ a: undefined }` differs from `{}`.
+Each is recorded as the step's error, so replay throws the same class and code. Inputs match when their canonical encodings match, so key order does not matter and `{ a: undefined }` differs from `{}`.
 
 The step does not authorize a result: a workflow that submits the same `effectId`, `operation` and `input` receives the stored result.
 
@@ -259,12 +299,12 @@ These failures are not the workflow's to handle, so they do not reach workflow c
 | Code                        | Cause                                                                      |
 | --------------------------- | -------------------------------------------------------------------------- |
 | `EFFECT_CLIENT_UNAVAILABLE` | The runtime's effect records could not be reached. Usually recovers by itself |
-| `EFFECT_HANDLER_INVALID`    | `lookup` returned a malformed answer, or a result is not a durable value   |
+| `EFFECT_HANDLER_INVALID`    | `lookup` returned a malformed answer, a result is not a durable value, or `fails` threw |
 | `EFFECT_RUNTIME_INVARIANT`  | The runtime's effect records hold invalid data or behaved incorrectly      |
 
 The last two need an operator's repair if they persist. The effect stays pending until a delivery settles it.
 
-If two calls settle one effect with different results, which only happens when the external system breaks its guarantees, the first result stays settled and is returned. The runtime logs a warning with both results and keeps a permanent conflict report on the effect record for operators.
+If two calls settle one effect with different outcomes, which only happens when the external system breaks its guarantees, the first outcome stays and is returned. The runtime logs a warning with both outcomes and keeps a permanent conflict report on the effect record for operators. Two failures with different errors do not conflict: the first error stays, without a report.
 
 Effect records outlive executions. Cancelling or pruning an execution with a pending effect does not cancel the external operation, and the effect may still settle.
 
